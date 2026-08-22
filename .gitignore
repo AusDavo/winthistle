@@ -18,8 +18,10 @@ winthistle.toml
 *.db-wal
 *.sqlite
 *.sqlite3
-runs/
-journal/
+# Anchored to the repo root on purpose. Unanchored, `journal/` also matches
+# internal/journal/ — the run journal's *source*, silently un-committable.
+/runs/
+/journal/
 
 # --- PSBTs and wallet exports: xpubs deanonymise the whole wallet ---
 *.psbt

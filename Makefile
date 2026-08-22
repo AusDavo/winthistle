@@ -38,8 +38,13 @@ lint:  ## refuse a tracked executable that has no shebang
 test-unit:  ## tests that need no harness
 > go test -short -count=1 ./...
 
+# -p 1 is not a performance knob. Two harness-backed packages now exist, and
+# `go test ./...` runs package binaries concurrently by default — which puts two
+# test processes through the *same* alice, where one test's plain channel open
+# leases the coins another test's psbt_verify is about to be judged against. That
+# fails with lnd's reserved-value error, which says nothing about the real cause.
 test:  ## everything; harness-backed tests skip if regtest is down
-> go test -count=1 -timeout 20m ./...
+> go test -p 1 -count=1 -timeout 20m ./...
 
 check: lint vet test  ## lint, vet and test
 
