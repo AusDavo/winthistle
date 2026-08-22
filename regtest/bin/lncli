@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# lncli against one node, named first.  ./bin/lncli alice getinfo
+set -euo pipefail
+cd "$(dirname "$0")/.."
+node=${1:?usage: lncli <alice|bob|carol|dave> <args...>}; shift
+exec docker compose exec -T "$node" lncli --network=regtest "$@"

@@ -36,3 +36,7 @@ descriptors*.json
 .idea/
 .vscode/
 *.swp
+
+# regtest harness runtime output
+regtest/creds/
+regtest/__pycache__/

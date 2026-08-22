@@ -1,0 +1,105 @@
+# Winthistle regtest harness: one bitcoind, one "our" LND node (alice) and three
+# peers. Batch sizes up to n=3 are testable; comment out dave for a lighter run.
+#
+# Data lives in named volumes rather than bind mounts, deliberately: it dodges
+# the uid-mismatch trap and it keeps this file usable against a remote daemon
+# (docker context create --docker host=ssh://...). Credentials are lifted out
+# with `make creds` instead.
+name: winthistle-regtest
+
+x-lnd: &lnd
+  image: polarlightning/lnd:${LND_VERSION}
+  restart: unless-stopped
+  environment:
+    USERID: ${USERID}
+    GROUPID: ${GROUPID}
+  depends_on:
+    bitcoind:
+      condition: service_healthy
+  healthcheck:
+    test: ["CMD-SHELL", "lncli --network=regtest getinfo >/dev/null 2>&1"]
+    interval: 5s
+    timeout: 5s
+    retries: 40
+    start_period: 10s
+
+services:
+  bitcoind:
+    image: polarlightning/bitcoind:${BITCOIND_VERSION}
+    container_name: wt-bitcoind
+    restart: unless-stopped
+    environment:
+      USERID: ${USERID}
+      GROUPID: ${GROUPID}
+    command: >-
+      bitcoind
+      -server=1
+      -regtest=1
+      -rpcbind=0.0.0.0
+      -rpcallowip=0.0.0.0/0
+      -rpcport=18443
+      -rpcuser=${RPCUSER}
+      -rpcpassword=${RPCPASS}
+      -txindex=1
+      -listen=1
+      -listenonion=0
+      -dnsseed=0
+      -upnp=0
+      -fallbackfee=0.0002
+      -zmqpubrawblock=tcp://0.0.0.0:28334
+      -zmqpubrawtx=tcp://0.0.0.0:28335
+    ports:
+      - "18443:18443"
+    volumes:
+      - bitcoind:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -regtest -rpcuser=${RPCUSER} -rpcpassword=${RPCPASS} getblockchaininfo >/dev/null 2>&1"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 5s
+
+  # alice is "our" node — the one Winthistle drives.
+  alice:
+    <<: *lnd
+    container_name: wt-alice
+    command: lnd --alias=alice --tlsextradomain=alice --externalip=alice ${LND_FLAGS}
+    ports:
+      - "10009:10009"
+      - "8080:8080"
+    volumes:
+      - alice:/home/lnd/.lnd
+
+  bob:
+    <<: *lnd
+    container_name: wt-bob
+    command: lnd --alias=bob --tlsextradomain=bob --externalip=bob ${LND_FLAGS}
+    ports:
+      - "10010:10009"
+    volumes:
+      - bob:/home/lnd/.lnd
+
+  carol:
+    <<: *lnd
+    container_name: wt-carol
+    command: lnd --alias=carol --tlsextradomain=carol --externalip=carol ${LND_FLAGS}
+    ports:
+      - "10011:10009"
+    volumes:
+      - carol:/home/lnd/.lnd
+
+  dave:
+    <<: *lnd
+    container_name: wt-dave
+    command: lnd --alias=dave --tlsextradomain=dave --externalip=dave ${LND_FLAGS}
+    ports:
+      - "10012:10009"
+    volumes:
+      - dave:/home/lnd/.lnd
+
+volumes:
+  bitcoind:
+  alice:
+  bob:
+  carol:
+  dave:
