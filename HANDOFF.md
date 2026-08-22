@@ -21,9 +21,22 @@ mainnet and the abort paths work.
 | `internal/abort` | `CancelShim`, `AbandonPending`, `Run` — the three abort paths |
 | `internal/regtestenv` | test support: drives a funding stream far enough to abort it |
 
-`make check` vets and runs everything. `make test-unit` (`-short`) is the subset
-that needs no harness; the harness-backed tests skip with a reason when regtest
-is down, so a bare `go test ./...` is honest either way.
+`make check` lints, vets and runs everything. `make test-unit` (`-short`) is the
+subset that needs no harness; the harness-backed tests skip with a reason when
+regtest is down, so a bare `go test ./...` is honest either way. A fresh clone
+needs `make harness` first — `regtest/creds/` is gitignored, so until it exists
+every harness-backed test skips.
+
+`make lint` refuses a tracked executable with no shebang. That is not a style
+rule: `/bin/sh` does not decline a file it cannot understand, it interprets it,
+which is how `regtest/verify.py` fork-bombed this machine. Recipes now name their
+interpreter so nothing depends on a shebang, and the lint stops the next such
+file being committed.
+
+`.claude/settings.json` allowlists this repo's loop (`go`, `gofmt`, `make`,
+`docker compose`, `sg docker`). Note it is committed and therefore shared, and
+`make`/`go` run code from the repo — which is no more than anyone working here
+would do by hand, but it is a deliberate choice rather than an oversight.
 
 ## Docker on this machine
 
