@@ -8,6 +8,9 @@ winthistle.toml
 *.local.toml
 .env
 .env.*
+# ...but the regtest harness's .env is required for it to run, and holds only
+# version pins and deliberately-fake regtest credentials.
+!regtest/.env
 
 # --- Run state: contains outpoints, peer sets, raw transactions ---
 *.db
