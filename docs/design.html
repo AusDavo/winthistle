@@ -227,6 +227,7 @@ td:first-child{font-weight:600; color:var(--ink)}
 .s-loss{background:var(--hazard-soft); color:var(--hazard)}
 .s-stuck{background:var(--amber-soft); color:var(--amber)}
 .s-cost{background:var(--surface-2); color:var(--ink-2)}
+.s-proven{background:var(--teal-soft); color:var(--teal)}
 
 /* ---------- misc blocks ---------- */
 pre{
@@ -436,7 +437,7 @@ footer p{font-size:.9rem; color:var(--muted)}
       <span class="lbl">Consequence for the build order</span>The abort and recovery paths must therefore be working <em>before</em> the first mainnet probe, since the probe's normal termination <em>is</em> the abort path. That inverts the usual order: <code>shim_cancel</code>, <code>AbandonChannel</code> and the UTXO-lock release ship first, and the happy path is built on top of them.
     </div>
     <div class="note warn">
-      <span class="lbl">Which abandon flag</span>Use <code>pending_funding_shim_only</code>, not <code>i_know_what_i_am_doing</code>. The former refuses unless the channel is both shim-funded and pending, so it structurally cannot touch a confirmed channel. One caveat from <code>rpcserver.go</code>: "shim funded" is inferred from <code>ThawHeight &gt; 0</code> — there is a standing <code>TODO</code> about storing the funding type properly — so it may not recognise a plain PSBT open with no thaw height. The app tries the safe flag first and only falls back to the blunt one on that specific rejection, with an explicit confirmation.
+      <span class="lbl">Which abandon flag</span>Try <code>pending_funding_shim_only</code> first: it refuses unless the channel is both shim-funded and pending, so it structurally cannot touch a confirmed channel. <strong>On regtest it refuses every channel this app opens.</strong> <code>rpcserver.go</code> infers "shim funded" from <code>ThawHeight &gt; 0</code> — there is a standing <code>TODO</code> about storing the funding type properly — and a plain PSBT open carries no thaw height, so the safe flag rejects with <em>"channel … is not externally funded or not pending"</em> on the ordinary path. The fallback to <code>i_know_what_i_am_doing</code> is therefore the standard route rather than an edge case, which moves the burden of safety off LND's flag and onto ours: before escalating, the app re-establishes the missing half of the check itself by asking <code>PendingChannels</code>. If the channel is not pending it refuses outright and offers no confirmation, because there is nothing a human could usefully authorise there.
     </div>
   </div>
 </section>
@@ -643,6 +644,8 @@ allow_rbf                   = false <i># I·4; not operator-adjustable</i></pre>
           <tr><td>Fee drain at LND default policy</td><td><span class="sev s-cost">sats</span></td><td>Per-peer policy chosen in Phase 0, applied by <code>UpdateChannelPolicy</code> the moment each channel goes active.</td></tr>
           <tr><td>Public and private channels batched together</td><td><span class="sev s-cost">privacy</span></td><td>Warn and offer to split into separate batches — a mixed batch correlates the announced and unannounced channels to one node.</td></tr>
           <tr><td>Unconfirmed or already-spent inputs</td><td><span class="sev s-stuck">stuck batch</span></td><td>Confirmed-only coin selection; Core locks the chosen UTXOs for the duration of the run.</td></tr>
+          <tr><td>Abandon removes a channel that is not pending</td><td><span class="sev s-loss">funds lost</span></td><td>LND's safe flag rejects every shim open here, so the blunt flag is the normal route and cannot be the gate. Before escalating, the app re-checks <code>PendingChannels</code> itself and refuses a channel that is not pending — no confirmation is offered, because none would be meaningful.</td></tr>
+          <tr><td>Coin locks outlive a failed run</td><td><span class="sev s-stuck">wallet will not spend</span></td><td>Core validates a whole <code>lockunspent</code> list before applying any of it, so one stale outpoint frees none — and its locks are memory-only, so a Core restart makes every journalled outpoint stale at once. The release filters against the live lock set and reports what it actually freed; <code>doctor</code> lists orphans.</td></tr>
           <tr><td>Fee rate too low to confirm</td><td><span class="sev s-stuck">channels stay pending</span></td><td>Rate chosen against a live estimate with a floor, and change sized so CPFP remains viable at several multiples of it.</td></tr>
         </tbody>
       </table>
@@ -703,6 +706,7 @@ allow_rbf                   = false <i># I·4; not operator-adjustable</i></pre>
           <li>Base64, file and QR transports</li>
           <li>Reserve top-up and post-open policy application</li>
           <li>Cold probe mode, and the recovery paths it depends on</li>
+          <li>A regtest harness, built before the happy path — it has already caught three faults that would otherwise have been paid for in mainnet probe time</li>
         </ul>
       </div>
       <div class="card">
@@ -712,7 +716,7 @@ allow_rbf                   = false <i># I·4; not operator-adjustable</i></pre>
           <li>Core Lightning — a different flow shape (<code>openchannel_init</code> / <code>_update</code> / <code>_signed</code>), worth a real abstraction rather than a branch</li>
           <li>Automated fee-bumping beyond the manual CPFP offer</li>
           <li>Taproot MuSig2 funding outputs</li>
-          <li>A signet or regtest harness — the cold probe covers it more cheaply</li>
+          <li>A signet deployment — needed only for the descriptor-import rescan, which regtest has no history to exercise</li>
           <li>Anything resembling a hosted deployment</li>
         </ul>
       </div>
@@ -724,10 +728,10 @@ allow_rbf                   = false <i># I·4; not operator-adjustable</i></pre>
   <div class="band">
     <div class="gut eyebrow"><b>Open</b>verify first</div>
     <h2>Claims the cold probe has to settle</h2>
-    <p>Each of these is load-bearing, and all but the last two are answered by a single cold probe. None should be taken on faith from documentation, including this document — the items marked as settled were read out of LND's source, which is better evidence than prose but still not a passing test.</p>
+    <p>Each of these is load-bearing, and all but the last two are answered by a single cold probe. None should be taken on faith from documentation, including this document. Items marked <span class="sev s-cost">settled in source</span> were read out of LND's source — better evidence than prose, but still not a passing test. Items marked <span class="sev s-proven">proven on regtest</span> have one.</p>
     <ul class="plain">
-      <li>Does <code>shim_cancel</code> still succeed <em>after</em> a successful <code>psbt_verify</code>? The whole re-arm story depends on it.</li>
-      <li><span class="sev s-cost">settled in source</span> Does <code>psbt_finalize</code> with <code>no_publish</code> emit <code>chan_pending</code> without broadcasting? Yes — <code>NoFundingTxBit</code> skips only the broadcast block in <code>handleFundingSigned</code>, between <code>CompleteReservation</code> and the update. Confirm it empirically anyway; the gate depends on it.</li>
+      <li><span class="sev s-proven">proven on regtest</span> Does <code>shim_cancel</code> still succeed <em>after</em> a successful <code>psbt_verify</code>? Yes. The intent lives in <code>LightningWallet.fundingIntents</code>, and <code>psbt_verify</code> only attaches a verified packet to it, so cancelling still finds and clears it. Re-arming after a lapsed window is therefore free, as the phase model assumes.</li>
+      <li><span class="sev s-proven">proven on regtest</span> Does <code>psbt_finalize</code> with <code>no_publish</code> emit <code>chan_pending</code> without broadcasting? Yes — <code>NoFundingTxBit</code> clears <code>ChanType.HasFundingTx()</code>, which is the condition gating the broadcast block in <code>handleFundingSigned</code>, between <code>CompleteReservation</code> and the update. Observed for one channel: <code>chan_pending</code> arrives and the transaction is absent from the mempool. Still to observe for <em>n</em> at once, which is the form the gate actually relies on.</li>
       <li>Exactly when does each peer's ten-minute clock start — at <code>OpenChannel</code>, or at the peer's <code>accept_channel</code>? Determines what the countdown should actually display.</li>
       <li>What does <code>RequiredReserve</code> return for private channels, given the field is named <code>additional_public_channels</code>?</li>
       <li><span class="sev s-stuck">past broadcast</span> Will <code>UpdateChannelPolicy</code> accept a channel point that is pending but not yet active, or must Phase 2 poll? Assume it must, and the question stops mattering.</li>
