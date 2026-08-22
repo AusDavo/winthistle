@@ -16,8 +16,10 @@ x-lnd: &lnd
   depends_on:
     bitcoind:
       condition: service_healthy
+    chain-init:
+      condition: service_completed_successfully
   healthcheck:
-    test: ["CMD-SHELL", "lncli --network=regtest getinfo >/dev/null 2>&1"]
+    test: ["CMD-SHELL", "lncli --network=regtest --lnddir=/home/lnd/.lnd getinfo >/dev/null 2>&1"]
     interval: 5s
     timeout: 5s
     retries: 40
@@ -58,6 +60,31 @@ services:
       timeout: 5s
       retries: 30
       start_period: 5s
+
+  # Runs once per `up`, then exits. Idempotent: only mines if the chain is short.
+  chain-init:
+    image: polarlightning/bitcoind:${BITCOIND_VERSION}
+    container_name: wt-chain-init
+    restart: "no"
+    depends_on:
+      bitcoind:
+        condition: service_healthy
+    environment:
+      RPCUSER: ${RPCUSER}
+      RPCPASS: ${RPCPASS}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        BC="bitcoin-cli -regtest -rpcconnect=bitcoind -rpcport=18443 -rpcuser=$$RPCUSER -rpcpassword=$$RPCPASS"
+        $$BC -named createwallet wallet_name=miner descriptors=true >/dev/null 2>&1 \
+          || $$BC loadwallet miner >/dev/null 2>&1 || true
+        H=$$($$BC getblockcount)
+        if [ "$$H" -lt 101 ]; then
+          A=$$($$BC -rpcwallet=miner getnewaddress)
+          $$BC generatetoaddress $$((101 - H)) "$$A" >/dev/null
+        fi
+        echo "chain-init: height $$($$BC getblockcount)"
 
   # alice is "our" node — the one Winthistle drives.
   alice:

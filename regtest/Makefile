@@ -2,7 +2,7 @@
 # Uses .RECIPEPREFIX so recipes are '>' rather than tabs.
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help up down clean reset bootstrap cold creds mine info logs ps
+.PHONY: help up down clean reset bootstrap cold creds verify mine info logs ps
 
 NODES := alice bob carol dave
 N ?= 6
@@ -20,7 +20,7 @@ clean:  ## stop and destroy all state, including volumes
 > docker compose down -v
 > rm -rf creds __pycache__
 
-reset: clean up bootstrap cold creds  ## destroy everything and rebuild from scratch
+reset: clean up bootstrap cold creds verify  ## destroy everything and rebuild from scratch
 > @echo
 > @echo "Harness ready. alice is your node: localhost:10009"
 
@@ -38,6 +38,9 @@ creds:  ## copy each node's tls.cert and admin.macaroon into ./creds
 >     creds/$$n/admin.macaroon; \
 >   echo "creds/$$n/"; \
 > done
+
+verify:  ## prove the 2-of-2 fixture works end to end (broadcasts nothing)
+> ./verify.py
 
 mine:  ## mine blocks: make mine N=6
 > @addr=$$(./bin/bcli -rpcwallet=miner getnewaddress); \

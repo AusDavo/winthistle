@@ -3,4 +3,5 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 node=${1:?usage: lncli <alice|bob|carol|dave> <args...>}; shift
-exec docker compose exec -T "$node" lncli --network=regtest "$@"
+# exec runs as root, whose ~ is /root — LND's data lives under the lnd user.
+exec docker compose exec -T "$node" lncli --network=regtest --lnddir=/home/lnd/.lnd "$@"
