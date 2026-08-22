@@ -1,0 +1,38 @@
+# --- Secrets and node credentials: never commit ---
+*.macaroon
+*.cert
+*.key
+*.pem
+.cookie
+winthistle.toml
+*.local.toml
+.env
+.env.*
+
+# --- Run state: contains outpoints, peer sets, raw transactions ---
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+runs/
+journal/
+
+# --- PSBTs and wallet exports: xpubs deanonymise the whole wallet ---
+*.psbt
+*.txn
+descriptors*.json
+*wallet-export*
+!testdata/**/*.psbt
+
+# --- Build output ---
+/winthistle
+/dist/
+/build/
+*.exe
+
+# --- Editor / OS ---
+.DS_Store
+.idea/
+.vscode/
+*.swp

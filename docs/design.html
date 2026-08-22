@@ -1,0 +1,746 @@
+<title>Winthistle Channel Opener</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Saira+Semi+Condensed:wght@500;600;700&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
+<style>
+:root{
+  --ground:#EEF1F2; --surface:#FCFDFD; --surface-2:#E5EAEB;
+  --ink:#111819; --ink-2:#3C4A4C; --muted:#5C6A6D;
+  --rule:#D2DADB; --rule-2:#BCC7C9;
+  --teal:#0E6B6D; --teal-soft:#DDEBEB;
+  --amber:#8F5800; --amber-soft:#F3E7D2;
+  --hazard:#A02A1E; --hazard-soft:#F4DFDC;
+  --shadow:0 1px 2px rgba(17,24,25,.05), 0 8px 24px -16px rgba(17,24,25,.22);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0C1112; --surface:#131A1B; --surface-2:#1B2425;
+    --ink:#E3EAEA; --ink-2:#C0CBCC; --muted:#879799;
+    --rule:#232D2F; --rule-2:#313E40;
+    --teal:#48BFBD; --teal-soft:#12302F;
+    --amber:#DFA23F; --amber-soft:#332612;
+    --hazard:#EC7C6B; --hazard-soft:#361A16;
+    --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0C1112; --surface:#131A1B; --surface-2:#1B2425;
+  --ink:#E3EAEA; --ink-2:#C0CBCC; --muted:#879799;
+  --rule:#232D2F; --rule-2:#313E40;
+  --teal:#48BFBD; --teal-soft:#12302F;
+  --amber:#DFA23F; --amber-soft:#332612;
+  --hazard:#EC7C6B; --hazard-soft:#361A16;
+  --shadow:0 1px 2px rgba(0,0,0,.4), 0 8px 24px -16px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4",Charter,Georgia,serif;
+  font-size:17.5px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+  padding:0 1.25rem 8rem;
+}
+::selection{background:var(--teal-soft); color:var(--ink)}
+a{color:var(--teal); text-decoration-thickness:1px; text-underline-offset:2px}
+a:focus-visible,summary:focus-visible{outline:2px solid var(--teal); outline-offset:3px; border-radius:2px}
+
+/* ---------- band grid: gutter | measure | gutter ---------- */
+.band{
+  display:grid; justify-content:center;
+  grid-template-columns:minmax(0,7rem) minmax(0,66ch) minmax(0,7rem);
+  column-gap:2.25rem;
+}
+.band>*{grid-column:2; min-width:0}
+.band>.gut{grid-column:1; justify-self:end; text-align:right}
+.band>.wide{grid-column:1 / -1}
+@media (max-width:900px){
+  .band{grid-template-columns:minmax(0,66ch); justify-content:center; column-gap:0}
+  .band>*,.band>.gut,.band>.wide{grid-column:1}
+  .band>.gut{justify-self:start; text-align:left}
+}
+
+/* ---------- type roles ---------- */
+h1,h2,h3,.disp{
+  font-family:"Saira Semi Condensed","Saira",Helvetica,Arial,sans-serif;
+  font-weight:600; letter-spacing:-.005em; text-wrap:balance;
+}
+h1{font-size:clamp(2.6rem,6.5vw,3.9rem); line-height:1.02; font-weight:700; margin:0}
+h2{font-size:1.85rem; line-height:1.12; margin:0}
+h3{font-size:1.18rem; line-height:1.25; margin:0; letter-spacing:.005em}
+.lbl,.eyebrow{
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.66rem; font-weight:500; letter-spacing:.14em; text-transform:uppercase;
+}
+.eyebrow{color:var(--muted); padding-top:.55rem; line-height:1.5}
+.eyebrow b{display:block; color:var(--teal); font-weight:600}
+code,kbd,.mono{
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:.855em; font-variant-ligatures:none;
+}
+p code,li code,td code{
+  background:var(--surface-2); border-radius:3px; padding:.1em .32em;
+  color:var(--ink); white-space:nowrap;
+}
+p{margin:0}
+strong{font-weight:600; color:var(--ink)}
+.dim{color:var(--muted)}
+
+/* ---------- flow ---------- */
+section{padding:3.25rem 0; border-top:1px solid var(--rule)}
+section>.band{row-gap:1.15rem}
+section:first-of-type{border-top:0}
+
+/* ---------- masthead ---------- */
+header{padding:5rem 0 3.5rem}
+header .band{row-gap:1.5rem}
+.wordmark{display:flex; align-items:baseline; gap:.7rem; flex-wrap:wrap}
+.wordmark .tag{
+  font-family:"IBM Plex Mono",monospace; font-size:.7rem; letter-spacing:.12em;
+  text-transform:uppercase; color:var(--teal);
+  border:1px solid var(--teal); border-radius:999px; padding:.2rem .55rem;
+}
+.standfirst{font-size:1.24rem; line-height:1.5; color:var(--ink-2); max-width:54ch}
+.facts{
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(9.5rem,1fr));
+  gap:1px; background:var(--rule); border:1px solid var(--rule);
+  border-radius:4px; overflow:hidden; margin-top:.75rem;
+}
+.facts div{background:var(--surface); padding:.85rem 1rem}
+.facts dt{margin:0 0 .3rem}
+.facts dd{margin:0; font-family:"IBM Plex Mono",monospace; font-size:.82rem; color:var(--ink)}
+
+/* ---------- callouts ---------- */
+.invariants{display:grid; gap:.75rem; margin-top:.4rem}
+.inv{
+  display:grid; grid-template-columns:auto 1fr; gap:0 1rem;
+  background:var(--surface); border:1px solid var(--rule);
+  border-left:3px solid var(--hazard); border-radius:0 4px 4px 0;
+  padding:1rem 1.15rem;
+}
+.inv .n{
+  font-family:"IBM Plex Mono",monospace; font-size:.72rem; font-weight:600;
+  color:var(--hazard); padding-top:.28rem; letter-spacing:.06em;
+}
+.inv h3{margin-bottom:.3rem}
+.inv p{font-size:.98rem; color:var(--ink-2)}
+
+.note{
+  background:var(--surface); border:1px solid var(--rule);
+  border-left:3px solid var(--teal); border-radius:0 4px 4px 0;
+  padding:.95rem 1.15rem; font-size:.99rem; color:var(--ink-2);
+}
+.note.warn{border-left-color:var(--amber)}
+.note .lbl{display:block; color:var(--muted); margin-bottom:.35rem}
+
+/* ---------- ladder ---------- */
+.ladder{
+  border:1px solid var(--rule); border-radius:5px; overflow:hidden;
+  background:var(--surface); box-shadow:var(--shadow);
+}
+.ladder .row{
+  display:grid; grid-template-columns:2.6rem 6.2rem 1fr;
+  gap:0 1rem; padding:.85rem 1.15rem; border-top:1px solid var(--rule);
+  align-items:baseline;
+}
+.ladder .row:first-child{border-top:0; background:var(--surface-2)}
+.ladder .row.head span{font-family:"IBM Plex Mono",monospace; font-size:.66rem; letter-spacing:.14em; text-transform:uppercase; color:var(--muted)}
+.ladder .n{font-family:"IBM Plex Mono",monospace; font-size:.9rem; font-weight:600; color:var(--teal); font-variant-numeric:tabular-nums}
+.actor{
+  font-family:"IBM Plex Mono",monospace; font-size:.66rem; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase;
+  border-radius:3px; padding:.15rem .4rem; display:inline-block; white-space:nowrap;
+}
+.a-app{background:var(--teal-soft); color:var(--teal)}
+.a-lnd{background:var(--surface-2); color:var(--ink-2)}
+.a-sig{background:var(--amber-soft); color:var(--amber)}
+.a-net{background:var(--hazard-soft); color:var(--hazard)}
+.ladder .what{font-size:.99rem}
+.ladder .what .mono{font-size:.8rem; color:var(--ink-2); display:block; margin-top:.2rem; overflow-wrap:anywhere}
+.ladder .row.gate{background:var(--amber-soft)}
+.ladder .row.gate .n{color:var(--amber)}
+
+/* ---------- gauge ---------- */
+.gauge{margin-top:.5rem}
+.gauge .scale{
+  position:relative; height:3.4rem; background:var(--surface);
+  border:1px solid var(--rule); border-radius:4px; overflow:hidden;
+}
+.gauge .ticks{
+  position:absolute; inset:0;
+  background-image:repeating-linear-gradient(to right,var(--rule-2) 0 1px,transparent 1px 10%);
+}
+.gauge .seg{position:absolute; top:0; bottom:0; display:flex; align-items:center; justify-content:center}
+.gauge .fixed{background:var(--teal-soft); border-right:1px solid var(--teal)}
+.gauge .sign{background:var(--amber-soft)}
+.gauge .over{background:var(--hazard-soft)}
+.gauge .abort{position:absolute; top:0; bottom:0; width:2px; background:var(--hazard)}
+.gauge .seg span{
+  font-family:"IBM Plex Mono",monospace; font-size:.62rem; letter-spacing:.1em;
+  text-transform:uppercase; color:var(--ink-2); padding:0 .4rem; text-align:center;
+}
+.gauge .axis{
+  display:flex; justify-content:space-between; margin-top:.4rem;
+  font-family:"IBM Plex Mono",monospace; font-size:.66rem; color:var(--muted);
+  font-variant-numeric:tabular-nums;
+}
+.gauge .key{display:flex; flex-wrap:wrap; gap:.4rem 1.25rem; margin-top:.7rem; font-size:.88rem; color:var(--ink-2)}
+.gauge .key i{display:inline-block; width:.7rem; height:.7rem; border-radius:2px; margin-right:.4rem; vertical-align:baseline}
+
+/* ---------- phases ---------- */
+.phase{
+  background:var(--surface); border:1px solid var(--rule); border-radius:5px;
+  padding:1.35rem 1.5rem; display:grid; gap:.7rem;
+}
+.phase+.phase{margin-top:.9rem}
+.phase .hd{display:flex; align-items:baseline; gap:.75rem; flex-wrap:wrap}
+.phase .num{
+  font-family:"Saira Semi Condensed",sans-serif; font-weight:700; font-size:1.6rem;
+  color:var(--rule-2); line-height:1; font-variant-numeric:tabular-nums;
+}
+.phase .clock{
+  font-family:"IBM Plex Mono",monospace; font-size:.64rem; letter-spacing:.1em;
+  text-transform:uppercase; padding:.18rem .45rem; border-radius:3px;
+}
+.phase.timed{border-left:3px solid var(--amber)}
+.phase.timed .clock{background:var(--amber-soft); color:var(--amber)}
+.phase.untimed .clock{background:var(--surface-2); color:var(--muted)}
+.phase ol,.phase ul{margin:0; padding-left:1.35rem; display:grid; gap:.45rem; font-size:1rem}
+.phase li::marker{color:var(--muted); font-family:"IBM Plex Mono",monospace; font-size:.85em}
+
+/* ---------- tables ---------- */
+.tblwrap{overflow-x:auto; border:1px solid var(--rule); border-radius:5px; background:var(--surface)}
+table{border-collapse:collapse; width:100%; min-width:44rem; font-size:.95rem}
+th,td{text-align:left; padding:.72rem .95rem; border-top:1px solid var(--rule); vertical-align:top}
+thead th{
+  border-top:0; background:var(--surface-2); color:var(--muted);
+  font-family:"IBM Plex Mono",monospace; font-size:.64rem; font-weight:500;
+  letter-spacing:.13em; text-transform:uppercase; white-space:nowrap;
+}
+tbody tr:hover{background:var(--surface-2)}
+td:first-child{font-weight:600; color:var(--ink)}
+.sev{
+  font-family:"IBM Plex Mono",monospace; font-size:.6rem; font-weight:600;
+  letter-spacing:.1em; text-transform:uppercase; padding:.16rem .4rem;
+  border-radius:3px; white-space:nowrap;
+}
+.s-loss{background:var(--hazard-soft); color:var(--hazard)}
+.s-stuck{background:var(--amber-soft); color:var(--amber)}
+.s-cost{background:var(--surface-2); color:var(--ink-2)}
+
+/* ---------- misc blocks ---------- */
+pre{
+  margin:0; background:var(--surface); border:1px solid var(--rule); border-radius:5px;
+  padding:1rem 1.15rem; overflow-x:auto; font-size:.82rem; line-height:1.6; color:var(--ink-2);
+}
+pre b{color:var(--teal); font-weight:600}
+pre i{color:var(--muted); font-style:normal}
+ul.plain{margin:0; padding-left:1.35rem; display:grid; gap:.5rem}
+ul.plain li::marker{color:var(--rule-2)}
+.split{display:grid; grid-template-columns:repeat(auto-fit,minmax(15rem,1fr)); gap:.9rem}
+.card{background:var(--surface); border:1px solid var(--rule); border-radius:5px; padding:1.1rem 1.2rem; display:grid; gap:.5rem; align-content:start}
+.card .lbl{color:var(--teal)}
+.card p{font-size:.96rem; color:var(--ink-2)}
+.tree{display:grid; gap:.55rem; font-size:.99rem}
+.tree div{border-left:2px solid var(--rule-2); padding:.15rem 0 .15rem .9rem}
+.tree div.no{border-left-color:var(--teal)}
+.tree div.yes{border-left-color:var(--hazard)}
+.tree .q{font-weight:600; border-left-color:var(--ink-2); font-family:"Saira Semi Condensed",sans-serif; font-size:1.08rem}
+footer{padding:3.5rem 0 0; border-top:1px solid var(--rule)}
+footer .band{row-gap:.6rem}
+footer p{font-size:.9rem; color:var(--muted)}
+@media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important}}
+</style>
+
+<header>
+  <div class="band">
+    <div class="gut eyebrow"><b>Design</b>rev 1<br>draft</div>
+    <div class="wordmark">
+      <h1>Winthistle</h1>
+      <span class="tag">Channel Opener</span>
+    </div>
+    <p class="standfirst">A local, guided interface for opening a batch of Lightning channels in one transaction, funded straight from cold storage — including multisig cold storage — without the tmux choreography.</p>
+    <dl class="facts">
+      <div><dt class="lbl">Node</dt><dd>LND ≥ 0.18</dd></div>
+      <div><dt class="lbl">PSBT engine</dt><dd>Core or Sparrow</dd></div>
+      <div><dt class="lbl">Signing</dt><dd>external only</dd></div>
+      <div><dt class="lbl">Deployment</dt><dd>localhost / tailnet</dd></div>
+    </dl>
+  </div>
+</header>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Premise</b>what this replaces</div>
+    <h2>The work is coordination, not cryptography</h2>
+    <p>The manual process works. What makes it arduous is that a human is holding the state machine in their head: which pane is which peer, which prompt wants base64 and which wants raw hex, which pane has <code>--no_publish</code>, how much reserve LND will demand once the new channels exist, and how many of the ten minutes are left. Every one of those is mechanical, and every one of them is a place to lose a channel — or, in the worst case, coins.</p>
+    <p>So this tool owns the state machine and the clock, and hands the human back exactly two jobs: <strong>approve the transaction</strong> and <strong>sign it</strong>. Nothing else should require a decision under time pressure.</p>
+    <div class="note">
+      <span class="lbl">Scope</span>One LND node, one funding transaction, <em>n</em> channels, funded by an external single-sig or <em>m</em>-of-<em>n</em> wallet whose keys never touch this machine.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Invariants</b>load-bearing</div>
+    <h2>Four rules that shape everything else</h2>
+    <p>These come from LND's own protocol constraints, not from preference, and each is enforced in code as a gate rather than documented as advice. The first one is the reason this tool can claim that no channel in a batch is ever left unrecoverable.</p>
+    <div class="invariants wide">
+      <div class="inv">
+        <span class="n">I·1</span>
+        <div>
+          <h3>Publish only once every channel is already recoverable.</h3>
+          <p>LND's "DO NOT PUBLISH" warning is about <em>ordering</em>, not authorship. The condition that actually matters is that the transaction must not reach the network before every channel has received its peer's <code>funding_signed</code> — the counterparty signature on our initial commitment transaction, which is precisely what lets a force-close recover the funds.</p>
+          <p>In <code>funding/manager.go</code>, <code>chan_pending</code> is emitted strictly <em>after</em> <code>CompleteReservation(nil, commitSig)</code> has stored that signature and after <code>WatchNewChannel</code> has handed the outpoint to the ChainArbitrator. So <strong><em>n</em> <code>chan_pending</code> events is exactly the safe condition</strong> — and we gate on it: <code>no_publish</code> is set on <em>every</em> channel, not all but the last. Once all <em>n</em> report pending, we publish. There is no ordering in which the transaction can reach the network while any channel is still unrecoverable, because we hold the only copy of it until the gate opens.</p>
+        </div>
+      </div>
+      <div class="inv">
+        <span class="n">I·2</span>
+        <div>
+          <h3>The app holds the last signature.</h3>
+          <p>I·1 is only true if nothing <em>else</em> can broadcast. A fully-signed transaction is a bearer instrument: any party holding one can publish it, buggily or maliciously, before the gate opens. So signers return <strong>partial signatures</strong>, and combining and finalizing happen in-app — no external device ever possesses a broadcastable transaction. For <em>m</em>-of-<em>n</em> this falls out for free. For single-sig it cannot, since the lone signer necessarily produces a complete transaction; there, a genuinely air-gapped signer with no network path is a requirement rather than a preference.</p>
+        </div>
+      </div>
+      <div class="inv">
+        <span class="n">I·3</span>
+        <div>
+          <h3>The TXID must not move after verification.</h3>
+          <p>LND commits to the funding outpoint at <code>psbt_verify</code>: <em>"no inputs or outputs can change, only signatures can be added. If the TXID changes between this call and the publish step then the channel will never be created and the funds will be in limbo."</em> A signer that re-selects coins or re-derives change silently breaks the batch, so the app hashes the verified transaction and refuses any returned PSBT whose unsigned TXID differs, naming the device that did it.</p>
+          <p>This is also why LND's <code>verifyAllInputsSegWit</code> rejects legacy inputs outright — <em>"risk of malleability"</em>. A malleable input is a TXID that can move after we have committed to it, which is the same failure wearing a different hat.</p>
+        </div>
+      </div>
+      <div class="inv">
+        <span class="n">I·4</span>
+        <div>
+          <h3>No RBF, ever. CPFP or wait.</h3>
+          <p>Replacing the funding transaction changes the outpoints and destroys every channel in the batch. A stuck batch can only be accelerated by spending its change output. Therefore: <strong>always include a change output we control</strong>, sized large enough to pay for a meaningful child, and disable replaceability in the UI entirely.</p>
+        </div>
+      </div>
+    </div>
+    <div class="note warn">
+      <span class="lbl">Cost of I·1</span>Setting <code>no_publish</code> on every channel also sets <code>NoFundingTxBit</code>, and that bit gates <code>rebroadcastFundingTx</code> — so LND will not re-broadcast the funding transaction on restart. We inherit that duty. Publishing through <code>WalletKit.PublishTransaction</code> rather than bitcoind hands the transaction to LND's wallet-level rebroadcaster, which <em>"will continually attempt to re-broadcast the transaction on start up, until it enters the chain"</em>, restoring the property by another route. The raw transaction is also kept in the run journal so we can re-broadcast independently.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Sequence</b>the funding flow</div>
+    <h2>What the app actually drives</h2>
+    <p>The interactive <code>lncli</code> prompts exist only because the CLI is interactive. Underneath is a plain gRPC state machine, fully scriptable, and the client generates the identifiers — so the app owns every handle from the first call.</p>
+    <div class="ladder wide">
+      <div class="row head"><span>#</span><span>Owner</span><span>Step</span></div>
+      <div class="row"><span class="n">1</span><span><span class="actor a-app">app</span></span><span class="what">Generate <em>n</em> random 32-byte pending channel IDs, one per peer. Connect to each peer; read their limits and required confirmation depth.<span class="mono">ConnectPeer · ListPeers</span></span></div>
+      <div class="row"><span class="n">2</span><span><span class="actor a-app">app</span></span><span class="what">Open <em>n</em> funding streams, each with a PSBT shim. <code>no_publish</code> is true for <strong>every</strong> channel — see I·1.<span class="mono">OpenChannel{funding_shim.psbt_shim{pending_chan_id, no_publish}}</span></span></div>
+      <div class="row"><span class="n">3</span><span><span class="actor a-lnd">lnd</span></span><span class="what">Each stream returns a funding address and the exact amount it expects.<span class="mono">→ psbt_fund{funding_address, funding_amount}</span></span></div>
+      <div class="row"><span class="n">4</span><span><span class="actor a-app">app</span></span><span class="what">Build <strong>one</strong> unsigned PSBT: <em>n</em> funding outputs, the reserve top-up, and change. Coin selection, fee rate and change all come from a watch-only Core wallet.<span class="mono">walletcreatefundedpsbt</span></span></div>
+      <div class="row"><span class="n">5</span><span><span class="actor a-app">app</span></span><span class="what">Verify the unsigned PSBT against all <em>n</em> streams. Each LND stream checks that its own script and amount are present.<span class="mono">FundingStateStep{psbt_verify{funded_psbt, pending_chan_id}}</span></span></div>
+      <div class="row"><span class="n">6</span><span><span class="actor a-sig">signers</span></span><span class="what">Collect <em>m</em> partial signatures out of band. Combine and finalize <em>in-app</em> (I·2), then assert the TXID is unchanged and that the mempool would accept it. <code>testmempoolaccept</code> validates without relaying, so this does not publish.<span class="mono">combinepsbt · finalizepsbt · testmempoolaccept</span></span></div>
+      <div class="row"><span class="n">7</span><span><span class="actor a-lnd">lnd</span></span><span class="what">Finalize <strong>all <em>n</em></strong> channels. Each stores its peer's commitment signature, hands its outpoint to the ChainArbitrator, and reports <code>chan_pending</code>. Nothing is broadcast, by any of them.<span class="mono">FundingStateStep{psbt_finalize{final_raw_tx, pending_chan_id}}</span></span></div>
+      <div class="row gate"><span class="n">8</span><span><span class="actor a-app">gate</span></span><span class="what">Require <em>n</em> of <em>n</em> <code>chan_pending</code>. Export and store channel backups. Until this check passes, the signed transaction exists only in our journal — so the batch is abortable at zero cost right up to this line.<span class="mono">ExportAllChannelBackups</span></span></div>
+      <div class="row gate"><span class="n">9</span><span><span class="actor a-net">publish</span></span><span class="what">Publish. Every channel is already recoverable by force-close before the transaction ever reaches a peer's mempool.<span class="mono">WalletKit.PublishTransaction</span></span></div>
+    </div>
+    <div class="note">
+      <span class="lbl">Deliberate omission</span>LND documents <code>skip_finalize</code> as a shortcut for batch members, and <code>base_psbt</code> chaining as a way to accumulate outputs. We use neither. Chaining is an ergonomic crutch for the CLI — we build the transaction ourselves. And <code>skip_finalize</code> skips the very step that produces the <code>chan_pending</code> gate in step 8, which is the one thing this design will not give up.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Constraint</b>the ten minutes</div>
+    <h2>Budgeting the window</h2>
+    <p>An LND peer forgets a pending channel after roughly ten minutes, and LND's own docs concede there's no reliable way to know the deadline for a non-LND peer. With <em>n</em> parallel streams there are <em>n</em> clocks starting at slightly different moments, so the real budget is the earliest one. The app shows a single countdown: the minimum remaining across all streams.</p>
+    <p>Machine work inside that window is trivial — well under a minute for a realistic batch. Effectively the entire budget belongs to <strong>humans handling hardware</strong>. That reframing is what the phase model below is built on.</p>
+    <div class="gauge wide">
+      <div class="scale">
+        <div class="ticks"></div>
+        <div class="seg fixed" style="left:0; width:7%"><span>RPC</span></div>
+        <div class="seg sign" style="left:7%; width:43%"><span>signing rounds — measured in rehearsal</span></div>
+        <div class="seg over" style="left:50%; width:50%"><span>margin held in reserve for one retry</span></div>
+        <div class="abort" style="left:50%"></div>
+      </div>
+      <div class="axis"><span>0:00</span><span>2:00</span><span>4:00</span><span>6:00</span><span>8:00</span><span>10:00</span></div>
+      <div class="key">
+        <span><i style="background:var(--teal-soft); border:1px solid var(--teal)"></i>App + LND round-trips (~30 s)</span>
+        <span><i style="background:var(--amber-soft)"></i>Signing — the only variable</span>
+        <span><i style="background:var(--hazard-soft)"></i>Abort threshold at 5:00</span>
+      </div>
+    </div>
+    <p>The 5:00 line is a hard gate, not a warning: if rehearsal showed a signing round-trip slower than five minutes, the app will not arm the batch. Note what running out of time now costs, though. Because nothing is published until the step 8 gate, a lapsed window strands no channels and spends no fees — it costs one more signing round. The clock is an inconvenience, not a hazard.</p>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Model</b>three phases</div>
+    <h2>Move every slow thing outside the clock</h2>
+    <p>The reason the manual process is stressful is that it begins the countdown before anyone knows whether the signing setup works. Splitting the run into a rehearsal, an armed window, and a settlement pass means the clock only ever covers work whose duration has already been measured.</p>
+
+    <div class="phase untimed wide">
+      <div class="hd"><span class="num">0</span><h3>Rehearsal</h3><span class="clock">no clock running</span></div>
+      <p class="dim">No funding streams are open, so nothing can time out. Everything here is repeatable and free.</p>
+      <ol>
+        <li><strong>Peer pre-flight.</strong> Connect to each peer; check min and max channel size, accepted commitment type, and <code>minimum_depth</code>. Show the user "usable after <em>k</em> confirmations" per channel, up front.</li>
+        <li><strong>Reserve arithmetic.</strong> Ask LND, don't guess: <code>WalletKit.RequiredReserve(additional_public_channels = n)</code>, compare against the confirmed on-chain balance, and add a top-up output to a fresh <code>p2tr</code> node address for any shortfall.</li>
+        <li><strong>Lock the coin set and the fee rate.</strong> Segwit inputs only, confirmed inputs only, with a change output sized so a CPFP child could pay for itself.</li>
+        <li><strong>Dress rehearsal.</strong> Build a decoy PSBT — same inputs, same fee, outputs paying back to the cold wallet — and push it through every signer for real. Confirm each device produces a valid witness, combine and finalize it, run <code>testmempoolaccept</code>, then throw it away.</li>
+        <li><strong>Record the measurement.</strong> The rehearsal's wall-clock signing time becomes the gate on Phase 1.</li>
+      </ol>
+      <p class="dim">This phase catches the two failures that cost the most last time: a signer that produces malformed witnesses, and a reserve shortfall discovered mid-window.</p>
+    </div>
+
+    <div class="phase timed wide">
+      <div class="hd"><span class="num">1</span><h3>Armed window</h3><span class="clock">countdown live</span></div>
+      <p class="dim">Steps 1–8 of the sequence above, with the countdown visible throughout. The transaction shape is already decided; only the funding addresses are new.</p>
+      <ul>
+        <li><strong>Re-arm is one action.</strong> If the window lapses, cancel every shim with <code>FundingStateStep{shim_cancel{pending_chan_id}}</code>, reopen the streams for fresh addresses, and re-issue the same transaction with the outputs swapped. Nothing has been broadcast, so nothing is lost — the cost is one more signing round.</li>
+        <li><strong>Sequential fallback.</strong> If signers are too slow to batch at all, the app offers one channel per transaction. More fees, no atomicity, but it completes. Naming this as a supported mode beats discovering it at 9:30 on the clock.</li>
+        <li><strong>Nothing else is clickable.</strong> During the window the UI shows the countdown, the signing tracker, and abort. No settings, no editable fields.</li>
+      </ul>
+    </div>
+
+    <div class="phase untimed wide">
+      <div class="hd"><span class="num">2</span><h3>Settlement</h3><span class="clock">until confirmed + active</span></div>
+      <p class="dim">The transaction is public and the channels are pending. Two things still need watching.</p>
+      <ul>
+        <li><strong>Close the fee-policy race.</strong> New channels sit at LND's defaults — 1000 msat base, 1 ppm — from the moment they go active. The app takes the channel point from each <code>chan_pending</code>, polls until the channel is active, and applies the intended policy via <code>UpdateChannelPolicy</code> immediately. Policy is chosen per peer back in Phase 0, so this needs no human at all.</li>
+        <li><strong>Confirmation watch.</strong> Track depth against each peer's <code>minimum_depth</code>, and offer the CPFP child from the change output if the batch stalls. Never offer a replacement.</li>
+      </ul>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Commissioning</b>proving it once</div>
+    <h2>The state machine, tested on mainnet, at zero cost</h2>
+    <p>Phase 0 opens no funding streams — that is exactly what makes it untimed, and exactly why it cannot vouch for LND's funding flow. Signers, descriptors and fee arithmetic are the things rehearsal proves. Everything in the sequence from step 2 onward is untested by it.</p>
+    <p>Rather than stand up a signet node for that, we lean on the property that already governs this design: <strong>nothing is at risk until broadcast.</strong> Every step short of publishing can therefore run against mainnet, against real peers, with real coins that never move.</p>
+    <p>I·1 makes this sharper than a test mode. Because <code>no_publish</code> is set on every channel in the production flow, the probe is <em>not a separate code path</em> — it is the real run with the final action withheld. There is no rehearsal-only branch that could behave differently on the day, and step 9 is the only line of code the probe does not execute.</p>
+    <div class="phase untimed wide">
+      <div class="hd"><span class="num">C</span><h3>Cold probe</h3><span class="clock">run once per setup</span></div>
+      <p class="dim">Steps 1 through 8 exactly as production runs them. Step 9 is simply not taken.</p>
+      <ol>
+        <li>Open the streams, build and verify a genuine PSBT, sign it with the real devices, combine and finalize in-app, and confirm <code>testmempoolaccept</code> passes.</li>
+        <li>Finalize all <em>n</em> channels and watch every <code>chan_pending</code> arrive. Confirm the gate at step 8 closes as expected — this is the assertion the whole safety argument rests on.</li>
+        <li>Export the channel backups, verifying that step works on pending channels.</li>
+        <li>Stop. Then clear up: <code>AbandonChannel</code> with <code>pending_funding_shim_only</code> for each pending channel, <code>shim_cancel</code> for any stream that never finalized, and release the Core UTXO locks.</li>
+        <li>Separately, deliberately let one stream lapse without finalizing, to observe the peer timeout for real rather than trusting the ten-minute figure.</li>
+      </ol>
+      <p class="dim">Cost: nothing on-chain. The only externality is a briefly held reservation on each peer, which their own timeout clears.</p>
+    </div>
+    <p>That covers most of the open questions. The two it cannot reach both sit past the broadcast line: whether <code>UpdateChannelPolicy</code> accepts a pending-but-inactive channel point, and the settlement path as a whole. The first is neutralised by making Phase 2 poll unconditionally instead of depending on the answer. The second is settled by making the <strong>first live run a deliberately small one</strong> — two channels at the smallest size the chosen peers accept — treated as commissioning rather than as a real allocation.</p>
+    <div class="note">
+      <span class="lbl">Consequence for the build order</span>The abort and recovery paths must therefore be working <em>before</em> the first mainnet probe, since the probe's normal termination <em>is</em> the abort path. That inverts the usual order: <code>shim_cancel</code>, <code>AbandonChannel</code> and the UTXO-lock release ship first, and the happy path is built on top of them.
+    </div>
+    <div class="note warn">
+      <span class="lbl">Which abandon flag</span>Use <code>pending_funding_shim_only</code>, not <code>i_know_what_i_am_doing</code>. The former refuses unless the channel is both shim-funded and pending, so it structurally cannot touch a confirmed channel. One caveat from <code>rpcserver.go</code>: "shim funded" is inferred from <code>ThawHeight &gt; 0</code> — there is a standing <code>TODO</code> about storing the funding type properly — so it may not recognise a plain PSBT open with no thaw height. The app tries the safe flag first and only falls back to the blunt one on that specific rejection, with an explicit confirmation.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Architecture</b>components</div>
+    <h2>Where the pieces live</h2>
+    <p>The trust boundary is the design's most important line. The app holds an LND admin macaroon and Core RPC credentials; it never holds key material, and it is never exposed to the internet.</p>
+    <pre><i>DESKTOP — where the devices are</i>          <i>NODE — loopback only</i>
+
+<b>browser</b> ─── ssh tunnel ──────────────▶  <b>winthistle</b>
+   │  wizard, countdown, PSBT up/down          ├─ gRPC ─▶ <b>lnd</b>
+   │                                           ├─ RPC ──▶ <b>bitcoind</b>  <i>(optional)</i>
+<b>Sparrow</b>  builds and/or signs                 └─ file ─▶ <b>sqlite</b>    <i>run journal</i>
+   │
+<b>signers</b>  USB · SD card · QR
+   <i>─ ─ ─ ─ ─ trust boundary: keys never cross ─ ─ ─ ─ ─</i></pre>
+    <p>Note what carries the PSBT between the two machines: <strong>the browser</strong>. The UI is viewed on the desktop through the tunnel, so a download hands the PSBT to Sparrow and an upload hands it back — no file sync, no shared mount, no extra daemon. The topology most people already have turns out to be the transport.</p>
+    <div class="split wide">
+      <div class="card">
+        <span class="lbl">Two engines, one safety model</span>
+        <p>With Core, the app builds the transaction itself and owns coin selection, change and fee rate. Without it, Sparrow builds and the app verifies. The LND sequence and all four invariants are identical either way — see below.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Resumable by default</span>
+        <p>A closed tab must never orphan a funding stream. SQLite records each pending channel ID against its funding address and output index, per-signer signature state, and the finalized raw transaction — written <em>before</em> the publishing call, so the artifacts survive a crash mid-publish.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Transport, not typing</span>
+        <p>Base64 in and out, file download and upload, and animated QR — BBQr and <code>ur:crypto-psbt</code> — with webcam capture on the return leg. This is the one place a browser UI is genuinely better than a terminal, and it is where multisig ergonomics are won.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Commissioning without a testnet</span>
+        <p>No signet or regtest harness. Instead, the state machine is proven on mainnet with real peers and zero on-chain cost, by exercising every step up to but excluding broadcast. See <em>Commissioning</em> below — that mode is a first-class part of v1, not a debug affordance.</p>
+      </div>
+    </div>
+
+    <h3 style="margin-top:1.6rem">Two engines</h3>
+    <p>Requiring a fully-synced, unpruned Bitcoin Core is the heaviest thing in the prerequisites, and for a lot of otherwise well-run nodes it is a blocker — Umbrel and friends often prune by default, and a descriptor import needs blocks a pruned node has thrown away. So Core is optional, and the difference between the two modes is convenience, not safety.</p>
+    <div class="tblwrap wide">
+      <table>
+        <thead><tr><th></th><th>Directed — with Core</th><th>Assisted — without</th></tr></thead>
+        <tbody>
+          <tr><td>Builds the PSBT</td><td>The app, via <code>walletcreatefundedpsbt</code></td><td>Sparrow, from a batch plan the app emits</td></tr>
+          <tr><td>Coin selection, change, fee rate</td><td>App-controlled and exact</td><td>Sparrow's, checked by the app against the plan</td></tr>
+          <tr><td>Combine and finalize</td><td>App</td><td>App — unchanged, this is what preserves I·2</td></tr>
+          <tr><td>Pre-flight validation</td><td>Local script execution <em>plus</em> <code>testmempoolaccept</code></td><td>Local script execution only</td></tr>
+          <tr><td>Setup burden</td><td>Descriptor import and a rescan</td><td>None beyond LND</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>In assisted mode the app emits a <strong>batch plan</strong> — every funding address with its exact amount, the reserve top-up, a target fee rate and the input constraints — and then verifies what comes back, output by output: each funding script present exactly once at exactly the right amount, no outputs to scripts the plan does not name, fee rate within tolerance, every input segwit and confirmed. That check is strictly mechanical and it is the same check LND's own <code>psbt_verify</code> will repeat at step 5.</p>
+    <div class="note">
+      <span class="lbl">On losing <code>testmempoolaccept</code></span>Less of a loss than it sounds. Executing every input's script locally against the witness data in the PSBT answers the question we actually care about — <em>will each input validate</em> — more directly than a mempool acceptance test does, and needs no chain data. What <code>testmempoolaccept</code> adds on top is node <em>policy</em>: min relay fee, standardness, ancestor limits. Worth having, and worth a warning when it is unavailable, but not load-bearing.
+    </div>
+    <div class="note warn">
+      <span class="lbl">Where assisted mode is genuinely weaker</span>I·2 says no external party ever holds a broadcastable transaction. In assisted mode Sparrow builds and signs, so the operator must stop short of Sparrow's own broadcast button. For <em>m</em>-of-<em>n</em> that resolves cleanly: let Sparrow apply <em>m</em>−1 signatures and have the app collect the last partial, and Sparrow never holds a complete transaction. For single-sig it cannot be resolved structurally, which is the same conclusion I·2 already reaches — single-sig funding wants a genuinely air-gapped signer.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Requires</b>prerequisites</div>
+    <h2>What the operator has to bring</h2>
+    <p>Nothing here is exotic, but the descriptor and the macaroon both have to be exactly right, and a wrong one of either produces a setup that looks healthy and fails at the worst moment. Both are therefore verified during setup rather than trusted.</p>
+    <div class="tblwrap wide">
+      <table>
+        <thead><tr><th>Component</th><th>Requirement</th><th>Why this floor</th></tr></thead>
+        <tbody>
+          <tr><td>LND</td><td>0.18+, reachable over gRPC, with the <code>walletrpc</code> subserver present (it is, in standard builds)</td><td><code>RequiredReserve</code> and <code>PublishTransaction</code> both live in WalletKit</td></tr>
+          <tr><td>Bitcoin Core</td><td><em>Optional.</em> If used: 25+, wallet support on, <strong>not pruned below the cold wallet's birthday</strong></td><td>Buys full coin control, but a rescan needs the blocks. Without it the tool runs in assisted mode — see <em>Two engines</em></td></tr>
+          <tr><td>Cold wallet descriptors</td><td>Receive and change descriptors with full key-origin prefixes and checksums</td><td>Origin info is what lets a hardware signer recognise its own key; without it devices refuse to sign</td></tr>
+          <tr><td>Signers</td><td><em>m</em> devices, each with the multisig wallet already registered, plus SD card or a camera for QR</td><td>Registering a multisig config on-device is slow; it must not happen inside the window</td></tr>
+          <tr><td>Peers</td><td><code>pubkey@host:port</code> for each, and their minimum channel size</td><td>Peer limits come from <code>accept_channel</code>, so a rejected size is discovered at step 2, on the clock</td></tr>
+          <tr><td>Coins</td><td>Confirmed, segwit-only UTXOs covering capacity + reserve top-up + fee + change</td><td>I·3: legacy inputs are malleable and LND rejects them outright</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin-top:1.4rem">A macaroon that can do nothing else</h3>
+    <p>Do not hand this tool <code>admin.macaroon</code>. LND's <code>bakemacaroon</code> accepts a special <code>uri</code> entity whose action is a literal gRPC method path, so the credential can be restricted to precisely the calls the tool makes — and to nothing else. Broad entities are too coarse to be safe here: <code>offchain:write</code> would also grant <code>SendPayment</code>, and <code>onchain:write</code> would grant <code>SendCoins</code>.</p>
+    <pre>lncli bakemacaroon --save_to winthistle.macaroon \
+  <i># read</i>
+  uri:/lnrpc.Lightning/GetInfo \
+  uri:/lnrpc.Lightning/ListPeers \
+  uri:/lnrpc.Lightning/ListChannels \
+  uri:/lnrpc.Lightning/PendingChannels \
+  uri:/lnrpc.Lightning/WalletBalance \
+  uri:/lnrpc.Lightning/SubscribeChannelEvents \
+  uri:/lnrpc.Lightning/ExportAllChannelBackups \
+  uri:/walletrpc.WalletKit/RequiredReserve \
+  <i># act</i>
+  uri:/lnrpc.Lightning/ConnectPeer \
+  uri:/lnrpc.Lightning/NewAddress \
+  uri:/lnrpc.Lightning/OpenChannel \
+  uri:/lnrpc.Lightning/FundingStateStep \
+  uri:/lnrpc.Lightning/UpdateChannelPolicy \
+  uri:/lnrpc.Lightning/AbandonChannel \
+  uri:/walletrpc.WalletKit/PublishTransaction</pre>
+    <p>Fifteen methods. <strong>The credential cannot send coins, cannot send payments, cannot close a channel, and cannot sign a message.</strong> Worth checking the list against the sequence yourself rather than trusting it — if a method is missing the tool fails loudly at setup, which is the right direction to fail in.</p>
+
+    <h3 style="margin-top:1.4rem">The watch-only wallet</h3>
+    <p>One private-key-less descriptor wallet in Core, holding the cold wallet's descriptors. This is what gives us coin selection, change derivation, exact fee rates and PSBT construction with the <code>bip32</code> derivations signers need — for no bespoke cryptography.</p>
+    <pre>bitcoin-cli createwallet "winthistle-cold" <b>true</b> true "" false <b>true</b> true
+<i>#                        disable_private_keys ↑         descriptors ↑</i>
+
+bitcoin-cli -rpcwallet=winthistle-cold importdescriptors '[
+  {"desc":"wsh(sortedmulti(2,[<i>aabbccdd</i>/48h/0h/0h/2h]<i>xpubA</i>/0/*,…))#<i>cksum</i>",
+   "active":true, "internal":false, "range":[0,999], "timestamp":<b>1700000000</b>},
+  {"desc":"wsh(sortedmulti(2,[<i>aabbccdd</i>/48h/0h/0h/2h]<i>xpubA</i>/1/*,…))#<i>cksum</i>",
+   "active":true, "internal":true,  "range":[0,999], "timestamp":<b>1700000000</b>}
+]'</pre>
+    <div class="note warn">
+      <span class="lbl">Two setup traps</span><strong>The timestamp is the wallet's birthday, not now.</strong> Pass "now" and Core will report a zero balance because it never scanned the blocks your coins arrived in. And the rescan it does perform takes minutes to hours — so import during setup, never during a batch. Second: <code>sortedmulti</code> and <code>multi</code> produce entirely different addresses from identical keys. Getting that wrong yields a wallet that imports cleanly, shows a zero balance, and tells you nothing about why.
+    </div>
+    <p>Which is why setup ends in a round-trip check rather than a success message: the tool derives the first few receive and change addresses from the imported descriptors and asks the operator to confirm they match what their own wallet software displays. That single comparison catches wrong derivation paths, <code>multi</code>-versus-<code>sortedmulti</code> errors, transposed keys, and truncated xpubs — the whole family of descriptor mistakes, at the only moment when catching them is free.</p>
+
+    <h3 style="margin-top:1.4rem">Validating peers without asking anyone</h3>
+    <p>All of it can be done through LND, and most of it without touching the network at all. Three tiers of certainty:</p>
+    <div class="tblwrap wide">
+      <table>
+        <thead><tr><th>Check</th><th>Source</th><th>Cost</th></tr></thead>
+        <tbody>
+          <tr><td>Pubkey is well-formed</td><td>Local: 33 bytes, compressed, a real point on secp256k1</td><td>None — catches typos and truncation instantly</td></tr>
+          <tr><td>Node exists; alias, addresses, channel count, total capacity</td><td><code>GetNodeInfo</code> — reads LND's own gossip graph, not the network</td><td>None. Also lets the UI show a name instead of a hex blob, which is its own error check</td></tr>
+          <tr><td>Plausible channel size</td><td>The capacities of that node's existing channels, from the same local graph</td><td>None. The smallest and median capacity are a good empirical proxy for what they accept</td></tr>
+          <tr><td>Authoritative minimum, reserve, HTLC limits, accepted commitment type</td><td>A shim probe: open the stream and read <code>accept_channel</code>, or read the rejection text — peers usually state their minimum in it</td><td>Free and abortable. This is the real answer, and Phase 0 is where it belongs</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>There is no gossip field for "minimum channel size" — it is enforced conversationally, in <code>accept_channel</code>. So the only authoritative check is to ask, and the design already has a zero-cost way to ask: a shim probe that is cancelled with <code>shim_cancel</code>. Which means peer limits get discovered during rehearsal instead of at step 2 with the clock running, and third-party Lightning explorers stay out of the picture entirely.</p>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Hosting</b>and configuration</div>
+    <h2>One binary, two sockets, no internet</h2>
+    <p>A single static binary plus a SQLite file. It serves the UI, talks to LND over gRPC and to Core over JSON-RPC, and has no other dependencies and no cloud component. Three deployment shapes, in descending order of how much I would recommend them:</p>
+    <div class="split wide">
+      <div class="card">
+        <span class="lbl">On the node — preferred</span>
+        <p>Runs on the LND box, bound to loopback. Both credentials stay on the machine that already holds them; reach the UI through an SSH tunnel. Nothing new is exposed and no secret is copied anywhere.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Coordinator over a tailnet</span>
+        <p>Runs on the laptop the signers plug into, reaching LND and Core over Tailscale. More convenient for SD-card and QR work, at the cost of copying <code>tls.cert</code> and the baked macaroon onto a second machine.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Anything public</span>
+        <p>No. There is no authentication model that makes a channel-opening UI worth exposing, and the tool refuses to bind a non-loopback address unless a config key explicitly names the interface.</p>
+      </div>
+    </div>
+    <h3 style="margin-top:1.2rem">Two rules the server keeps</h3>
+    <p><strong>A localhost bind is not an authentication boundary.</strong> Any process on the machine can reach it, and any web page the operator visits can attempt DNS rebinding against it. So: a token printed to the terminal at startup and required on every request, plus strict <code>Origin</code> and <code>Host</code> validation, and no CORS at all.</p>
+    <p><strong>No sockets of its own.</strong> The rule is about who opens connections, not about keeping the batch hermetic — LND is a network node and will talk to peers, which is the point. What the app must never do is contact a <em>third party</em>: fee estimates come from Core's <code>estimatesmartfee</code> and peer facts come from LND's local graph, never from a block explorer, a fee API, or a Lightning explorer. Amounts, peer sets and timing are exactly the things those services log. Anything the app needs from the network, it asks LND for.</p>
+    <h3 style="margin-top:1.2rem">Configuration</h3>
+    <p>Two files, deliberately separate. <code>winthistle.toml</code> holds connection details and never contains a secret, only paths to them. The <em>batch plan</em> is the reviewable artifact: it is written and checked during Phase 0, and it is what the armed window executes.</p>
+    <pre><b>[lnd]</b>
+address      = "127.0.0.1:10009"
+tls_cert     = "~/.lnd/tls.cert"
+macaroon     = "~/.lnd/winthistle.macaroon"   <i># baked, not admin</i>
+
+<b>[bitcoind]</b>
+address      = "127.0.0.1:8332"
+cookie       = "~/.bitcoin/.cookie"
+wallet       = "winthistle-cold"
+
+<b>[server]</b>
+bind         = "127.0.0.1:7420"
+journal      = "~/.winthistle/runs.db"
+
+<b>[limits]</b>
+abort_after_signing_seconds = 300   <i># the 5:00 gate</i>
+require_confirmed_inputs    = true
+allow_rbf                   = false <i># I·4; not operator-adjustable</i></pre>
+    <h3 style="margin-top:1.2rem">Setup the tool checks itself</h3>
+    <p>A written guide is necessary and will rot. So the guide is short and the tool carries the checks: <code>winthistle doctor</code> tests every prerequisite in turn — LND reachable, macaroon sufficient for each method it will call, Core present or absent and pruned or not, descriptors imported and rescanned, peers resolvable in the graph — and for each failure prints the exact command that fixes it rather than prose describing it.</p>
+    <p>The macaroon is the case where that matters most, because the required permission list is a property of the code. So the tool <em>generates</em> the baking command from its own method registry: <code>winthistle print-macaroon-command</code> emits the <code>lncli bakemacaroon</code> line for exactly the methods this build calls. The list in this document is illustrative; the one the tool prints is authoritative, and it cannot drift from what the code does.</p>
+    <p>What stays in prose is the part no program can do for you: exporting descriptors from your own wallet, registering the multisig on each device, and choosing peers and channel sizes. That is a page, not a manual.</p>
+    <p>The journal is the one piece of state worth backing up — it holds each run's pending channel IDs, funding outpoints and the finalized raw transaction, which is what makes a crashed run recoverable rather than mysterious. It contains no key material.</p>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Register</b>hazards</div>
+    <h2>Every pitfall as a gate</h2>
+    <p>These are enforced, not documented. Where a hazard has no automated detection, the app blocks progress until the user resolves it explicitly.</p>
+    <div class="tblwrap wide">
+      <table>
+        <thead><tr><th>Hazard</th><th>Cost</th><th>Detection &amp; gate</th></tr></thead>
+        <tbody>
+          <tr><td>Published before a channel is recoverable</td><td><span class="sev s-loss">funds lost</span></td><td><strong>Unreachable.</strong> <code>no_publish</code> on all <em>n</em>; the single publish call is gated on <em>n</em> of <em>n</em> <code>chan_pending</code> (I·1).</td></tr>
+          <tr><td>A signer or wallet broadcasts for us</td><td><span class="sev s-loss">funds lost</span></td><td><strong>Unreachable.</strong> Signers return partial signatures; finalization is in-app, so no external party holds a publishable transaction (I·2).</td></tr>
+          <tr><td>TXID changed by a signer</td><td><span class="sev s-loss">funds in limbo</span></td><td>Hash the unsigned transaction at verify; reject any returned PSBT whose unsigned TXID differs, naming the offending device.</td></tr>
+          <tr><td>A peer times out before the gate</td><td><span class="sev s-cost">one signing round</span></td><td>Nothing has been published, so the batch is simply cancelled and re-armed. This was the expensive failure; now it is a retry.</td></tr>
+          <tr><td>RBF attempted on the funding tx</td><td><span class="sev s-loss">all channels void</span></td><td>Replaceability disabled at PSBT construction. Stalls are handled by a CPFP child on the change output.</td></tr>
+          <tr><td>Legacy (non-segwit) inputs</td><td><span class="sev s-stuck">verify rejected</span></td><td>Filtered during coin selection, with the excluded UTXOs listed so the exclusion is visible rather than mysterious.</td></tr>
+          <tr><td>Anchor reserve shortfall</td><td><span class="sev s-stuck">open refused</span></td><td><code>RequiredReserve(n)</code> versus confirmed balance in Phase 0; a top-up output is added automatically.</td></tr>
+          <tr><td>Ten-minute window lapses</td><td><span class="sev s-cost">one more signing round</span></td><td>Countdown on the earliest stream; <code>shim_cancel</code> then re-arm in a single action.</td></tr>
+          <tr><td>Fee drain at LND default policy</td><td><span class="sev s-cost">sats</span></td><td>Per-peer policy chosen in Phase 0, applied by <code>UpdateChannelPolicy</code> the moment each channel goes active.</td></tr>
+          <tr><td>Public and private channels batched together</td><td><span class="sev s-cost">privacy</span></td><td>Warn and offer to split into separate batches — a mixed batch correlates the announced and unannounced channels to one node.</td></tr>
+          <tr><td>Unconfirmed or already-spent inputs</td><td><span class="sev s-stuck">stuck batch</span></td><td>Confirmed-only coin selection; Core locks the chosen UTXOs for the duration of the run.</td></tr>
+          <tr><td>Fee rate too low to confirm</td><td><span class="sev s-stuck">channels stay pending</span></td><td>Rate chosen against a live estimate with a floor, and change sized so CPFP remains viable at several multiples of it.</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Recovery</b>when it goes wrong</div>
+    <h2>One question decides everything</h2>
+    <p>Under pressure the only thing that matters is whether the transaction reached the network. The app answers that from its own journal plus a mempool and chain lookup, and then offers exactly one path.</p>
+    <div class="tree wide">
+      <div class="q">Has the funding transaction been broadcast?</div>
+      <div class="no"><strong>No</strong> — nothing is at risk, and nothing has cost anything. Cancel every shim with <code>shim_cancel</code>, abandon any channel that reached pending, release the Core UTXO locks, and either re-arm or walk away. No on-chain footprint, no fees. Because of I·1 this covers <em>every</em> failure before the gate, which is every failure the batch is actually likely to have.</div>
+      <div class="yes"><strong>Yes</strong> — then all <em>n</em> channels reached <code>chan_pending</code> before it went out, because that is the only condition under which the app will publish. Every channel therefore holds its peer's commitment signature and every outpoint is watched by the ChainArbitrator. Three ways this ends, all of them solvent: the transaction confirms and the channels open; a peer vanishes and a force-close recovers the funds; or our own node is lost and the exported backup plus the peer's data-loss protection recovers them.</div>
+    </div>
+    <div class="note">
+      <span class="lbl">The branch that used to be here</span>An earlier revision of this document described a third outcome: published, but with a channel that never completed negotiation, whose output is a 2-of-2 with a counterparty who never signed — coins gone. <strong>This design has no path that reaches it.</strong> Two things close it. I·1 means the transaction is not published until every channel is already recoverable, and I·2 means no other party ever holds a transaction it could publish for us. Remove either one and the branch comes back, which is why they are invariants and not preferences.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Residual</b>honest limits</div>
+    <h2>What "no lost funds" does and does not cover</h2>
+    <p>The claim this design earns is specific: <strong>no channel in a batch is ever left with an unspendable funding output.</strong> That entire class of loss is closed by construction, not by care. It is worth being equally precise about what remains, because a safety argument that overstates itself is worse than none.</p>
+    <div class="tblwrap wide">
+      <table>
+        <thead><tr><th>Residual</th><th>Why it is not the same class</th><th>Gate</th></tr></thead>
+        <tbody>
+          <tr><td>Stall past LND's funding horizon</td><td>Coins stay yours while the transaction is unconfirmed. The danger is narrow: LND forgets the pending channel after roughly 2016 blocks, and the transaction confirms <em>afterwards</em>.</td><td>We own broadcast timing, so we never publish at a fee we would not defend. CPFP from the change output, and a hard warning far ahead of the horizon.</td></tr>
+          <tr><td>Loss of LND's channel database</td><td>The commitment signature lives in that database, not in the protocol.</td><td>Channel backups exported at step 8, <em>before</em> publish, and stored off-box. Recovery is backup plus the peer's data-loss protection.</td></tr>
+          <tr><td>A bug in LND or Bitcoin Core</td><td>Not addressable by design at this layer.</td><td>The cold probe exercises the real path, and the first live batch is deliberately small.</td></tr>
+          <tr><td>A signer that broadcasts on its own</td><td>Would defeat I·1 from outside the system.</td><td>I·2: partial signatures only, finalized in-app. Single-sig funding requires a genuinely air-gapped device.</td></tr>
+          <tr><td>Assisted mode, single-sig: Sparrow holds a complete transaction</td><td>The only place a design invariant degrades to operator discipline rather than structure.</td><td>Multisig resolves it — Sparrow applies <em>m</em>−1 signatures, the app collects the last. Single-sig needs an air-gapped signer, and the UI says so before the mode is selectable.</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <p>None of these is the failure that made the manual process frightening. That one is gone.</p>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Scope</b>v1</div>
+    <h2>What ships, and what waits</h2>
+    <div class="split wide">
+      <div class="card">
+        <span class="lbl">In v1</span>
+        <ul class="plain">
+          <li>One LND node, <em>n</em> channels, one transaction</li>
+          <li>Single-sig and <em>m</em>-of-<em>n</em> external funding</li>
+          <li>Three-phase model with the rehearsal gate</li>
+          <li>Both engines: directed with Core, assisted with Sparrow</li>
+          <li><code>winthistle doctor</code> and a generated macaroon command</li>
+          <li>Base64, file and QR transports</li>
+          <li>Reserve top-up and post-open policy application</li>
+          <li>Cold probe mode, and the recovery paths it depends on</li>
+        </ul>
+      </div>
+      <div class="card">
+        <span class="lbl">Deferred</span>
+        <ul class="plain">
+          <li>Batching across multiple of your own nodes — it works protocol-wise, but multiplies the state machine</li>
+          <li>Core Lightning — a different flow shape (<code>openchannel_init</code> / <code>_update</code> / <code>_signed</code>), worth a real abstraction rather than a branch</li>
+          <li>Automated fee-bumping beyond the manual CPFP offer</li>
+          <li>Taproot MuSig2 funding outputs</li>
+          <li>A signet or regtest harness — the cold probe covers it more cheaply</li>
+          <li>Anything resembling a hosted deployment</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Open</b>verify first</div>
+    <h2>Claims the cold probe has to settle</h2>
+    <p>Each of these is load-bearing, and all but the last two are answered by a single cold probe. None should be taken on faith from documentation, including this document — the items marked as settled were read out of LND's source, which is better evidence than prose but still not a passing test.</p>
+    <ul class="plain">
+      <li>Does <code>shim_cancel</code> still succeed <em>after</em> a successful <code>psbt_verify</code>? The whole re-arm story depends on it.</li>
+      <li><span class="sev s-cost">settled in source</span> Does <code>psbt_finalize</code> with <code>no_publish</code> emit <code>chan_pending</code> without broadcasting? Yes — <code>NoFundingTxBit</code> skips only the broadcast block in <code>handleFundingSigned</code>, between <code>CompleteReservation</code> and the update. Confirm it empirically anyway; the gate depends on it.</li>
+      <li>Exactly when does each peer's ten-minute clock start — at <code>OpenChannel</code>, or at the peer's <code>accept_channel</code>? Determines what the countdown should actually display.</li>
+      <li>What does <code>RequiredReserve</code> return for private channels, given the field is named <code>additional_public_channels</code>?</li>
+      <li><span class="sev s-stuck">past broadcast</span> Will <code>UpdateChannelPolicy</code> accept a channel point that is pending but not yet active, or must Phase 2 poll? Assume it must, and the question stops mattering.</li>
+      <li>Does Core's <code>finalizepsbt</code> handle every signer's output for the specific multisig descriptor in use, or is a fallback finalizer needed?</li>
+      <li><span class="sev s-stuck">past broadcast</span> Does the settlement pass behave on a real confirmation — depth tracking, policy application, CPFP offer? Only the first small live batch answers this.</li>
+    </ul>
+  </div>
+</section>
+
+<footer>
+  <div class="band">
+    <div class="gut eyebrow"><b>Refs</b></div>
+    <p>Derived from <a href="https://blog.dpinkerton.com/posts/lightning-channels-from-external-wallet-psbt/">Lightning channels from an external wallet via PSBT</a>, with RPC semantics taken verbatim from <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/lightning.proto"><code>lnrpc/lightning.proto</code></a>, <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/walletrpc/walletkit.proto"><code>walletkit.proto</code></a>, and <a href="https://github.com/lightningnetwork/lnd/blob/master/docs/psbt.md">lnd/docs/psbt.md</a>.</p>
+    <p>Quoted warnings are LND's own. Where this document and the proto comments disagree, the proto is right.</p>
+  </div>
+</footer>
