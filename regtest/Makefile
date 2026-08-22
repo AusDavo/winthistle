@@ -28,7 +28,7 @@ bootstrap:  ## mature the chain, fund the nodes, connect alice to peers
 > ./bootstrap.sh
 
 cold:  ## build the simulated 2-of-2 multisig cold wallet
-> ./cold-wallet.py
+> python3 ./cold-wallet.py
 
 creds:  ## copy each node's tls.cert and admin.macaroon into ./creds
 > @for n in $(NODES); do \
@@ -40,7 +40,7 @@ creds:  ## copy each node's tls.cert and admin.macaroon into ./creds
 > done
 
 verify:  ## prove the 2-of-2 fixture works end to end (broadcasts nothing)
-> ./verify.py
+> python3 ./verify.py
 
 mine:  ## mine blocks: make mine N=6
 > @addr=$$(./bin/bcli -rpcwallet=miner getnewaddress); \

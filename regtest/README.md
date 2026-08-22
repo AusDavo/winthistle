@@ -72,6 +72,18 @@ Two of these cost real debugging time; both fail in ways that look like your cod
   while LND runs as the `lnd` user with its data in `/home/lnd/.lnd`. So every
   `lncli` invocation needs `--lnddir=/home/lnd/.lnd` or it fails with a missing
   `tls.cert` — which reads like a TLS problem and is not one.
+- **Core does not auto-load non-default wallets.** After `make down && make up`,
+  or any bitcoind restart, `miner` and the three cold wallets are still on disk
+  but closed, and every wallet-scoped call fails with "Requested wallet does not
+  exist or is not loaded" — which reads like the wallet was destroyed and was
+  not. `make bootstrap` reloads them; `make reset` covers it too. The Go tests
+  load what they need themselves, because a real node has the same behaviour and
+  the abort path has to run on a node that has just come back up.
+- **`verify.py` needs its shebang.** It is executable and invoked by path, so
+  without one the kernel hands it to `/bin/sh`, which reads the backticks around
+  `` `make verify` `` in the module docstring as command substitution and forks
+  until the process table fills. The Makefile now calls `python3` explicitly so
+  the recipe cannot depend on the shebang at all.
 - **`-fallbackfee`** is set. Without it, regtest fee estimation fails outright
   because there is no fee history to estimate from.
 - **`--tlsextraip=127.0.0.1`** is set, so gRPC from the host validates against

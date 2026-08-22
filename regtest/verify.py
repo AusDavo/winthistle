@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """Smoke-test the harness, and specifically the 2-of-2 fixture.
 
 Asserts the property the fixture exists for: neither signer alone can complete

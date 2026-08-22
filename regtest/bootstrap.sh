@@ -13,6 +13,13 @@ echo "==> miner wallet"
   || ./bin/bcli loadwallet miner >/dev/null 2>&1 || true
 MINER=$(./bin/bcli -rpcwallet=miner getnewaddress)
 
+# Core does not auto-load non-default wallets, so a restart leaves the cold
+# wallets on disk but unloaded and every wallet call fails with "Requested wallet
+# does not exist or is not loaded". Harmless before cold-wallet.py has ever run.
+for w in cold1 cold2 cold-watch; do
+  ./bin/bcli loadwallet "$w" >/dev/null 2>&1 || true
+done
+
 # Coinbase outputs need 100 confirmations before they are spendable.
 HEIGHT=$(./bin/bcli getblockcount)
 if [ "$HEIGHT" -lt 101 ]; then
