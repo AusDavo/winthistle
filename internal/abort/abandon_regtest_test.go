@@ -7,40 +7,154 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
+	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
-// armOneChannel drives steps 2-7 for a single channel and returns its funding
-// outpoint, having first asserted the property everything else rests on: that
-// chan_pending arrived and the transaction did not.
-func armOneChannel(t *testing.T, env *regtestenv.Env) (lnd.ChannelPoint, *regtestenv.Stream) {
+// armedBatch is what one arming leaves behind: a receipt per channel, the
+// streams that produced them, and the one transaction that is still ours alone.
+type armedBatch struct {
+	Channels []lnd.ChannelPoint
+	Streams  []*regtestenv.Stream
+	Locks    []bitcoind.Outpoint
+	RawTx    string
+	TxID     string
+}
+
+// target is the batch as an abort would see it after a total failure: every
+// channel armed, so every channel has to be abandoned rather than cancelled.
+func (b armedBatch) target() abort.Target {
+	return abort.Target{Channels: b.Channels, Locks: b.Locks}
+}
+
+// armBatch drives steps 2-7 for a whole batch: one funding stream per peer, ONE
+// unsigned transaction carrying every funding output plus change, psbt_verify
+// against every stream, then psbt_finalize on all of them.
+//
+// It asserts I-1 as it goes, which is the property the rest of the design rests
+// on: every channel reaches chan_pending, and the transaction that funds them
+// all is still in nobody's mempool afterwards.
+//
+// LND tolerates the extra outputs by construction. PsbtIntent.Verify looks for
+// its own funding output with psbt.TxOutsEqual and only requires that the input
+// sum exceed the *total* output sum — it never asserts that its output is the
+// only one. So n streams can each verify the same n-output transaction, and each
+// one commits to the same unsigned TXID (I-3).
+func armBatch(t *testing.T, env *regtestenv.Env, peers []string) armedBatch {
 	t.Helper()
 
-	s := env.OpenShimStream(t, env.Peers(t)[0], fixtureChannelSat)
-	funded := env.BuildFundingPSBT(t, env.Miner, []*regtestenv.Stream{s}, 5)
+	streams := make([]*regtestenv.Stream, 0, len(peers))
+	for _, p := range peers {
+		streams = append(streams, env.OpenShimStream(t, p, fixtureChannelSat))
+	}
+
+	// One transaction for the whole batch. The funding source is the miner
+	// wallet because the fixture needs a complete signature; production combines
+	// partials in-app instead — see SignWithMiner's doc comment.
+	funded := env.BuildFundingPSBT(t, env.Miner, streams, 5)
 	t.Cleanup(func() {
 		c, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
 		_, _ = env.Miner.ReleaseLocks(c, funded.Inputs)
 	})
 
-	env.Verify(t, s, funded.Base64)
-	rawTx, txid := env.SignWithMiner(t, funded.Base64)
-	cp := env.Finalize(t, s, rawTx)
+	// I-4 wants a change output we control, so a CPFP child stays viable when
+	// the transaction cannot be replaced. Core reports -1 when it added none.
+	if funded.ChangeI < 0 {
+		t.Fatalf("the batch transaction has no change output — I-4 leaves no CPFP handle")
+	}
 
-	// I-1, observed rather than assumed. chan_pending is emitted only after
-	// CompleteReservation has stored the peer's commitment signature, so the
-	// channel is force-closeable — and no_publish cleared the bit that gates
-	// the broadcast, so the transaction is still ours alone.
-	if env.InMempool(t, txid) {
-		t.Fatalf("funding tx %s reached the mempool despite no_publish — I-1 is broken", txid)
+	// Every stream verifies before any of them finalizes. That is the order the
+	// design specifies, and it is not merely tidy: PsbtFundingVerify re-runs
+	// LND's reserved-value check, and the reserve grows with the number of
+	// anchor channels the wallet already has pending, so verifying all n first
+	// keeps that requirement identical for every member of the batch.
+	for _, s := range streams {
+		env.Verify(t, s, funded.Base64)
 	}
-	if cp.TxID != txid {
-		t.Fatalf("chan_pending outpoint %s does not match the funding tx %s", cp, txid)
+
+	rawTx, txid := env.SignWithMiner(t, funded.Base64)
+	assertNotReplaceable(t, env, rawTx)
+
+	b := armedBatch{
+		Streams: streams,
+		Locks:   funded.Inputs,
+		RawTx:   rawTx,
+		TxID:    txid,
 	}
-	return cp, s
+	for _, s := range streams {
+		cp := env.Finalize(t, s, rawTx)
+
+		// I-1, observed rather than assumed, and re-checked after every single
+		// finalize. chan_pending is emitted only after CompleteReservation has
+		// stored the peer's commitment signature, so the channel is
+		// force-closeable — and no_publish cleared the bit that gates the
+		// broadcast, so the transaction is still ours alone. The last member of
+		// the batch is the one that matters: it is exactly where LND's own docs
+		// would have had us publish.
+		if env.InMempool(t, txid) {
+			t.Fatalf("funding tx %s reached the mempool after finalizing %s "+
+				"despite no_publish — I-1 is broken", txid, s.PendingChanID)
+		}
+		if cp.TxID != txid {
+			t.Fatalf("chan_pending outpoint %s does not match the funding tx %s", cp, txid)
+		}
+		b.Channels = append(b.Channels, cp)
+	}
+
+	// n receipts, n distinct outputs of the one transaction.
+	if len(b.Channels) != len(streams) {
+		t.Fatalf("armed %d channels, expected %d", len(b.Channels), len(streams))
+	}
+	seen := make(map[uint32]bool, len(b.Channels))
+	for _, cp := range b.Channels {
+		if seen[cp.Index] {
+			t.Fatalf("two channels claim output %d of %s", cp.Index, cp.TxID)
+		}
+		seen[cp.Index] = true
+	}
+	return b
+}
+
+// assertNotReplaceable checks I-4 on the transaction that actually exists.
+//
+// Replacing the funding transaction would move every outpoint in the batch and
+// destroy every channel on it, so replaceability is disabled at construction —
+// BuildFundingPSBT passes replaceable:false. This confirms Core honoured it: BIP
+// 125 opts in via any input with nSequence below 0xfffffffe.
+func assertNotReplaceable(t *testing.T, env *regtestenv.Env, rawTxHex string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	var decoded struct {
+		Vin []struct {
+			Sequence uint32 `json:"sequence"`
+		} `json:"vin"`
+	}
+	if err := env.Node.Call(ctx, "decoderawtransaction", []any{rawTxHex}, &decoded); err != nil {
+		t.Fatalf("decoderawtransaction: %v", err)
+	}
+	if len(decoded.Vin) == 0 {
+		t.Fatal("the funding transaction has no inputs")
+	}
+	for i, in := range decoded.Vin {
+		if in.Sequence < 0xfffffffe {
+			t.Fatalf("input %d signals replaceability (nSequence %#x) — I-4 forbids RBF",
+				i, in.Sequence)
+		}
+	}
+}
+
+// armOneChannel is the single-channel case of armBatch, kept because most of the
+// abort tests only need one armed channel to take apart.
+func armOneChannel(t *testing.T, env *regtestenv.Env) (lnd.ChannelPoint, *regtestenv.Stream) {
+	t.Helper()
+
+	b := armBatch(t, env, env.Peers(t)[:1])
+	return b.Channels[0], b.Streams[0]
 }
 
 func isPendingOpen(t *testing.T, env *regtestenv.Env, cp lnd.ChannelPoint) bool {
@@ -199,5 +313,68 @@ func TestRunAbortsAPartiallyArmedBatch(t *testing.T) {
 	}
 	if len(rep2.LocksFreed) != 0 {
 		t.Fatalf("second Run freed %v, but nothing was locked", rep2.LocksFreed)
+	}
+}
+
+// The assertion the whole design rests on, at n > 1.
+//
+// Three peers, three funding streams, one unsigned transaction carrying all
+// three funding outputs plus change. Every stream verifies that transaction and
+// every stream finalizes it, and the transaction still reaches no mempool. That
+// is I-1: publish only once every channel is already recoverable, and the app is
+// the only party that can publish at all.
+//
+// It is worth being precise about what fails if this is wrong. LND's own docs
+// say to set no_publish on all but the last channel, which would have the last
+// psbt_finalize broadcast for us — at a moment when the earlier channels are
+// pending but this one has not yet stored its peer's commitment signature. The
+// mempool check after *every* finalize, including the last, is what separates
+// this design from that one.
+func TestBatchArmsEveryChannelBeforeAnythingIsPublished(t *testing.T) {
+	env := regtestenv.Start(t)
+	ctx := testCtx(t)
+
+	peers := env.Peers(t)
+	if len(peers) < 3 {
+		t.Skipf("need 3 peers for a batch, alice has %d — run: make -C regtest reset", len(peers))
+	}
+	peers = peers[:3]
+
+	b := armBatch(t, env, peers)
+	t.Logf("armed %d channels on %s", len(b.Channels), b.TxID)
+
+	// Every channel is recoverable: LND is watching each outpoint, and each has
+	// its peer's commitment signature stored. Nothing has been broadcast.
+	for _, cp := range b.Channels {
+		if !isPendingOpen(t, env, cp) {
+			t.Errorf("%s reached chan_pending but is not among pending opens", cp)
+		}
+	}
+	if env.InMempool(t, b.TxID) {
+		t.Fatalf("funding tx %s is in the mempool with the whole batch armed — I-1 is broken", b.TxID)
+	}
+
+	// And the gate closes again: a batch this far along is still entirely
+	// recoverable, because we hold the only copy of the transaction. Tearing it
+	// down is the same abort as for one channel, n times over — and it is what
+	// the mainnet cold probe will terminate through.
+	alwaysConfirm := func(context.Context, abort.BluntRequest) (bool, error) { return true, nil }
+	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Miner, b.target(), alwaysConfirm)
+	if err != nil {
+		t.Fatalf("aborting the armed batch: %v", err)
+	}
+	if !rep.Clean() {
+		t.Fatalf("abort left failures: %v", rep.Failures)
+	}
+	if len(rep.Abandoned) != len(b.Channels) {
+		t.Fatalf("abandoned %d of %d channels", len(rep.Abandoned), len(b.Channels))
+	}
+	for _, cp := range b.Channels {
+		if isPendingOpen(t, env, cp) {
+			t.Errorf("%s is still pending after the abort", cp)
+		}
+	}
+	if env.InMempool(t, b.TxID) {
+		t.Fatalf("funding tx %s was broadcast at some point — nothing here may publish", b.TxID)
 	}
 }

@@ -52,7 +52,7 @@ info:  ## one-line status per node
 > @for n in $(NODES); do \
 >   printf '%-6s ' $$n; \
 >   ./bin/lncli $$n getinfo | python3 -c \
->     'import sys,json;d=json.load(sys.stdin);print(f"{d[\"identity_pubkey\"][:16]}… peers={d[\"num_peers\"]} active={d[\"num_active_channels\"]} pending={d[\"num_pending_channels\"]}")'; \
+>     'import sys,json;d=json.load(sys.stdin);print("%s… peers=%s active=%s pending=%s" % (d["identity_pubkey"][:16], d["num_peers"], d["num_active_channels"], d["num_pending_channels"]))'; \
 > done
 
 logs:  ## follow logs (make logs S=alice for one service)

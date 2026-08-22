@@ -27,11 +27,19 @@ if [ "$HEIGHT" -lt 101 ]; then
   ./bin/bcli generatetoaddress $((101 - HEIGHT)) "$MINER" >/dev/null
 fi
 
+# Several UTXOs each, not one big one. psbt_verify re-runs lnd's anchor
+# reserved-value check against the node's *own* on-chain wallet, and
+# ListUnspentWitness excludes leased coins — so a wallet holding a single UTXO
+# reports a zero balance the moment anything leases it, and step 5 of the
+# sequence is refused for a reason that has nothing to do with the batch. A real
+# node has many coins; the harness should too.
 echo "==> funding LND nodes"
 for n in "${NODES[@]}"; do
-  addr=$(./bin/lncli "$n" newaddress p2tr | jqp "['address']")
-  ./bin/bcli -rpcwallet=miner sendtoaddress "$addr" 5 >/dev/null
-  echo "    $n  <- 5 BTC  ($addr)"
+  for _ in 1 2 3 4 5; do
+    addr=$(./bin/lncli "$n" newaddress p2tr | jqp "['address']")
+    ./bin/bcli -rpcwallet=miner sendtoaddress "$addr" 1 >/dev/null
+  done
+  echo "    $n  <- 5 x 1 BTC"
 done
 ./bin/bcli generatetoaddress 6 "$MINER" >/dev/null
 

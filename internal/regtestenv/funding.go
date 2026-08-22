@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"fmt"
+	"sort"
 	"testing"
 	"time"
 
@@ -33,7 +34,11 @@ func (s *Stream) Close() {
 	}
 }
 
-// Peers returns the pubkeys of alice's connected peers, in a stable order.
+// Peers returns the pubkeys of alice's connected peers, sorted.
+//
+// Sorted rather than in ListPeers order, which is the order LND happens to hold
+// them in and is not stable across calls. A batch test that picks peers by index
+// needs the indices to mean the same thing twice.
 func (e *Env) Peers(t *testing.T) []string {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -50,6 +55,7 @@ func (e *Env) Peers(t *testing.T) []string {
 	if len(out) == 0 {
 		t.Skip("alice has no peers — run: make -C regtest reset")
 	}
+	sort.Strings(out)
 	return out
 }
 
