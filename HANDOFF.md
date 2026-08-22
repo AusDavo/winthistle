@@ -6,9 +6,11 @@ invariants and the do-not-reintroduce list; treat those as settled.
 **State:** design complete. Regtest harness working and genuinely self-tested.
 **The abort paths are built and tested against it, the n-of-n gate is proved at
 n=3, the run journal exists, the macaroon is generated from a method registry,
-and the reserved-value pre-flight predicts step 5's verdict against a live
-node.** No funding flow yet — but the sequence it will drive has now been walked
-end to end by tests.
+the reserved-value pre-flight predicts step 5's verdict against a live node, and
+both engines' setup halves are built: directed mode's watch-only Core wallet and
+assisted mode's batch-plan verifier.** No funding flow yet — but the sequence it
+will drive has now been walked end to end by tests, and the verifier has been
+run against the same bytes LND is shown.
 
 Private repo at `AusDavo/winthistle`, goes public once the cold probe passes on
 mainnet and the abort paths work.
@@ -21,12 +23,20 @@ mainnet and the abort paths work.
 | `CLAUDE.md` | invariants as rules, with LND source citations |
 | `regtest/` | working cluster: bitcoind + alice + 3 peers + simulated 2-of-2 cold wallet. `make reset` rebuilds and self-tests in ~1 min |
 | `internal/lnd` | gRPC client, `PendingChanID`, `ChannelPoint` |
-| `internal/bitcoind` | Core JSON-RPC client, coin-lock lock/release |
+| `internal/bitcoind` | Core JSON-RPC client, coin-lock lock/release, and the descriptor-wallet calls directed mode needs |
+| `internal/coldwallet` | directed mode's setup: create the watch-only wallet, checksum and import the descriptors, read back what landed, and end in the round-trip address check. Also the segwit-only coin filter |
+| `internal/plan` | the batch plan and its verifier — the check LND does not make |
+| `internal/prose` | the operator-facing copy primitives: one column, one way to render a satoshi |
 | `internal/abort` | `CancelShim`, `AbandonPending`, `Run` — the three abort paths |
 | `internal/journal` | the run journal: SQLite, pure Go, `Recover` turns a crashed row into an abort |
 | `internal/methods` | the registry of LND RPCs this build calls; `make macaroon` prints the bake command from it, and a gRPC interceptor refuses anything it does not list |
 | `internal/reserve` | the anchor-reserve pre-flight: predicts `psbt_verify`'s verdict before a signature is asked for, and says what to do about it |
 | `internal/regtestenv` | test support: drives funding streams far enough to abort them |
+
+`internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
+had the only copy of the wrapper and the satoshi formatter. Nothing about the
+reserve reports changed; there are just three more screens now that have to line
+up in the same pane.
 
 `make check` lints, vets and runs everything. `make test-unit` (`-short`) is the
 subset that needs no harness; the harness-backed tests skip with a reason when
@@ -34,8 +44,9 @@ regtest is down, so a bare `go test ./...` is honest either way. A fresh clone
 needs `make harness` first — `regtest/creds/` is gitignored, so until it exists
 every harness-backed test skips.
 
-`make test` passes `-p 1`, and that is load-bearing rather than tidy. Three
-packages now drive the harness — `abort`, `journal` and `reserve` — and
+`make test` passes `-p 1`, and that is load-bearing rather than tidy. Five
+packages now drive the harness — `abort`, `journal`, `reserve`, `coldwallet` and
+`plan` — and
 `go test ./...` runs package binaries concurrently by default, which puts several
 test processes through the same alice. `internal/reserve` makes this sharper than
 it was: its tests deliberately lease *every* coin alice has, so a concurrent
@@ -283,16 +294,166 @@ and only reach `aborted` if nothing was left behind. A failed abort stays in
 does this against the live harness, closing and reopening the file first so the
 recovery genuinely has nothing but the row.
 
+## Directed mode: the watch-only wallet
+
+`internal/coldwallet` is the whole lifecycle — pre-flight, checksum, create,
+import, read back, derive — and it deliberately does not end in a success
+message. `Install`'s only successful verdict is `AwaitingAddressCheck`, because
+nothing the app can check distinguishes a correct descriptor from a plausible
+wrong one.
+
+Four things came out of building it that were not in `docs/design.html`, and
+three of them are Core behaving in a way the obvious code would have got wrong.
+
+### The wrong descriptor does not show a zero balance. It shows a partial one.
+
+The design says a `multi()`-where-you-wanted-`sortedmulti()` wallet "imports
+cleanly, shows a zero balance, and tells you nothing about why". Against the
+harness's own 2-of-2 it is worse than that.
+
+`sortedmulti` sorts the *derived* pubkeys, so the two descriptors agree at every
+index where the keys already happen to be in ascending order — about half of
+them for two keys. Measured on two independently generated harness fixtures: 13
+of the first 20 addresses agreed on one, 10 on the other, and **index 0 agreed on
+both**. So:
+
+- an operator who compared one address would have passed a wrong descriptor;
+- the wrong wallet is not empty. `TestSortedMultiAndMultiAgreeOftenEnoughToFoolYou`
+  builds it through the real `Install` and it finds **6 of the cold wallet's
+  8 BTC**, on both fixtures — the cold wallet's coins sit at low indices, where
+  agreement is as likely as not. A plausible, wrong, partial balance is a far
+  better disguise than zero.
+
+`DefaultSampleSize` is 5 rather than the design's "first few" for exactly this
+reason: five leaves roughly a three per cent chance of a whole sample agreeing
+for a 2-of-2, and less for larger quorums.
+
+### `getaddressinfo`'s `ischange` is not the import's `internal` flag
+
+It looks like the read-back and it is not. Core's `IsChange` means "an output of
+ours with no address-book entry", so it is true for *any* address that has never
+received — external branch included — and false for an internal one that has.
+Observed on the harness: receive addresses 0-3 report `ischange: false` because
+the cold wallet's coins landed on them, and receive address 4 reports
+`ischange: true` because nothing ever did. The first version of the round-trip
+check used it and failed on a correct wallet.
+
+`listdescriptors` is the authoritative read-back, and `Confirm` uses it.
+
+While there: `getaddressinfo` answers with the singular `parent_desc` and
+`listunspent` with the plural `parent_descs`. `bitcoind.AddressInfo.Parents()`
+covers both.
+
+### Core grows a descriptor's range, and then refuses to shrink it
+
+Import with `range: [0,50]` and Core tops the keypool up on its own; a second
+import of the same descriptor then fails with *"new range must include current
+range = [0,1003]"*. The gap limit is therefore a floor, not a setting — and
+`Install` has to be re-runnable, because a half-finished setup is exactly the
+state you want to resume. `Import` reads `listdescriptors` first and widens to
+whatever Core has grown to.
+
+### The rescan and the prune horizon are untested
+
+Regtest has no history. A wallet imported with the right birthday and one
+imported with a wrong one find precisely the same nothing, and the node cannot be
+made meaningfully pruned. `RunPreflight` dates Core's `pruneheight` by reading
+that block's header and compares it against the birthday, and
+`Config.Validate` refuses a birthday it was not given — both are written, neither
+is proved. That needs signet, per `CLAUDE.md`. The regtest tests say so in a
+named constant rather than by omission.
+
+## The batch-plan verifier, and the gap it fills
+
+`internal/plan` emits the plan and checks what comes back. The claim it rests on
+is not that LND's `psbt_verify` is weak — it is that `psbt_verify` is *narrow on
+purpose*, and the same narrowness that makes the n-of-n batch possible leaves the
+rest of the transaction unpoliced.
+
+`PsbtIntent.Verify` at `v0.19.3-beta`:
+
+- finds its own output with `psbt.TxOutsEqual` and sets a flag. It never asserts
+  its output is the only one, and it never counts — so an output nobody named
+  passes, and so does a funding output paid twice;
+- requires only that the input sum exceed the *total* output sum, with the
+  comment "we don't want to dive into fee estimation here". Any fee above zero
+  passes;
+- runs `verifyAllInputsSegWit`, whose first case is `case in.WitnessUtxo != nil:`
+  with no look at the pkScript inside it. **Attaching a `WitnessUtxo` to a P2PKH
+  input satisfies LND's malleability check.** Only the `NonWitnessUtxo` branch
+  reads the script. `plan.IsSegwitSpend` reads it either way.
+
+`TestLNDAcceptsAnOutputTheVerifierRefuses` is the argument, run live: a batch
+transaction paying **400,000 sat to an address nobody named** is accepted by all
+three `psbt_verify` calls and refused by the plan. `TestTheVerifierAndLNDAgreeOnARealBatch`
+is the other half — both say yes to the same bytes, so a clean verification is a
+prediction of step 5 rather than a second opinion about it.
+
+Two more checks are ours alone:
+
+- **A `NonWitnessUtxo` that is not the input's previous transaction.**
+  `psbt.SumUtxoInputValues` — the function LND uses — reads the attached
+  transaction without checking it belongs to the input, so a wrong one makes the
+  input total, and therefore the fee, a fiction LND would accept.
+- **Replaceability.** I-4 at the byte level: any input below sequence
+  `0xfffffffe` is refused. `0xfffffffe` itself is not replaceable and is
+  accepted, which is what a wallet uses when it wants `nLockTime` honoured.
+
+### Change, in the mode that cannot name it
+
+Directed mode picks the change address, so the plan names the exact script.
+Assisted mode cannot — Sparrow chooses its own — so `plan.Recognition` accepts an
+unnamed output as change only when its `PSBT_OUT_BIP32_DERIVATION` entries carry
+*every* one of the cold wallet's master key fingerprints, all on the change
+branch. That is the same evidence a hardware signer uses to decide an output is
+its own change, and it is strictly weaker than naming the script — the report
+says so on the line.
+
+### I-4's arithmetic, not I-4's slogan
+
+"Change sized so a CPFP child stays viable" is checked as an actual sum. The
+verifier estimates the parent's vsize (upper bound, so the fee rate is a floor —
+the conservative direction when there is no RBF), sizes a one-in one-out child
+spending the change script, and requires
+
+    change >= (parentVsize + childVsize) * bumpTo - parentFee + dust
+
+with `bumpTo` defaulting to three times the plan's target. On the live three-
+channel batch that comes out at 11,270 sat.
+
+### The reserve top-up, proved
+
+`plan.ReserveTopUp` turns an `internal/reserve` finding into an output, aiming at
+the larger of the two figures — verify needs the smaller, the node needs the
+larger, and the output is being built either way. It returns nothing for an
+all-private batch, because `enforceNewReservedValue` never runs for one.
+
+`TestTheReserveTopUpCountsAtVerify` proves the design's remedy against the live
+node in both directions: lease every coin alice has, watch `psbt_verify` refuse
+with LND's own wording, then add a top-up of **exactly** the shortfall paying a
+fresh **p2tr** address the node minted, and watch the same call succeed — with
+nothing confirmed and no second transaction. That settles two things the design
+asserted: that `CheckReservedValue`'s output credit works from the mempool, and
+that it works for a v1 witness program (`ExtractPkScriptAddrs` handles taproot,
+and btcwallet's `HaveAddress` recognises it).
+
 ## Next actions, in order
 
-1. **Core descriptor plumbing** (directed mode) and the batch-plan verifier
-   (assisted mode).
-2. **The happy path**, on top. `internal/journal` already has the write points it
-   needs, and `internal/reserve` is the Phase 0 gate in front of it; combining
-   partial signatures in-app is the part with no code yet (btcd's psbt package
-   has no `Combine`).
+1. **The happy path.** `internal/journal` already has the write points it needs,
+   `internal/reserve` is the Phase 0 gate in front of it, and `internal/plan`
+   now verifies the transaction before step 5 in either engine. Combining partial
+   signatures in-app is the part with no code yet — btcd's psbt package has no
+   `Combine`, and `regtestenv.SignWithMiner` deliberately does not model I-2.
+2. **Directed mode's step 4.** `internal/coldwallet` sets the wallet up and
+   splits its coins; nothing yet calls `walletcreatefundedpsbt` outside the test
+   fixtures. That is one function, and the verifier is already the thing that
+   checks it.
+3. **Signet, for the two things regtest cannot reach.** The descriptor-import
+   rescan and the prune-horizon pre-flight both need a chain with history. Both
+   are built and both are untested; see the note in
+   `internal/coldwallet/coldwallet_regtest_test.go`.
 
-Done since the last handoff, both from the previous list:
+Done since the last handoff, all three from the previous list:
 
 - **`print-macaroon-command` from a method registry.** `internal/methods` is the
   single source. `make macaroon` prints the `lncli bakemacaroon` line on stdout
@@ -330,7 +491,11 @@ Done since the last handoff, both from the previous list:
 - **The peers do not forget an aborted batch.** See finding 6: `AbandonChannel`
   touches only our own database. If the harness starts refusing opens with
   *"Number of pending channels exceed maximum"*, that is what it is, and
-  `make harness` clears it.
+  `make harness` clears it. `internal/plan`'s regtest tests add to the pressure
+  from the other side: they open eight shim streams per run and cancel every one
+  without finalizing. A cancelled shim costs *us* nothing, but the peer has
+  already sent `accept_channel` and holds its reservation until its own timeout,
+  so a tight run of `make test` can still crowd a peer for ten minutes.
 - **`chan_pending` txids are chainhash bytes**, i.e. reversed relative to every
   txid a human or Core sees. `lnd.ChannelPointFromPending` handles it; hex-encoding
   those bytes directly yields a plausible txid that matches nothing.
@@ -363,9 +528,28 @@ Done since the last handoff, both from the previous list:
   and nothing explains it, check for a leaked lease: `lncli --network regtest
   wallet listleases`, and release with `wallet releaseoutput`. `-p 1` is what
   stops another package seeing that node mid-test.
-- **`regtest/sys` is 2.9 MB of stray PostScript**, untracked, almost certainly a
-  mistyped shell redirect. Not gitignored, so it will show up in every
-  `git status` until it is deleted. Nothing reads it.
+- **btcd is now a direct dependency, at lnd's own pins.** `internal/plan` parses
+  PSBTs and classifies scripts with `btcutil/psbt` and `txscript`, and it must be
+  the same code LND runs or the verifier's answer stops predicting
+  `psbt_verify`'s. `go mod tidy` only promoted the existing indirect entries; do
+  not bump them independently of lnd.
+- **A single send to a legacy address poisons a Core wallet for batching.** Core
+  derives change of the same type as the payment, so paying one P2PKH address
+  leaves a P2PKH change output behind — and the next batch built from that wallet
+  fails at `psbt_verify` with *"not all inputs are SegWit spends"*, naming an
+  input that has nothing to do with whatever produced it. A fixture that needed a
+  legacy coin did exactly this to the miner wallet and broke every abort test.
+  Two things now stop it: that fixture keeps its legacy coins inside its own
+  wallet, and `regtestenv.BuildFundingPSBT` fences off the funding wallet's
+  non-SegWit coins with `coldwallet.FenceOff` before building. Worth knowing past
+  the harness — a real cold wallet with any legacy history is in the same
+  position, which is what the exclusion report in `Coins.Report` is for.
+
+- **Locking is the only way to exclude a coin in Core.** There is no
+  "do not spend these" option on `walletcreatefundedpsbt`, and Core does skip
+  locked outputs. So `coldwallet.FenceOff` is `lockunspent`, and it inherits
+  everything finding 2 above says about it.
+
 - **`internal/regtestenv.SignWithMiner` does not model I-2** and says so in its
   doc comment. It signs with one key so the abort fixtures have a complete
   transaction. Do not reach for it when the real signing path arrives — the

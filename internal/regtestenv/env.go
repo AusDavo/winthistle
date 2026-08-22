@@ -44,6 +44,26 @@ type Env struct {
 	Node  *bitcoind.Client // no wallet scope, for node-level calls
 	Cold  *bitcoind.Client // cold-watch, watch-only
 	Miner *bitcoind.Client // miner, holds keys
+
+	rpcUser, rpcPass string
+}
+
+// WalletClient builds a Core client bound to a wallet by name.
+//
+// The wallet does not have to exist: bitcoind.New only assembles a URL, so this
+// is how a test drives a wallet it is about to create. timeout may be zero for
+// bitcoind.DefaultTimeout; a descriptor import wants far more than that on a
+// real chain, and nothing else does.
+func (e *Env) WalletClient(t *testing.T, name string, timeout time.Duration) *bitcoind.Client {
+	t.Helper()
+	c, err := bitcoind.New(bitcoind.Config{
+		Address: coreAddr, User: e.rpcUser, Pass: e.rpcPass, Wallet: name,
+		Timeout: timeout,
+	})
+	if err != nil {
+		t.Fatalf("building a core client for %s: %v", name, err)
+	}
+	return c
 }
 
 // repoRoot walks up from the test's working directory looking for go.mod.
@@ -157,7 +177,8 @@ func Start(t *testing.T) *Env {
 	}
 	t.Cleanup(func() { alice.Close() })
 
-	return &Env{Root: root, Alice: alice, Node: node, Cold: cold, Miner: miner}
+	return &Env{Root: root, Alice: alice, Node: node, Cold: cold, Miner: miner,
+		rpcUser: user, rpcPass: pass}
 }
 
 // ensureWalletLoaded loads a wallet if Core does not already have it open.

@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
+	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	lnrpc "github.com/lightningnetwork/lnd/lnrpc"
 )
@@ -144,6 +145,19 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
+	// Keep Core's coin selection off anything LND would refuse.
+	//
+	// This is not hypothetical tidiness. Core derives change of the same type as
+	// the payment, so a single send to a legacy address leaves a legacy change
+	// output in the wallet — and the next batch built from that wallet fails at
+	// psbt_verify with "not all inputs are SegWit spends", naming an input that
+	// has nothing to do with the test that produced it. One fixture that needed
+	// a legacy coin poisoned every abort test this way.
+	//
+	// Core has no "do not spend these" option, and it does skip locked outputs,
+	// so the exclusion is a lock — the same mechanism directed mode uses.
+	fenceOffLegacy(t, wallet)
+
 	outputs := make([]map[string]any, 0, len(streams))
 	for _, s := range streams {
 		// Core wants BTC. The funding amount is exact — LND checks its own
@@ -177,6 +191,34 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 		Inputs:  e.psbtInputs(t, wallet, built.PSBT),
 		ChangeI: built.ChangePos,
 	}
+}
+
+// fenceOffLegacy locks the wallet's non-SegWit coins for the duration of the
+// test, and gives them back afterwards.
+func fenceOffLegacy(t *testing.T, wallet *bitcoind.Client) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	coins, err := coldwallet.SelectCoins(ctx, wallet, 1)
+	if err != nil {
+		t.Fatalf("splitting the funding wallet's coins: %v", err)
+	}
+	locked, err := coldwallet.FenceOff(ctx, wallet, coins)
+	if err != nil {
+		t.Fatalf("fencing off the coins LND would refuse: %v", err)
+	}
+	if len(locked) == 0 {
+		return
+	}
+	t.Logf("fenced off %d coin(s) the batch may not spend", len(locked))
+	t.Cleanup(func() {
+		c, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		if _, err := wallet.ReleaseLocks(c, locked); err != nil {
+			t.Errorf("releasing the fence: %v", err)
+		}
+	})
 }
 
 // psbtInputs reads the outpoints the PSBT spends, which are the ones Core just

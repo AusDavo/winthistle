@@ -1,0 +1,204 @@
+package plan
+
+import (
+	"fmt"
+	"strings"
+
+	"github.com/AusDavo/winthistle/internal/prose"
+)
+
+// Document is the batch plan as the operator reads it: what to build, exactly.
+//
+// It is the reviewable artifact the design asks for. Everything in it is a
+// constraint the verifier then checks, with one exception that is called out in
+// the text — the confirmation floor, which cannot be read back out of a PSBT.
+func (p *Plan) Document() string {
+	var b strings.Builder
+
+	named, err := p.Outputs()
+	if err != nil {
+		return "This plan is not usable: " + err.Error() + "\n"
+	}
+
+	b.WriteString(fmt.Sprintf("Batch plan — %d channel%s on %s\n\n",
+		len(p.Channels), prose.Plural(len(p.Channels)), p.Chain))
+	b.WriteString(prose.Para("Build one transaction with exactly the outputs below. " +
+		"Every amount is exact to the satoshi: LND compares its own funding output " +
+		"including its value, so a rounded amount is a channel that never opens."))
+	b.WriteString("\n")
+
+	// The address goes on its own line. A bech32 P2WSH address is 62 characters
+	// and a taproot one 62 too, so anything sharing a line with one overruns the
+	// pane — and this is copy the operator reads character by character.
+	for _, n := range named {
+		if n.Kind == ChangeOut {
+			continue
+		}
+		label := n.Label
+		if label == "" {
+			label = n.Kind.String()
+		}
+		b.WriteString("  " + label + "\n")
+		b.WriteString("      " + n.Address + "\n")
+		b.WriteString("      " + prose.Sats(n.AmountSat) + "\n\n")
+	}
+
+	b.WriteString(prose.Table([]prose.Row{
+		prose.Note("total to pay out", p.TotalOutSat(), "before fee and change"),
+	}))
+
+	if p.TopUp != nil {
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"The reserve top-up is not part of any channel. It pays %s to this "+
+				"node's own on-chain wallet, because LND re-checks its anchor reserve "+
+				"inside psbt_verify and this node is %s short of it. An output inside "+
+				"this transaction counts: CheckReservedValue credits outputs paying an "+
+				"address the wallet owns, so no second transaction and no wait.",
+			prose.Sats(p.TopUp.AmountSat), prose.Sats(p.TopUp.Shortfall))))
+	}
+
+	b.WriteString("\nChange\n")
+	switch {
+	case p.Change.Address != "":
+		b.WriteString(prose.Bullet("Send change to this address:"))
+		b.WriteString("      " + p.Change.Address + "\n")
+	default:
+		b.WriteString(prose.Bullet("Change goes back to the cold wallet's own change " +
+			"branch, which is what your wallet software does by default. The " +
+			"returned transaction is checked for the key origin information that " +
+			"proves the change output is yours."))
+	}
+	if p.Change.MinimumSat > 0 {
+		b.WriteString(prose.Bullet(fmt.Sprintf("Change must be at least %s.",
+			prose.Sats(p.Change.MinimumSat))))
+	}
+	b.WriteString(prose.Bullet(fmt.Sprintf(
+		"There must be a change output, and it must be big enough to pay for a "+
+			"child transaction that lifts this one to %.0f sat/vB. This batch can "+
+			"never be replaced (I-4) — replacing it moves every outpoint and "+
+			"destroys every channel in it — so the change output is the only way "+
+			"a stuck batch is ever accelerated.", p.Fee.cpfpTarget())))
+
+	b.WriteString("\nFee\n")
+	b.WriteString(prose.Bullet(fmt.Sprintf("Target %.2f sat/vB; anything from %.2f to "+
+		"%.2f is accepted.", p.Fee.TargetSatPerVB, p.Fee.Low(), p.Fee.High())))
+	b.WriteString(prose.Bullet("Replace-by-fee off. In Sparrow that is the RBF toggle " +
+		"on the transaction. A transaction with any input below sequence " +
+		"0xfffffffe is refused."))
+
+	b.WriteString("\nInputs\n")
+	b.WriteString(prose.Bullet("SegWit only. LND rejects a funding transaction with " +
+		"any legacy input outright, for malleability — a malleable input is a TXID " +
+		"that can move after LND has committed to it (I-3)."))
+	if p.Inputs.MinConfirmations > 0 {
+		b.WriteString(prose.Bullet(fmt.Sprintf(
+			"Confirmed: at least %d confirmation%s. This is the one constraint here "+
+				"that cannot be read back out of a PSBT, so it is on you.",
+			p.Inputs.MinConfirmations, prose.Plural(p.Inputs.MinConfirmations))))
+	}
+	if n := len(p.Inputs.Allowed); n > 0 {
+		b.WriteString(prose.Bullet(fmt.Sprintf(
+			"Spend only these %d coin%s:", n, prose.Plural(n))))
+		for _, op := range p.Inputs.Allowed {
+			b.WriteString("      " + op.String() + "\n")
+		}
+	}
+	if n := len(p.Inputs.Excluded); n > 0 {
+		b.WriteString(prose.Bullet(fmt.Sprintf(
+			"%d coin%s left out of this batch, so your wallet's balance and this "+
+				"plan will disagree:", n, prose.Plural(n))))
+		for _, e := range p.Inputs.Excluded {
+			b.WriteString(prose.Wrap(e, "      ", "        "))
+		}
+	}
+	return b.String()
+}
+
+// Report is what the operator sees after handing a transaction back.
+func (v *Verification) Report() string {
+	var b strings.Builder
+
+	if v.OK() {
+		b.WriteString("The transaction matches the plan.\n\n")
+	} else {
+		verb := "does not"
+		if len(v.Problems) != 1 {
+			verb = "do not"
+		}
+		b.WriteString(fmt.Sprintf("Do not sign this. %d thing%s about this "+
+			"transaction %s match the plan.\n\n",
+			len(v.Problems), prose.Plural(len(v.Problems)), verb))
+	}
+
+	b.WriteString(fmt.Sprintf("  txid   %s\n", v.UnsignedTxID))
+	b.WriteString(fmt.Sprintf("  size   %d vB", v.Size.Vsize))
+	if v.Size.Estimated {
+		b.WriteString("  (estimated, and an upper bound — so the rate below is a floor)")
+	}
+	b.WriteString("\n\n")
+
+	b.WriteString(prose.Table([]prose.Row{
+		prose.Note("inputs", v.InputSat, fmt.Sprintf("%d", len(v.Inputs))),
+		prose.Note("outputs", v.OutputSat, fmt.Sprintf("%d", len(v.Outputs))),
+		prose.Note("fee", v.FeeSat, fmt.Sprintf("%.2f sat/vB", v.FeeRate)),
+	}))
+
+	b.WriteString("\nOutputs\n")
+	for _, a := range v.Outputs {
+		what := "NOT IN THE PLAN"
+		switch {
+		case a.Recognised:
+			what = a.Label + ", recognised by key origin rather than by address"
+		case a.Named:
+			what = a.Label
+		}
+		b.WriteString(fmt.Sprintf("  %d  %14s   %s\n", a.Index, prose.Sats(a.AmountSat), what))
+		b.WriteString("      " + a.Address + "\n")
+	}
+
+	if v.ChangeFloorSat > 0 {
+		b.WriteString("\n")
+		b.WriteString(prose.Table([]prose.Row{
+			prose.Line("change", v.ChangeSat),
+			prose.Note("CPFP floor", v.ChangeFloorSat, "what a rescue child would cost"),
+		}))
+	}
+
+	if len(v.Problems) > 0 {
+		b.WriteString("\nWhat is wrong\n")
+		for _, p := range v.Problems {
+			head := p.Headline
+			if p.Where != "" {
+				head = p.Where + " — " + p.Headline
+			}
+			b.WriteString(prose.Wrap(head, "  - ", "    "))
+			if p.Detail != "" {
+				b.WriteString(prose.Wrap(p.Detail, "    ", "    "))
+			}
+		}
+	}
+
+	if len(v.Unchecked) > 0 {
+		b.WriteString("\nNot checked here\n")
+		for _, u := range v.Unchecked {
+			b.WriteString(prose.Bullet(u))
+		}
+	}
+	return b.String()
+}
+
+// Summary is the one line a log wants.
+func (v *Verification) Summary() string {
+	if v.OK() {
+		return fmt.Sprintf("%s matches the plan: %d input(s), %d output(s), %d sat "+
+			"fee at %.2f sat/vB", v.UnsignedTxID, len(v.Inputs), len(v.Outputs),
+			v.FeeSat, v.FeeRate)
+	}
+	codes := make([]string, 0, len(v.Problems))
+	for _, p := range v.Problems {
+		codes = append(codes, p.Code.String())
+	}
+	return fmt.Sprintf("%s does not match the plan: %s", v.UnsignedTxID,
+		strings.Join(codes, "; "))
+}

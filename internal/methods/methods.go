@@ -187,6 +187,14 @@ var registry = []Method{
 		Why:  "regtestenv.Peers, choosing fixture peers. The app takes its peers from the plan.",
 	},
 	{
+		Name: "/lnrpc.Lightning/NewAddress",
+		Use:  InApp,
+		Ops:  []Op{{"address", "write"}},
+		Why: "plan.TopUpAddress: a fresh address of the node's own wallet for the reserve " +
+			"top-up output. What makes the verifier's \"the top-up pays an address we " +
+			"control\" a fact rather than a hope is that the node minted it.",
+	},
+	{
 		Name: "/lnrpc.Lightning/OpenChannel",
 		Use:  InHarness,
 		Ops:  []Op{{"onchain", "write"}, {"offchain", "write"}},

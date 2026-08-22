@@ -25,7 +25,16 @@ type Config struct {
 	User    string
 	Pass    string
 	Wallet  string // wallet name — the watch-only descriptor wallet
+
+	// Timeout bounds one HTTP round trip. It defaults to DefaultTimeout, which
+	// is ample for every call this app makes except one: importdescriptors
+	// blocks for the whole rescan, minutes to hours on mainnet. Setup builds its
+	// own client with a timeout that covers that; nothing else should need to.
+	Timeout time.Duration
 }
+
+// DefaultTimeout is the HTTP timeout a client gets when Config.Timeout is zero.
+const DefaultTimeout = 2 * time.Minute
 
 // Client talks to one Core wallet.
 type Client struct {
@@ -80,11 +89,15 @@ func New(cfg Config) (*Client, error) {
 	if cfg.Wallet != "" {
 		url += "/wallet/" + cfg.Wallet
 	}
+	timeout := cfg.Timeout
+	if timeout <= 0 {
+		timeout = DefaultTimeout
+	}
 	return &Client{
 		url:  url,
 		user: user,
 		pass: pass,
-		http: &http.Client{Timeout: 2 * time.Minute},
+		http: &http.Client{Timeout: timeout},
 	}, nil
 }
 

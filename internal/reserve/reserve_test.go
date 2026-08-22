@@ -310,25 +310,6 @@ func TestPrivateMembersAreAccountedForOutLoud(t *testing.T) {
 	}
 }
 
-func TestSats(t *testing.T) {
-	cases := map[int64]string{
-		0:           "0 sat",
-		1:           "1 sat",
-		999:         "999 sat",
-		1_000:       "1,000 sat",
-		10_000:      "10,000 sat",
-		100_000:     "100,000 sat",
-		1_234_567:   "1,234,567 sat",
-		-10_000:     "-10,000 sat",
-		500_000_000: "500,000,000 sat",
-	}
-	for in, want := range cases {
-		if got := sats(in); got != want {
-			t.Errorf("sats(%d) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestReportsAreWrappedToAPane. Terminal copy that overruns is copy the operator
 // does not read, and this is the screen it matters most on.
 func TestReportsAreWrappedToAPane(t *testing.T) {
