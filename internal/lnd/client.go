@@ -14,6 +14,7 @@ import (
 	"os"
 	"time"
 
+	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
 	"google.golang.org/grpc"
@@ -78,9 +79,16 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	// and they are stable across that range.
 	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
 	defer cancelDial()
+	// The guards refuse any call to a method internal/methods does not list, on
+	// both the unary and the streaming path. They are not a substitute for the
+	// baked macaroon — LND enforces that, and it does so whether or not this
+	// process agrees — but they turn a call site that outran the registry into a
+	// loud, local failure instead of one that works here and fails in production.
 	conn, err := grpc.DialContext(dialCtx, cfg.Address,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithPerRPCCredentials(macaroonCreds{hex.EncodeToString(macBytes)}),
+		grpc.WithChainUnaryInterceptor(methods.UnaryGuard()),
+		grpc.WithChainStreamInterceptor(methods.StreamGuard()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("dialing lnd at %s: %w", cfg.Address, err)

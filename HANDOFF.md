@@ -5,8 +5,10 @@ invariants and the do-not-reintroduce list; treat those as settled.
 
 **State:** design complete. Regtest harness working and genuinely self-tested.
 **The abort paths are built and tested against it, the n-of-n gate is proved at
-n=3, and the run journal exists.** No funding flow yet — but the sequence it
-will drive has now been walked end to end by tests.
+n=3, the run journal exists, the macaroon is generated from a method registry,
+and the reserved-value pre-flight predicts step 5's verdict against a live
+node.** No funding flow yet — but the sequence it will drive has now been walked
+end to end by tests.
 
 Private repo at `AusDavo/winthistle`, goes public once the cold probe passes on
 mainnet and the abort paths work.
@@ -22,6 +24,8 @@ mainnet and the abort paths work.
 | `internal/bitcoind` | Core JSON-RPC client, coin-lock lock/release |
 | `internal/abort` | `CancelShim`, `AbandonPending`, `Run` — the three abort paths |
 | `internal/journal` | the run journal: SQLite, pure Go, `Recover` turns a crashed row into an abort |
+| `internal/methods` | the registry of LND RPCs this build calls; `make macaroon` prints the bake command from it, and a gRPC interceptor refuses anything it does not list |
+| `internal/reserve` | the anchor-reserve pre-flight: predicts `psbt_verify`'s verdict before a signature is asked for, and says what to do about it |
 | `internal/regtestenv` | test support: drives funding streams far enough to abort them |
 
 `make check` lints, vets and runs everything. `make test-unit` (`-short`) is the
@@ -30,11 +34,13 @@ regtest is down, so a bare `go test ./...` is honest either way. A fresh clone
 needs `make harness` first — `regtest/creds/` is gitignored, so until it exists
 every harness-backed test skips.
 
-`make test` passes `-p 1`, and that is load-bearing rather than tidy. Two
-packages now drive the harness, and `go test ./...` runs package binaries
-concurrently by default, which puts two test processes through the same alice.
-Use `make test`, not a bare `go test ./...`, when the harness is up — see the
-reserved-value finding below for what the collision looks like.
+`make test` passes `-p 1`, and that is load-bearing rather than tidy. Three
+packages now drive the harness — `abort`, `journal` and `reserve` — and
+`go test ./...` runs package binaries concurrently by default, which puts several
+test processes through the same alice. `internal/reserve` makes this sharper than
+it was: its tests deliberately lease *every* coin alice has, so a concurrent
+package would see a node with no balance and fail over the reserve. Use
+`make test`, not a bare `go test ./...`, when the harness is up.
 
 `make lint` refuses a tracked executable with no shebang. That is not a style
 rule: `/bin/sh` does not decline a file it cannot understand, it interprets it,
@@ -114,7 +120,6 @@ of them from documentation.
 ### `pending_funding_shim_only` declines every channel this app opens
 
 `rpcserver.go` infers "shim funded" from `ThawHeight > 0`, and a plain PSBT open
-`rpcserver.go` infers "shim funded" from `ThawHeight > 0`, and a plain PSBT open
 sets no thaw height, so the safe flag rejects with *"channel … is not externally
 funded or not pending"* on the normal path. Observed, not predicted — see the
 log line in `TestAbandonPendingShimFundedChannel`.
@@ -156,19 +161,60 @@ the flow:
 The operator sees only *"reserved wallet balance invalidated: transaction would
 leave insufficient funds for fee bumping anchor channel closings"* — which says
 nothing about the cold wallet being perfectly fine, and arrives after the cold
-wallet has been brought out. Two consequences:
+wallet has been brought out.
 
-- **The harness was fragile for the same reason.** `bootstrap.sh` gave each node
-  one 5 BTC UTXO, so anything that leased it dropped the reported balance to
-  zero. It now funds 5 × 1 BTC, which is also closer to a real node. The
-  concurrent-package collision `-p 1` fixes was this failure, arriving via
-  another test's plain channel open leasing the coin.
-- **The app needs a pre-flight**, before the operator is asked for signatures:
-  check `WalletBalance` against `RequiredReserve` for the channel count the batch
-  will produce, and say so in the node's own terms. Note the reserve does *not*
-  grow across a batch at verify time — the count comes from channels already in
-  the database, and none of the batch is pending until finalize — but it does
-  once they are all pending, so the wallet has to hold the post-batch figure.
+**`internal/reserve` is now the pre-flight for it,** and building it corrected
+several things this file used to say. The corrections matter, because each of them
+would have produced a pre-flight that disagreed with LND:
+
+- **Not `WalletBalance`.** That RPC sums `ConfirmedBalance` over *every* account
+  and reports leased coins as a separate field; `CheckReservedValue` sums
+  `ListUnspentWitness` over the **default account only**. On a node with an
+  imported account, `WalletBalance` is the larger number, so a pre-flight built on
+  it would wave through a batch that verify then refuses. Use
+  `WalletKit.ListUnspent(min_confs=0, max_confs=MaxInt32, account="default")`,
+  which wraps the very same `ListUnspentWitness` call with the very same
+  arguments.
+- **Zero confirmations, not confirmed.** `CheckReservedValue` calls
+  `ListUnspentWitnessFromDefaultAccount(0, math.MaxInt32)`, and btcwallet's
+  `ListUnspent` counts a credit at zero confirmations. A top-up therefore counts
+  the moment it hits the mempool. `docs/design.html` said "confirmed on-chain
+  balance"; that would have had an operator waiting for a block they do not need.
+- **The blocking figure is +1, not +n.** At verify time no member of the batch is
+  in the channel database — `CompleteReservation` runs when the peer's
+  `funding_signed` arrives, which is after `psbt_finalize` — so every verify in a
+  batch sees the same pre-batch count. The +n figure is real but it is not what
+  refuses the batch; it is what the node needs afterwards, and below it LND
+  declines further on-chain spends and public channel opens. `internal/reserve`
+  reports both and blocks only on the first.
+- **Private channels are not checked at all.** `enforceNewReservedValue` returns
+  before it counts anything when `!isPublic`, and `CurrentNumAnchorChans` skips
+  unannounced channels when counting. So the count to pass to `RequiredReserve`
+  is the number of *public* members, and an all-private batch is never judged.
+  That also answers a `docs/design.html` open question: `RequiredReserve`
+  blindly adds `additional_public_channels` to `CurrentNumAnchorChans()` and has
+  no idea whether the channels you are naming are public — passing `n` for a
+  mixed batch overstates the requirement.
+- **A top-up output inside the batch counts at verify.**
+  `CheckReservedValue` credits transaction outputs paying to an address the wallet
+  owns (`IsOurAddress`), so the design's remedy needs no second transaction and no
+  wait. Worth knowing *why* it works, since the alternative reading is that a
+  top-up must confirm first.
+- **The earlier steps cannot catch it.** `enforceNewReservedValue` is skipped at
+  reservation time for a PSBT funder — `enforceNewReservedValue = !isPsbtFunder`,
+  `lnwallet/wallet.go` — which is exactly why `OpenChannel` succeeds on a node
+  that cannot clear the reserve and the refusal waits for step 5, with the cold
+  wallet out and the windows open.
+
+`TestCheckPredictsWhatVerifyDoes` proves the prediction in both directions
+against the live node: lease every coin alice has, watch `Check` say
+`WouldBeRefused` and `psbt_verify` refuse with LND's own wording; release the
+leases, watch both flip back. A check that only ever said "fine" would pass a
+one-directional test.
+
+The harness was fragile for the same reason the app was. `bootstrap.sh` gave each
+node one 5 BTC UTXO, so anything that leased it dropped the reported balance to
+zero. It now funds 5 × 1 BTC, which is also closer to a real node.
 
 ## I-1, observed — and now at n = 3
 
@@ -239,18 +285,45 @@ recovery genuinely has nothing but the row.
 
 ## Next actions, in order
 
-1. **`print-macaroon-command`** from a method registry, per `CLAUDE.md`. The
-   abort paths call `FundingStateStep`, `AbandonChannel` and `PendingChannels`;
-   the recovery path adds nothing new. The registry should be the single source
-   for that list before it can drift.
-2. **A reserved-value pre-flight.** Per the second operations finding above:
-   `psbt_verify` can be
-   refused for reasons that have nothing to do with the batch, and the operator
-   needs to be told that before they take a cold wallet out, not at step 5.
-3. **Core descriptor plumbing** and the batch-plan verifier.
-4. **The happy path**, on top. `internal/journal` already has the write points it
-   needs; combining partial signatures in-app is the part with no code yet
-   (btcd's psbt package has no `Combine`).
+1. **Core descriptor plumbing** (directed mode) and the batch-plan verifier
+   (assisted mode).
+2. **The happy path**, on top. `internal/journal` already has the write points it
+   needs, and `internal/reserve` is the Phase 0 gate in front of it; combining
+   partial signatures in-app is the part with no code yet (btcd's psbt package
+   has no `Combine`).
+
+Done since the last handoff, both from the previous list:
+
+- **`print-macaroon-command` from a method registry.** `internal/methods` is the
+  single source. `make macaroon` prints the `lncli bakemacaroon` line on stdout
+  and the reasoning on stderr, so `make macaroon | sh` bakes it. Three things
+  keep it from drifting, and only the last one catches a new call site before it
+  ships:
+  - the printed command is rendered from the registry, so the credential is a
+    function of the code;
+  - `lnd.Dial` installs gRPC unary and stream interceptors that refuse any call
+    to a method the registry does not list;
+  - `TestEveryLNDCallSiteIsRegistered` type-checks the whole module, finds every
+    call on an lnrpc/walletrpc client interface, and requires the registry to
+    list *exactly* those — a missing entry fails, and so does a spare one, since
+    a spare entry means the operator's macaroon is wider than the code needs. It
+    needs no harness, so it runs in `make check` and in `make test-unit`.
+
+  The detector follows types rather than text, which matters because this repo's
+  idiom is to take a narrow interface rather than the whole client:
+  `internal/reserve` accepts a three-method interface so a pre-flight cannot move
+  a coin, and the check resolves that by asking which generated LND client
+  satisfies it. It discovers the client interfaces from the dependency graph, so a
+  first call into `routerrpc` or `signrpc` is caught too.
+
+  A registry entry is tagged `InApp` or `InHarness`, and the tag is checked rather
+  than believed: `InApp` must have a call site outside the tests, `InHarness` must
+  have none. Note what that means today — `OpenChannel` is `InHarness`, because
+  this build has no funding flow and the credential it prints must not be able to
+  open a channel. It moves to `InApp` with the happy path.
+
+- **The reserved-value pre-flight.** `internal/reserve`, described in the
+  operations finding above.
 
 ## Watch out for
 
@@ -272,6 +345,27 @@ recovery genuinely has nothing but the row.
   matched it and the whole package was silently un-committable. Now `/journal/`
   and `/runs/`, anchored to the repo root where they were meant to be. Worth
   remembering the shape: unanchored gitignore patterns match at every level.
+- **The call-site check sees typed client calls, not `conn.Invoke`.**
+  `TestEveryLNDCallSiteIsRegistered` resolves method calls through go/types, so it
+  finds a call on `lnrpc.LightningClient` and a call on a narrow interface that
+  one satisfies — but a raw `conn.Invoke(ctx, "/lnrpc.Lightning/…", …)` with the
+  path as a string is invisible to it. `internal/methods/bake_regtest_test.go`
+  does exactly that on purpose, to test LND's own enforcement rather than ours;
+  it is the one place that should.
+- **A macaroon refusal is not `codes.PermissionDenied`.** It is
+  `bakery.ErrPermissionDenied` — a plain `errgo.New("permission denied")` from
+  gopkg.in/macaroon-bakery.v2 — passed through LND's interceptor with no gRPC
+  status attached, so it arrives as `codes.Unknown` with that text. `winthistle
+  doctor` has to match the text; matching the code would never fire. Proved in
+  `TestTheBakedMacaroonWorksAndIsNarrow`, which logs if LND ever starts typing it.
+- **`internal/reserve`'s tests lease every coin alice has**, on purpose, and give
+  them back in `t.Cleanup`. If a later test fails with LND's reserved-value error
+  and nothing explains it, check for a leaked lease: `lncli --network regtest
+  wallet listleases`, and release with `wallet releaseoutput`. `-p 1` is what
+  stops another package seeing that node mid-test.
+- **`regtest/sys` is 2.9 MB of stray PostScript**, untracked, almost certainly a
+  mistyped shell redirect. Not gitignored, so it will show up in every
+  `git status` until it is deleted. Nothing reads it.
 - **`internal/regtestenv.SignWithMiner` does not model I-2** and says so in its
   doc comment. It signs with one key so the abort fixtures have a complete
   transaction. Do not reach for it when the real signing path arrives — the

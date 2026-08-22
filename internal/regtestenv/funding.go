@@ -211,6 +211,19 @@ func (e *Env) psbtInputs(t *testing.T, wallet *bitcoind.Client, psbtB64 string) 
 // may be added (I-3).
 func (e *Env) Verify(t *testing.T, s *Stream, psbtB64 string) {
 	t.Helper()
+	if err := e.TryVerify(t, s, psbtB64); err != nil {
+		t.Fatalf("psbt_verify for %s: %v", s.PendingChanID, err)
+	}
+}
+
+// TryVerify is Verify for the tests whose subject is the refusal.
+//
+// psbt_verify has a rejection that has nothing to do with the PSBT — it runs
+// enforceNewReservedValue over the node's own wallet afterwards — and a fixture
+// that could only fatal on it could not prove anything about it. See
+// internal/reserve.
+func (e *Env) TryVerify(t *testing.T, s *Stream, psbtB64 string) error {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
@@ -227,9 +240,7 @@ func (e *Env) Verify(t *testing.T, s *Stream, psbtB64 string) {
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("psbt_verify for %s: %v", s.PendingChanID, err)
-	}
+	return err
 }
 
 // SignWithMiner signs and finalizes the PSBT with Core's miner wallet, returning

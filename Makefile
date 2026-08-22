@@ -1,7 +1,7 @@
 # Winthistle. `make check` is the one you want.
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help build test test-unit check harness fmt vet lint
+.PHONY: help build test test-unit check harness fmt vet lint macaroon
 
 help:  ## show this help
 > @grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t14
@@ -35,7 +35,12 @@ lint:  ## refuse a tracked executable that has no shebang
 > fi; \
 > echo "lint: every tracked executable has a shebang"
 
-test-unit:  ## tests that need no harness
+# The registry check lives here rather than in `lint`, because it type-checks the
+# whole module to find every lnrpc/walletrpc call site — see
+# internal/methods/callsites_test.go. It needs no harness, so it runs in both
+# `test-unit` and `test`, and a call site that outran the registry fails
+# `make check` before it can ship a macaroon that is too narrow to work.
+test-unit:  ## tests that need no harness (includes the macaroon registry check)
 > go test -short -count=1 ./...
 
 # -p 1 is not a performance knob. Two harness-backed packages now exist, and
@@ -50,3 +55,10 @@ check: lint vet test  ## lint, vet and test
 
 harness:  ## rebuild the regtest cluster from scratch (~1 min)
 > $(MAKE) -C regtest reset
+
+# Generated from internal/methods, never written by hand: CLAUDE.md forbids a
+# hardcoded permission list, and the design doc promises the printed one is
+# authoritative. The command goes to stdout and the reasoning to stderr, so
+# `make macaroon | sh` bakes it and `make macaroon >/dev/null` explains it.
+macaroon:  ## print the lncli bakemacaroon line for this build
+> @go run ./cmd/winthistle print-macaroon-command

@@ -4,11 +4,15 @@ Open a batch of Lightning channels in one on-chain transaction, funded directly
 from cold storage — including multisig cold storage — through a local, guided
 web interface.
 
-> ### Status: design only. Do not use.
+> ### Status: no funding flow yet. Do not use.
 >
-> There is no implementation yet. The central safety property below has been
-> verified by reading LND's source but **has not been tested against a running
-> node**. Nothing here should be pointed at a node holding funds you care about.
+> What exists is the parts that ship first on purpose: the abort paths, the run
+> journal, the anchor-reserve pre-flight, and the generated macaroon. There is no
+> way to open a channel with this yet. The central safety property below was
+> verified by reading LND's source and **has since been observed on regtest at
+> *n* = 3** — three channels armed from one transaction, an empty mempool checked
+> after every finalize — but never on mainnet. Nothing here should be pointed at
+> a node holding funds you care about.
 
 ## What it replaces
 
@@ -43,6 +47,8 @@ to broadcast afterwards; an orchestrator is not bound by that.
 - [`docs/design.html`](docs/design.html) — the full design: invariants, RPC
   sequence, phase model, hazard register, prerequisites, hosting.
 - [`HANDOFF.md`](HANDOFF.md) — current state and build order.
+- `make macaroon` — the `lncli bakemacaroon` line for the build in front of you,
+  generated from the method registry rather than written down anywhere.
 
 ## License
 

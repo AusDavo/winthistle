@@ -4,6 +4,7 @@ go 1.24.4
 
 require (
 	github.com/lightningnetwork/lnd v0.19.3-beta
+	golang.org/x/tools v0.33.0
 	google.golang.org/grpc v1.59.0
 	modernc.org/sqlite v1.29.10
 )
@@ -161,7 +162,6 @@ require (
 	golang.org/x/term v0.32.0 // indirect
 	golang.org/x/text v0.26.0 // indirect
 	golang.org/x/time v0.3.0 // indirect
-	golang.org/x/tools v0.33.0 // indirect
 	google.golang.org/genproto v0.0.0-20231016165738-49dd2c1f3d0b // indirect
 	google.golang.org/genproto/googleapis/api v0.0.0-20231016165738-49dd2c1f3d0b // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20231030173426-d783a09b4405 // indirect
