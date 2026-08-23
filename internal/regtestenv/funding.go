@@ -4,13 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/hex"
-	"fmt"
 	"sort"
 	"testing"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
+	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	lnrpc "github.com/lightningnetwork/lnd/lnrpc"
 )
@@ -127,6 +127,8 @@ func (e *Env) OpenShimStream(t *testing.T, peerPubkey string, amountSat int64) *
 // FundedPSBT is one unsigned transaction paying every stream in the batch.
 type FundedPSBT struct {
 	Base64  string
+	Raw     []byte              // the same packet in bytes, which is what LND parses
+	TxID    string              // the unsigned txid — what I-3 pins
 	Inputs  []bitcoind.Outpoint // locked by Core when lockUnspents is set
 	ChangeI int
 }
@@ -134,10 +136,15 @@ type FundedPSBT struct {
 // BuildFundingPSBT performs step 4: one unsigned PSBT with an output for every
 // stream, funded and change-derived by a Core wallet.
 //
-// wallet chooses the funding source. Tests that only need a *shape* — anything
-// up to psbt_verify — use the watch-only cold wallet, exactly as production
-// does. Tests that need a signature use the miner wallet, which holds keys; see
-// SignWithMiner for why that is acceptable in a fixture and not in the app.
+// It is a thin wrapper over coldwallet.Build rather than its own call to
+// walletcreatefundedpsbt, and that is the point: a fixture with its own builder
+// is a fixture that can drift from the thing it is meant to be testing. The
+// non-negotiable options — replaceable:false, lockUnspents:true, bip32derivs —
+// live in the app, once.
+//
+// wallet chooses the funding source. In practice that is always the watch-only
+// cold wallet, because that is what production uses and because the signing path
+// on the way back out is the cold wallet's two halves.
 func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 	streams []*Stream, feeRate float64) FundedPSBT {
 
@@ -158,38 +165,34 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 	// so the exclusion is a lock — the same mechanism directed mode uses.
 	fenceOffLegacy(t, wallet)
 
-	outputs := make([]map[string]any, 0, len(streams))
+	change, err := coldwallet.ChangeAddress(ctx, wallet)
+	if err != nil {
+		t.Fatalf("asking the funding wallet for a change address: %v", err)
+	}
+
+	outputs := make([]coldwallet.Output, 0, len(streams))
 	for _, s := range streams {
-		// Core wants BTC. The funding amount is exact — LND checks its own
-		// output is present at the satoshi, so this must not be rounded.
-		outputs = append(outputs, map[string]any{
-			s.FundingAddress: btcFromSat(s.FundingAmount),
+		outputs = append(outputs, coldwallet.Output{
+			Address: s.FundingAddress, AmountSat: s.FundingAmount,
 		})
 	}
 
-	var built struct {
-		PSBT      string `json:"psbt"`
-		ChangePos int    `json:"changepos"`
-	}
-	opts := map[string]any{
-		"fee_rate": feeRate,
-		// Core then holds the chosen coins unspendable, which is the state the
-		// UTXO-lock release exists to undo.
-		"lockUnspents": true,
-		// I-4: never signal replaceability. Replacing the funding transaction
-		// moves every outpoint and destroys every channel in the batch.
-		"replaceable": false,
-	}
-	err := wallet.Call(ctx, "walletcreatefundedpsbt",
-		[]any{[]any{}, outputs, 0, opts, true}, &built)
+	built, err := coldwallet.Build(ctx, wallet, coldwallet.BuildRequest{
+		Outputs:          outputs,
+		ChangeAddress:    change,
+		FeeRateSatPerVB:  feeRate,
+		MinConfirmations: 1,
+	})
 	if err != nil {
-		t.Fatalf("walletcreatefundedpsbt: %v", err)
+		t.Fatalf("building the batch transaction: %v", err)
 	}
 
 	return FundedPSBT{
 		Base64:  built.PSBT,
-		Inputs:  e.psbtInputs(t, wallet, built.PSBT),
-		ChangeI: built.ChangePos,
+		Raw:     built.Raw,
+		TxID:    built.TxID,
+		Inputs:  built.Inputs,
+		ChangeI: built.ChangeIndex,
 	}
 }
 
@@ -219,31 +222,6 @@ func fenceOffLegacy(t *testing.T, wallet *bitcoind.Client) {
 			t.Errorf("releasing the fence: %v", err)
 		}
 	})
-}
-
-// psbtInputs reads the outpoints the PSBT spends, which are the ones Core just
-// locked.
-func (e *Env) psbtInputs(t *testing.T, wallet *bitcoind.Client, psbtB64 string) []bitcoind.Outpoint {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	var decoded struct {
-		Tx struct {
-			Vin []struct {
-				TxID string `json:"txid"`
-				Vout uint32 `json:"vout"`
-			} `json:"vin"`
-		} `json:"tx"`
-	}
-	if err := wallet.Call(ctx, "decodepsbt", []any{psbtB64}, &decoded); err != nil {
-		t.Fatalf("decodepsbt: %v", err)
-	}
-	var out []bitcoind.Outpoint
-	for _, in := range decoded.Tx.Vin {
-		out = append(out, bitcoind.Outpoint{TxID: in.TxID, Vout: in.Vout})
-	}
-	return out
 }
 
 // Verify performs step 5 for one stream: hand LND the unsigned PSBT so it can
@@ -285,64 +263,38 @@ func (e *Env) TryVerify(t *testing.T, s *Stream, psbtB64 string) error {
 	return err
 }
 
-// SignWithMiner signs and finalizes the PSBT with Core's miner wallet, returning
-// the raw transaction hex.
+// SignAndCombine is step 6, the real one: collect a partial signature from each
+// half of the simulated cold wallet, combine and finalize them in-app, and
+// confirm the mempool would accept the result.
 //
-// This is a fixture shortcut and it deliberately does NOT model I-2: the miner
-// wallet holds a single key and can complete the transaction alone, so for the
-// duration of this call one external party does hold a broadcastable
-// transaction. That is tolerable here only because these tests exist to tear
-// batches down, they never publish, and each asserts the funding transaction
-// stayed out of the mempool.
+// It replaced a SignWithMiner helper that signed with one key so the abort
+// fixtures had a complete transaction. That shortcut did not model I-2 — for the
+// duration of the call one external wallet held a broadcastable transaction — and
+// once internal/combine existed there was no reason to keep a second, weaker
+// path around for tests to lean on.
 //
-// The real path — m partial signatures combined and finalized in-app, with no
-// party ever holding a complete transaction — belongs to the funding flow, and
-// `make -C regtest verify` covers the 2-of-2 fixture it will use. Do not reach
-// for this function when that arrives.
-func (e *Env) SignWithMiner(t *testing.T, psbtB64 string) (rawTxHex, txid string) {
+// testmempoolaccept validates without relaying, so nothing here publishes.
+func (e *Env) SignAndCombine(t *testing.T, funded FundedPSBT) (rawTxHex, txid string) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
 
-	var processed struct {
-		PSBT     string `json:"psbt"`
-		Complete bool   `json:"complete"`
-	}
-	err := e.Miner.Call(ctx, "walletprocesspsbt",
-		[]any{psbtB64, true, "ALL", false}, &processed)
+	parts := e.SignWithColdWallet(t, funded.Base64)
+	merged, err := combine.Merge(funded.Raw, parts)
 	if err != nil {
-		t.Fatalf("walletprocesspsbt: %v", err)
+		t.Fatalf("combining the cold wallet's partials: %v", err)
 	}
-	if !processed.Complete {
-		t.Fatalf("miner wallet could not complete the psbt")
-	}
-
-	var final struct {
-		Hex      string `json:"hex"`
-		Complete bool   `json:"complete"`
-	}
-	if err := e.Miner.Call(ctx, "finalizepsbt", []any{processed.PSBT}, &final); err != nil {
-		t.Fatalf("finalizepsbt: %v", err)
-	}
-	if !final.Complete || final.Hex == "" {
-		t.Fatalf("finalizepsbt did not complete")
-	}
-
-	// testmempoolaccept validates without relaying — the only pre-flight there
-	// is, and specifically not a broadcast.
-	var accept []struct {
-		Allowed      bool   `json:"allowed"`
-		TxID         string `json:"txid"`
-		RejectReason string `json:"reject-reason"`
-	}
-	err = e.Node.Call(ctx, "testmempoolaccept", []any{[]string{final.Hex}}, &accept)
+	final, err := combine.Finalize(merged)
 	if err != nil {
-		t.Fatalf("testmempoolaccept: %v", err)
+		t.Fatalf("finalizing in-app: %v", err)
 	}
-	if len(accept) != 1 || !accept[0].Allowed {
-		t.Fatalf("testmempoolaccept refused the funding tx: %+v", accept)
+	if final.TxID != funded.TxID {
+		t.Fatalf("I-3: the txid moved from %s to %s", funded.TxID, final.TxID)
 	}
-	return final.Hex, accept[0].TxID
+
+	hexTx := hex.EncodeToString(final.RawTx)
+	if ok, why := e.AcceptsToMempool(t, hexTx); !ok {
+		t.Fatalf("testmempoolaccept refused the batch: %s", why)
+	}
+	return hexTx, final.TxID
 }
 
 // Finalize performs step 7 for one stream and waits for its chan_pending.
@@ -386,17 +338,6 @@ func (e *Env) Finalize(t *testing.T, s *Stream, rawTxHex string) lnd.ChannelPoin
 		t.Fatalf("reading chan_pending outpoint: %v", err)
 	}
 	return cp
-}
-
-// btcFromSat renders satoshis as a BTC amount Core will parse without loss.
-// A float would be wrong here for the same reason it is wrong everywhere else in
-// Bitcoin, so the conversion is done as text.
-func btcFromSat(sat int64) string {
-	neg := ""
-	if sat < 0 {
-		neg, sat = "-", -sat
-	}
-	return fmt.Sprintf("%s%d.%08d", neg, sat/1e8, sat%1e8)
 }
 
 // OpenAndConfirmPlainChannel opens a channel the ordinary way — LND funds it
@@ -463,4 +404,40 @@ func (e *Env) HasOpenChannel(t *testing.T, cp lnd.ChannelPoint) bool {
 		}
 	}
 	return false
+}
+
+// AwaitStreamFailure blocks until LND reports that a funding stream has failed,
+// and returns how long that took.
+//
+// This is what a lapsed ten-minute window looks like from our side: the peer
+// stops holding its reservation, tells us so, and our funding manager fails the
+// flow, which closes the stream with an error. Only meaningful before
+// psbt_finalize — after it the next update on the stream is chan_pending, and
+// reading it here would take it away from whoever is waiting for it.
+func (e *Env) AwaitStreamFailure(t *testing.T, s *Stream, timeout time.Duration) (
+	time.Duration, error) {
+
+	t.Helper()
+	started := time.Now()
+
+	type result struct {
+		upd *lnrpc.OpenStatusUpdate
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		upd, err := s.recv.Recv()
+		done <- result{upd, err}
+	}()
+
+	select {
+	case r := <-done:
+		if r.err == nil {
+			t.Fatalf("the stream produced an update rather than failing: %T",
+				r.upd.GetUpdate())
+		}
+		return time.Since(started), r.err
+	case <-time.After(timeout):
+		return time.Since(started), nil
+	}
 }

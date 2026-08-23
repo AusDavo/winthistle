@@ -58,11 +58,11 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 
 	// Step 4: one transaction for both channels, and the coins Core locked for
 	// it recorded as soon as they are known.
-	funded := env.BuildFundingPSBT(t, env.Miner, streams, 5)
+	funded := env.BuildFundingPSBT(t, env.Cold, streams, 5)
 	t.Cleanup(func() {
 		c, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
-		_, _ = env.Miner.ReleaseLocks(c, funded.Inputs)
+		_, _ = env.Cold.ReleaseLocks(c, funded.Inputs)
 	})
 	if err := j.RecordLocks(ctx, runID, funded.Inputs); err != nil {
 		t.Fatalf("RecordLocks: %v", err)
@@ -79,12 +79,16 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 		t.Fatalf("run is %s with both channels verified, want %s", got, journal.StateSigning)
 	}
 
-	// Step 6. SignWithMiner is one wallet holding one key, so it does not model
-	// I-2 — see its doc comment. One signer row is the honest record of that.
-	if err := j.RecordSigner(ctx, runID, "regtest-miner", journal.SignerPartial); err != nil {
-		t.Fatalf("RecordSigner: %v", err)
+	// Step 6, the real one: two halves of the simulated 2-of-2, each returning a
+	// partial signature, combined in-app. SignerPartial is the only success state
+	// there is, and it is named for I-2 — a signer that could return a complete
+	// transaction would be a signer that could publish.
+	for _, label := range regtestenv.ColdSigners() {
+		if err := j.RecordSigner(ctx, runID, label, journal.SignerPartial); err != nil {
+			t.Fatalf("RecordSigner: %v", err)
+		}
 	}
-	rawTx, txid := env.SignWithMiner(t, funded.Base64)
+	rawTx, txid := env.SignAndCombine(t, funded)
 	if err := j.RecordFinalizedTx(ctx, runID, txid, rawTx); err != nil {
 		t.Fatalf("RecordFinalizedTx: %v", err)
 	}
@@ -141,7 +145,7 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	// The recovery itself. The blunt flag is the standard route here, not an
 	// edge case — rpcserver.go infers "shim funded" from ThawHeight > 0 and a
 	// plain PSBT open sets none — so a confirmation has to be on offer.
-	rep, err := reopened.Recover(ctx, env.Alice.Lightning, env.Miner, runID, alwaysConfirm)
+	rep, err := reopened.Recover(ctx, env.Alice.Lightning, env.Cold, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
@@ -170,7 +174,7 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	}
 
 	// And again, because a recovery can itself be interrupted and restarted.
-	rep2, err := reopened.Recover(ctx, env.Alice.Lightning, env.Miner, runID, alwaysConfirm)
+	rep2, err := reopened.Recover(ctx, env.Alice.Lightning, env.Cold, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("second Recover should be a no-op, got: %v", err)
 	}

@@ -116,10 +116,19 @@ type Capability struct {
 // of them, Explain derives its "cannot" claim from this list rather than
 // restating it, and the guard names the list when it refuses a call.
 //
-// PublishTransaction is deliberately absent. I-1 leaves the single publish to the
-// app, so it will be registered when the funding flow arrives — the promise is
-// about spending and signing, not about broadcasting the transaction the operator
-// built.
+// PublishTransaction is deliberately absent, and now that the funding flow
+// exists that choice is load-bearing rather than pending. The promise the
+// never-list makes is about spending and signing, and broadcasting is neither.
+// WalletKit.PublishTransaction deserializes the bytes it is given, hands them to
+// the wallet, and returns — walletkit_server.go, v0.19.3-beta; there is no
+// signing step in it. So a credential holding it can relay a transaction that is
+// already fully signed and nothing else, and producing a fully signed transaction
+// needs a signature this credential cannot obtain: SendCoins, SendMany,
+// SendOutputs and SignPsbt are all below, and FundPsbt with them.
+//
+// I-1 is the reason it has to be here at all. no_publish leaves the single
+// publish to the app, and WalletKit is the route that also puts the transaction
+// in LND's wallet-level rebroadcaster.
 var forbidden = []Capability{
 	{"/lnrpc.Lightning/SendCoins", "send coins on-chain"},
 	{"/lnrpc.Lightning/SendMany", "send coins on-chain"},
@@ -163,10 +172,20 @@ var registry = []Method{
 		Why:  "abort.AbandonPending: remove a pending channel from LND.",
 	},
 	{
+		Name: "/lnrpc.Lightning/ExportAllChannelBackups",
+		Use:  InApp,
+		Ops:  []Op{{"offchain", "read"}},
+		Why: "arm.Finalize: step 8, taken while every channel is pending and before " +
+			"anything is broadcast. It works on pending channels because " +
+			"chanbackup.FetchStaticChanBackups reads ChannelStateDB.FetchAllChannels, " +
+			"which includes pending opens.",
+	},
+	{
 		Name: "/lnrpc.Lightning/FundingStateStep",
 		Use:  InApp,
 		Ops:  []Op{{"onchain", "write"}, {"offchain", "write"}},
-		Why:  "abort.CancelShim (shim_cancel); the funding flow's psbt_verify and psbt_finalize.",
+		Why: "abort.CancelShim (shim_cancel); arm.Verify (psbt_verify) and arm.Finalize " +
+			"(psbt_finalize).",
 	},
 	{
 		Name: "/lnrpc.Lightning/GetInfo",
@@ -196,11 +215,12 @@ var registry = []Method{
 	},
 	{
 		Name: "/lnrpc.Lightning/OpenChannel",
-		Use:  InHarness,
+		Use:  InApp,
 		Ops:  []Op{{"onchain", "write"}, {"offchain", "write"}},
-		Why: "regtestenv.OpenShimStream. This is step 2 of the real sequence and it " +
-			"will move to InApp with the funding flow — but this build has no " +
-			"funding flow, so the credential it prints must not be able to open a channel.",
+		Why: "arm.Open: step 2 of the sequence, one PSBT-shim stream per channel with " +
+			"no_publish set on every one of them. It was InHarness until the funding " +
+			"flow existed, because a credential that could open a channel for a build " +
+			"that could not finish one is a permission granted for nothing.",
 	},
 	{
 		Name: "/lnrpc.Lightning/OpenChannelSync",
@@ -236,6 +256,13 @@ var registry = []Method{
 		Ops:  []Op{{"onchain", "read"}},
 		Why: "reserve.Check: the exact balance CheckReservedValue judges — unlocked, " +
 			"default account, witness outputs, zero confirmations.",
+	},
+	{
+		Name: "/walletrpc.WalletKit/PublishTransaction",
+		Use:  InApp,
+		Ops:  []Op{{"onchain", "write"}},
+		Why: "arm.Publish: step 9, the single publish call, gated on n of n " +
+			"chan_pending. Deliberately not on the never-list — see forbidden.",
 	},
 	{
 		Name: "/walletrpc.WalletKit/ReleaseOutput",

@@ -50,14 +50,15 @@ func armBatch(t *testing.T, env *regtestenv.Env, peers []string) armedBatch {
 		streams = append(streams, env.OpenShimStream(t, p, fixtureChannelSat))
 	}
 
-	// One transaction for the whole batch. The funding source is the miner
-	// wallet because the fixture needs a complete signature; production combines
-	// partials in-app instead — see SignWithMiner's doc comment.
-	funded := env.BuildFundingPSBT(t, env.Miner, streams, 5)
+	// One transaction for the whole batch, funded by the watch-only cold wallet
+	// exactly as production does, and signed by that wallet's two halves on the
+	// way back — see SignAndCombine. No party but this process ever holds a
+	// complete transaction, which is I-2, and the fixture is the real path.
+	funded := env.BuildFundingPSBT(t, env.Cold, streams, 5)
 	t.Cleanup(func() {
 		c, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
-		_, _ = env.Miner.ReleaseLocks(c, funded.Inputs)
+		_, _ = env.Cold.ReleaseLocks(c, funded.Inputs)
 	})
 
 	// I-4 wants a change output we control, so a CPFP child stays viable when
@@ -75,7 +76,7 @@ func armBatch(t *testing.T, env *regtestenv.Env, peers []string) armedBatch {
 		env.Verify(t, s, funded.Base64)
 	}
 
-	rawTx, txid := env.SignWithMiner(t, funded.Base64)
+	rawTx, txid := env.SignAndCombine(t, funded)
 	assertNotReplaceable(t, env, rawTx)
 
 	b := armedBatch{
@@ -359,7 +360,7 @@ func TestBatchArmsEveryChannelBeforeAnythingIsPublished(t *testing.T) {
 	// down is the same abort as for one channel, n times over — and it is what
 	// the mainnet cold probe will terminate through.
 	alwaysConfirm := func(context.Context, abort.BluntRequest) (bool, error) { return true, nil }
-	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Miner, b.target(), alwaysConfirm)
+	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, b.target(), alwaysConfirm)
 	if err != nil {
 		t.Fatalf("aborting the armed batch: %v", err)
 	}

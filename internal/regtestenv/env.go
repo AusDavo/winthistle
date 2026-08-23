@@ -220,18 +220,30 @@ func (e *Env) Mine(t *testing.T, n int) {
 // and is distinguished from a transport failure by its message.
 func (e *Env) InMempool(t *testing.T, txid string) bool {
 	t.Helper()
+	present, err := e.TryInMempool(txid)
+	if err != nil {
+		t.Fatalf("getmempoolentry %s: %v", txid, err)
+	}
+	return present
+}
+
+// TryInMempool is InMempool for a caller that must not fail the test itself.
+//
+// A polling goroutine is the case: t.Fatalf there would run runtime.Goexit on
+// the wrong goroutine, so a transport failure has to come back as a value and be
+// asserted on by whoever owns the test.
+func (e *Env) TryInMempool(txid string) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
 	var raw json.RawMessage
 	err := e.Node.Call(ctx, "getmempoolentry", []any{txid}, &raw)
 	if err == nil {
-		return true
+		return true, nil
 	}
 	if strings.Contains(err.Error(), "not in mempool") ||
 		strings.Contains(err.Error(), "Transaction not in mempool") {
-		return false
+		return false, nil
 	}
-	t.Fatalf("getmempoolentry %s: %v", txid, err)
-	return false
+	return false, err
 }

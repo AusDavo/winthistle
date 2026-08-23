@@ -7,7 +7,7 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
+	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
@@ -50,77 +50,45 @@ func cancelStreams(t *testing.T, env *regtestenv.Env, streams []*regtestenv.Stre
 // plan.Recognition is what covers that case.
 func changeAddress(t *testing.T, env *regtestenv.Env) string {
 	t.Helper()
-	var addr string
-	if err := env.Cold.Call(testCtx(t), "getrawchangeaddress", nil, &addr); err != nil {
+	addr, err := coldwallet.ChangeAddress(testCtx(t), env.Cold)
+	if err != nil {
 		t.Fatalf("asking the cold wallet for a change address: %v", err)
 	}
 	return addr
 }
 
-// built is one transaction Core made for a batch.
-type built struct {
-	Base64 string
-	Inputs []bitcoind.Outpoint
-	TxID   string
-}
-
 // buildBatch is step 4, directed mode: one unsigned PSBT with an output for
 // every stream, plus whatever else the plan names, funded and change-derived by
 // the watch-only cold wallet.
-func buildBatch(t *testing.T, env *regtestenv.Env, outputs []map[string]any,
-	change string) built {
+//
+// It goes through coldwallet.Build rather than calling walletcreatefundedpsbt
+// itself, so these tests exercise the app's own builder — including the options
+// that are not negotiable there (replaceable:false, lockUnspents, bip32derivs).
+// The outputs are the fixture's business, which is what lets a test ask for a
+// batch paying a stranger or a funding output one satoshi short.
+func buildBatch(t *testing.T, env *regtestenv.Env, outputs []coldwallet.Output,
+	change string) coldwallet.Built {
 
 	t.Helper()
-	ctx := testCtx(t)
 
-	opts := map[string]any{
-		"fee_rate":     feeRate,
-		"lockUnspents": true,
-		// I-4, at construction. Not a UI toggle and not adjustable.
-		"replaceable": false,
-		// Directed mode picks the change address so the plan can name the exact
-		// script rather than having to recognise one.
-		"changeAddress": change,
-	}
-	var out struct {
-		PSBT      string `json:"psbt"`
-		ChangePos int    `json:"changepos"`
-	}
-	// The trailing true is bip32derivs: the derivations a signer needs to
-	// recognise its own key, and what plan.Recognition reads on the return leg.
-	if err := env.Cold.Call(ctx, "walletcreatefundedpsbt",
-		[]any{[]any{}, outputs, 0, opts, true}, &out); err != nil {
-		t.Fatalf("walletcreatefundedpsbt: %v", err)
-	}
-	if out.ChangePos < 0 {
-		t.Fatal("Core added no change output — I-4 leaves no CPFP handle")
-	}
-
-	var decoded struct {
-		Tx struct {
-			TxID string `json:"txid"`
-			Vin  []struct {
-				TxID string `json:"txid"`
-				Vout uint32 `json:"vout"`
-			} `json:"vin"`
-		} `json:"tx"`
-	}
-	if err := env.Cold.Call(ctx, "decodepsbt", []any{out.PSBT}, &decoded); err != nil {
-		t.Fatalf("decodepsbt: %v", err)
-	}
-	b := built{Base64: out.PSBT, TxID: decoded.Tx.TxID}
-	for _, in := range decoded.Tx.Vin {
-		b.Inputs = append(b.Inputs, bitcoind.Outpoint{TxID: in.TxID, Vout: in.Vout})
+	built, err := coldwallet.Build(testCtx(t), env.Cold, coldwallet.BuildRequest{
+		Outputs:          outputs,
+		ChangeAddress:    change,
+		FeeRateSatPerVB:  feeRate,
+		MinConfirmations: 1,
+	})
+	if err != nil {
+		t.Fatalf("building the batch transaction: %v", err)
 	}
 
 	t.Cleanup(func() {
 		ctx, done := context.WithTimeout(context.Background(), 30*time.Second)
 		defer done()
-		if _, err := env.Cold.ReleaseLocks(ctx, b.Inputs); err != nil {
+		if _, err := env.Cold.ReleaseLocks(ctx, built.Inputs); err != nil {
 			t.Errorf("releasing the cold wallet's coin locks: %v", err)
 		}
 	})
-	return b
+	return built
 }
 
 // batchPlan assembles the plan for a set of streams.
@@ -148,10 +116,12 @@ func batchPlan(t *testing.T, streams []*regtestenv.Stream, topUp string,
 	return p
 }
 
-func fundingOutputs(streams []*regtestenv.Stream) []map[string]any {
-	out := make([]map[string]any, 0, len(streams))
+func fundingOutputs(streams []*regtestenv.Stream) []coldwallet.Output {
+	out := make([]coldwallet.Output, 0, len(streams))
 	for _, s := range streams {
-		out = append(out, map[string]any{s.FundingAddress: prose.BTC(s.FundingAmount)})
+		out = append(out, coldwallet.Output{
+			Address: s.FundingAddress, AmountSat: s.FundingAmount,
+		})
 	}
 	return out
 }
@@ -181,13 +151,13 @@ func TestTheVerifierAndLNDAgreeOnARealBatch(t *testing.T) {
 	change := changeAddress(t, env)
 
 	outputs := append(fundingOutputs(streams),
-		map[string]any{topUp: prose.BTC(topUpSat)})
+		coldwallet.Output{Address: topUp, AmountSat: topUpSat})
 	b := buildBatch(t, env, outputs, change)
 
 	p := batchPlan(t, streams, topUp, topUpSat, change)
 	t.Logf("\n%s", p.Document())
 
-	v, err := p.VerifyBase64(b.Base64)
+	v, err := p.VerifyBase64(b.PSBT)
 	if err != nil {
 		t.Fatalf("verifying: %v", err)
 	}
@@ -213,7 +183,7 @@ func TestTheVerifierAndLNDAgreeOnARealBatch(t *testing.T) {
 
 	// And now LND, on the same bytes.
 	for _, s := range streams {
-		if err := env.TryVerify(t, s, b.Base64); err != nil {
+		if err := env.TryVerify(t, s, b.PSBT); err != nil {
 			t.Fatalf("psbt_verify refused a transaction the plan accepted, for %s: %v\n"+
 				"That is the disagreement this test exists to catch.", s.PendingChanID, err)
 		}
@@ -256,12 +226,12 @@ func TestLNDAcceptsAnOutputTheVerifierRefuses(t *testing.T) {
 	const strangerSat = 400_000
 
 	outputs := append(fundingOutputs(streams),
-		map[string]any{topUp: prose.BTC(topUpSat)},
-		map[string]any{stranger: prose.BTC(strangerSat)})
+		coldwallet.Output{Address: topUp, AmountSat: topUpSat},
+		coldwallet.Output{Address: stranger, AmountSat: strangerSat})
 	b := buildBatch(t, env, outputs, change)
 
 	p := batchPlan(t, streams, topUp, topUpSat, change)
-	v, err := p.VerifyBase64(b.Base64)
+	v, err := p.VerifyBase64(b.PSBT)
 	if err != nil {
 		t.Fatalf("verifying: %v", err)
 	}
@@ -282,7 +252,7 @@ func TestLNDAcceptsAnOutputTheVerifierRefuses(t *testing.T) {
 
 	// LND, on the same bytes, for every channel in the batch.
 	for _, s := range streams {
-		if err := env.TryVerify(t, s, b.Base64); err != nil {
+		if err := env.TryVerify(t, s, b.PSBT); err != nil {
 			t.Fatalf("psbt_verify refused %s for a reason of its own (%v), which "+
 				"would make this test prove nothing. Check the fixture.",
 				s.PendingChanID, err)
@@ -332,12 +302,12 @@ func TestTheReserveTopUpCountsAtVerify(t *testing.T) {
 	bareTx := buildBatch(t, env, fundingOutputs([]*regtestenv.Stream{bare}), change)
 
 	barePlan := batchPlan(t, []*regtestenv.Stream{bare}, "", 0, change)
-	if v, err := barePlan.VerifyBase64(bareTx.Base64); err != nil {
+	if v, err := barePlan.VerifyBase64(bareTx.PSBT); err != nil {
 		t.Fatalf("verifying the bare batch: %v", err)
 	} else if !v.OK() {
 		t.Fatalf("the verifier refused a well-formed batch:\n%s", v.Report())
 	}
-	err = env.TryVerify(t, bare, bareTx.Base64)
+	err = env.TryVerify(t, bare, bareTx.PSBT)
 	if err == nil {
 		t.Fatalf("psbt_verify accepted a batch with the reserve unmet, so this test " +
 			"is not reproducing the condition it needs")
@@ -361,18 +331,18 @@ func TestTheReserveTopUpCountsAtVerify(t *testing.T) {
 	toppedStream := env.OpenShimStream(t, peers[1], fixtureChannelSat)
 	cancelStreams(t, env, []*regtestenv.Stream{toppedStream})
 	outputs := append(fundingOutputs([]*regtestenv.Stream{toppedStream}),
-		map[string]any{topUp: prose.BTC(topUpSat)})
+		coldwallet.Output{Address: topUp, AmountSat: topUpSat})
 	toppedTx := buildBatch(t, env, outputs, change)
 
 	toppedPlan := batchPlan(t, []*regtestenv.Stream{toppedStream}, topUp, topUpSat, change)
-	v, err := toppedPlan.VerifyBase64(toppedTx.Base64)
+	v, err := toppedPlan.VerifyBase64(toppedTx.PSBT)
 	if err != nil {
 		t.Fatalf("verifying the topped-up batch: %v", err)
 	}
 	if !v.OK() {
 		t.Fatalf("the verifier refused the topped-up batch:\n%s", v.Report())
 	}
-	if err := env.TryVerify(t, toppedStream, toppedTx.Base64); err != nil {
+	if err := env.TryVerify(t, toppedStream, toppedTx.PSBT); err != nil {
 		t.Fatalf("psbt_verify still refused the batch with a %s top-up to %s: %v\n"+
 			"The design's remedy for a reserve shortfall depends on this working.",
 			prose.Sats(topUpSat), topUp, err)
@@ -399,14 +369,14 @@ func TestTheVerifierNamesTheChannelAnAmountBelongsTo(t *testing.T) {
 	change := changeAddress(t, env)
 
 	// Core builds a transaction paying one satoshi less than LND asked for.
-	outputs := []map[string]any{
-		{s.FundingAddress: prose.BTC(s.FundingAmount - 1)},
-		{topUp: prose.BTC(50_000)},
+	outputs := []coldwallet.Output{
+		{Address: s.FundingAddress, AmountSat: s.FundingAmount - 1},
+		{Address: topUp, AmountSat: 50_000},
 	}
 	b := buildBatch(t, env, outputs, change)
 
 	p := batchPlan(t, []*regtestenv.Stream{s}, topUp, 50_000, change)
-	v, err := p.VerifyBase64(b.Base64)
+	v, err := p.VerifyBase64(b.PSBT)
 	if err != nil {
 		t.Fatalf("verifying: %v", err)
 	}
@@ -427,7 +397,7 @@ func TestTheVerifierNamesTheChannelAnAmountBelongsTo(t *testing.T) {
 
 	// LND agrees, which is the case where our check is merely earlier and
 	// clearer rather than the only one.
-	if err := env.TryVerify(t, s, b.Base64); err == nil {
+	if err := env.TryVerify(t, s, b.PSBT); err == nil {
 		t.Error("psbt_verify accepted a funding output one satoshi short")
 	} else {
 		t.Logf("LND agrees, in its own words: %v", err)

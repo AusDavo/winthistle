@@ -3,14 +3,18 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State:** design complete. Regtest harness working and genuinely self-tested.
-**The abort paths are built and tested against it, the n-of-n gate is proved at
-n=3, the run journal exists, the macaroon is generated from a method registry,
-the reserved-value pre-flight predicts step 5's verdict against a live node, and
-both engines' setup halves are built: directed mode's watch-only Core wallet and
-assisted mode's batch-plan verifier.** No funding flow yet — but the sequence it
-will drive has now been walked end to end by tests, and the verifier has been
-run against the same bytes LND is shown.
+**State: the happy path works end to end on regtest.** Three channels, one
+transaction funded from the simulated 2-of-2 cold wallet, both halves signing
+partially, combined and finalized in-app, verified against the plan and against
+all three streams, finalized to three `chan_pending` receipts with the mempool
+checked after every one of them, backups exported, published exactly once,
+confirmed, and all three channels open. Everything before it still holds: the
+abort paths, the run journal, the generated macaroon, the reserved-value
+pre-flight, the watch-only Core wallet and the batch-plan verifier.
+
+Two of `docs/design.html`'s open questions are now answered rather than open —
+Core's `finalizepsbt` and the ten-minute clock. The two that remain both sit past
+the broadcast line.
 
 Private repo at `AusDavo/winthistle`, goes public once the cold probe passes on
 mainnet and the abort paths work.
@@ -24,14 +28,16 @@ mainnet and the abort paths work.
 | `regtest/` | working cluster: bitcoind + alice + 3 peers + simulated 2-of-2 cold wallet. `make reset` rebuilds and self-tests in ~1 min |
 | `internal/lnd` | gRPC client, `PendingChanID`, `ChannelPoint` |
 | `internal/bitcoind` | Core JSON-RPC client, coin-lock lock/release, and the descriptor-wallet calls directed mode needs |
-| `internal/coldwallet` | directed mode's setup: create the watch-only wallet, checksum and import the descriptors, read back what landed, and end in the round-trip address check. Also the segwit-only coin filter |
+| `internal/coldwallet` | directed mode's setup: create the watch-only wallet, checksum and import the descriptors, read back what landed, and end in the round-trip address check. Also the segwit-only coin filter, and step 4's `walletcreatefundedpsbt` |
 | `internal/plan` | the batch plan and its verifier — the check LND does not make |
 | `internal/prose` | the operator-facing copy primitives: one column, one way to render a satoshi |
 | `internal/abort` | `CancelShim`, `AbandonPending`, `Run` — the three abort paths |
 | `internal/journal` | the run journal: SQLite, pure Go, `Recover` turns a crashed row into an abort |
 | `internal/methods` | the registry of LND RPCs this build calls; `make macaroon` prints the bake command from it, and a gRPC interceptor refuses anything it does not list |
 | `internal/reserve` | the anchor-reserve pre-flight: predicts `psbt_verify`'s verdict before a signature is asked for, and says what to do about it |
-| `internal/regtestenv` | test support: drives funding streams far enough to abort them |
+| `internal/combine` | I-2's only real code: merge the signers' partials, finalize in-app, execute every witness, re-verify against the plan |
+| `internal/arm` | the armed window — steps 2 to 9, and the only place in the repo that can broadcast |
+| `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, and aborts what it opened |
 
 `internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
 had the only copy of the wrapper and the satoshi formatter. Nothing about the
@@ -44,14 +50,26 @@ regtest is down, so a bare `go test ./...` is honest either way. A fresh clone
 needs `make harness` first — `regtest/creds/` is gitignored, so until it exists
 every harness-backed test skips.
 
-`make test` passes `-p 1`, and that is load-bearing rather than tidy. Five
-packages now drive the harness — `abort`, `journal`, `reserve`, `coldwallet` and
-`plan` — and
-`go test ./...` runs package binaries concurrently by default, which puts several
-test processes through the same alice. `internal/reserve` makes this sharper than
-it was: its tests deliberately lease *every* coin alice has, so a concurrent
-package would see a node with no balance and fail over the reserve. Use
-`make test`, not a bare `go test ./...`, when the harness is up.
+`make test` passes `-p 1`, and that is load-bearing rather than tidy. Seven
+packages now drive the harness — `abort`, `arm`, `coldwallet`, `combine`,
+`journal`, `plan` and `reserve` — and `go test ./...` runs package binaries
+concurrently by default, which puts several test processes through the same
+alice. `internal/reserve` makes this sharper than it was: its tests deliberately
+lease *every* coin alice has, so a concurrent package would see a node with no
+balance and fail over the reserve. Use `make test`, not a bare `go test ./...`,
+when the harness is up.
+
+`internal/arm`'s publish test is the first one that spends real regtest coins and
+leaves three *open* channels behind. Nothing can close them — `CloseChannel` is
+on the macaroon never-list — so `make harness` is the only way back to a clean
+node, and running `make test` repeatedly accumulates open channels and eats the
+cold wallet's UTXOs. Both are fine for a while (8 BTC in four coins, ~0.75 BTC a
+run) and neither is subtle when it bites.
+
+There is one test that `make test` deliberately does not run:
+`TestWhoOwnsTheTenMinuteClock` takes eleven minutes of wall clock and skips
+unless `WINTHISTLE_SLOW=1`. It is the measurement behind the countdown, and it
+only needs re-running when lnd's reservation timeout might have changed.
 
 `make lint` refuses a tracked executable with no shebang. That is not a style
 rule: `/bin/sh` does not decline a file it cannot understand, it interprets it,
@@ -75,7 +93,9 @@ adduser $USER docker; sudo snap disable docker && sudo snap enable docker`.
 ## What the harness runs proved
 
 Seven things, all verified against a running node rather than inferred, not one
-of them from documentation.
+of them from documentation. The findings from the happy-path work are in
+"Combining in-app" and "The armed window" below, because they are about LND's
+enforcement rather than about the harness.
 
 1. **`regtest/verify.py` had no shebang.** It is executable and invoked by path,
    so `/bin/sh` got it, read the backticks around `` `make verify` `` in the
@@ -232,7 +252,9 @@ zero. It now funds 5 × 1 BTC, which is also closer to a real node.
 `armBatch` in `internal/abort/abandon_regtest_test.go` opens one funding stream
 per peer, builds ONE unsigned transaction carrying all three funding outputs plus
 change, runs `psbt_verify` against every stream, then `psbt_finalize` on all
-three. `TestBatchArmsEveryChannelBeforeAnythingIsPublished` asserts three
+three. It funds from the watch-only cold wallet and signs through the real
+two-partials-combined-in-app path (`SignAndCombine`), so the n=3 assertion is
+made about the production flow rather than about a fixture shortcut. `TestBatchArmsEveryChannelBeforeAnythingIsPublished` asserts three
 `chan_pending` receipts, one shared TXID with three distinct output indices, and
 an empty mempool — checked after *every* finalize, including the last, which is
 precisely where LND's own "all but the last" idiom would have published. It then
@@ -437,54 +459,204 @@ asserted: that `CheckReservedValue`'s output credit works from the mempool, and
 that it works for a v1 witness program (`ExtractPkScriptAddrs` handles taproot,
 and btcwallet's `HaveAddress` recognises it).
 
+## Combining in-app, and what LND does not check
+
+`internal/combine` is I-2's only piece of real code. btcd's psbt package has no
+`Combine`, so the merge is ours; what makes it worth reading is that it trusts
+neither side. Every returned packet must carry the same unsigned transaction as
+the base (I-3, and the refusal names the device); partial signatures are unioned
+by pubkey and two different signatures for one key are **refused rather than
+chosen between**; witness scripts, redeem scripts, sighash types, derivations and
+attached UTXOs are carried forward and a later packet may not overwrite an
+earlier one's; and a packet that arrives already finalized is refused outright,
+because a finalized input is a complete witness and that device therefore held a
+broadcastable transaction.
+
+Then `MaybeFinalizeAll`, `Extract`, **execute every input's witness against its
+own script**, and re-run `internal/plan`'s verifier on the transaction that came
+out — not on the packet that came in, because the second is what n channels will
+depend on. With every witness present the verifier's size is exact rather than an
+upper bound, so `Recheck` also asserts that its vsize equals the real one; a
+disagreement means one of the two is wrong about the bytes and neither answer is
+usable.
+
+### `psbt_finalize` is not a second opinion on I-3
+
+This is the finding that most changes how the earlier sections read.
+`PsbtIntent.FinalizeRawTX` compares the outputs with `psbt.VerifyOutputsEqual`
+and the inputs' *previous outpoints* with `psbt.VerifyInputPrevOutpointsEqual`,
+and stops — the comment says "the fields in the PSBT part are allowed to change".
+Sequence numbers, version and locktime are in the wire transaction rather than in
+the PSBT part, and none of them is compared. `CompileFundingTx` then takes the
+channel point from `i.FinalTX.TxHash()`: the transaction it was just handed.
+
+So a returned transaction whose sequence numbers changed has a different TXID and
+**LND would adopt it** — including one that is BIP-125 replaceable, which is
+exactly what I-4 exists to prevent. LND does not check the signatures either:
+`verifyInputsSigned` only asserts that each input has *something* attached. Both
+gaps are ours to close, and both are: the merge refuses a moved unsigned TXID,
+and the verifier refuses any input below sequence `0xfffffffe`. The proto's "no
+inputs or outputs can change, only signatures can be added" describes LND's
+intent, not the extent of its enforcement.
+
+### The finalizepsbt question, answered by not asking it
+
+`docs/design.html` asked whether Core's `finalizepsbt` handles every signer's
+output for the descriptor in use, or whether a fallback finalizer is needed.
+Nothing in the funding path calls Core: the merge is ours and btcd's
+`MaybeFinalizeAll` assembles the witness. `TestOurFinalizerAgreesWithCoresByteForByte`
+is the corroboration rather than the answer — on the harness's
+`wsh(sortedmulti(2,…))` the in-app result is byte-identical to Core's
+`combinepsbt` plus `finalizepsbt`, which it should be, since both derive the
+witness order from the witness script and the signatures are deterministic.
+
+btcd's finalizer is narrower than Core's in two ways, and both are checked here
+first so the operator hears a sentence about their wallet rather than one about
+btcd:
+
+- a P2WSH input's witness script must be a **bare** *m*-of-*n* multisig.
+  `getMultisigScriptWitness` → `checkIsMultiSigScript` starts with
+  `GetScriptClass(script) != MultiSigTy`. `wsh(sortedmulti)` and `wsh(multi)`
+  qualify; a miniscript policy with a timelock does not, and would need a
+  finalizer this build does not have.
+- it wants **exactly** *m* signatures, not more. `checkIsMultiSigScript` requires
+  `numSigs == len(pubKeys) == len(sigs)`, so a 2-of-3 carrying three partials
+  fails — with "Unsupported script type", which tells an operator nothing. This
+  matters operationally: on a 2-of-3, asking a third device to sign as a
+  belt-and-braces measure *breaks the batch*. The refusal now names the counts
+  and the devices.
+
+While there: btcd's *deserializer* already runs `PartialSig.checkValid` —
+`ParsePubKey` plus `ParseDERSignature` — on every partial signature it reads, and
+refuses two records with the same pubkey inside one input. So a malformed partial
+cannot reach the merge from parsed bytes.
+`TestBtcdRefusesAMalformedPartialSignatureBeforeTheMergeSeesIt` pins that,
+because the merge's own length guard is what stands between a hostile packet and
+`checkSigHashFlags` reading `sig[len(sig)-1]` if it ever stops being true.
+
+The unit tests need no harness and no Core at all: they build a real *m*-of-*n*
+P2WSH spend out of generated keys and sign it, so the claim under test is "this
+witness satisfies this script", not "the merge moved bytes around".
+
+## The armed window, and the single publish
+
+`internal/arm` is steps 2 to 9 and the only code in this repo that can broadcast.
+Three things enforce I-1 there, deliberately not the same thing said three times:
+
+1. `no_publish` is set in `Open` with no parameter that changes it.
+2. `Publish` takes an `*arm.Armed` and nothing else, and `Armed`'s raw
+   transaction lives in an **unexported** field that only `Finalize` fills. "There
+   is no path to the publish call that skips the gate" is therefore a fact about
+   the type system rather than a convention.
+3. The journal refuses. `MarkPublishing` declines a run that is not armed, and it
+   is the journal that decided the run was armed, by counting its own rows in
+   `MarkPending`. This is the one that would still hold if `internal/arm` were
+   wrong about everything else, and it is the one
+   `TestPublishRefusesABatchTheJournalDoesNotCallArmed` exercises.
+
+`Publisher` is a separate one-method interface rather than a fifth method on
+`Client`, because broadcasting is the only action in the sequence that cannot be
+taken back and the narrowest way to say so is a type.
+
+Two details inside `Finalize` are choices rather than defaults:
+
+- The finalized transaction is journalled **before the first** `psbt_finalize`,
+  not after the last. From the moment LND holds it the peers start storing
+  commitment signatures against its outpoints, and `no_publish` also gates
+  `rebroadcastFundingTx`, so losing the bytes after that point is the worst
+  outcome available.
+- Channels are finalized **one at a time**, each waiting for its own receipt.
+  Issuing all n finalizes and collecting afterwards is marginally faster and
+  leaves up to n channels in the state "LND has the transaction and we do not
+  know whether it armed". Sequentially there is at most one, and the error says
+  which. If a receipt does not arrive, `PendingChannels` is consulted rather than
+  guessed at: presence in `pending_open_channels` means the channel is in the
+  channel database, which happens in `CompleteReservation` — the same call that
+  stores the peer's commitment signature and the one `chan_pending` is emitted
+  after. Same fact, different route.
+
+The receipt is also *checked*, not believed: each stream's funding address is
+resolved to its output in the transaction and compared against the outpoint
+`chan_pending` reports. It costs nothing and it is the only independent
+confirmation that LND put the channel where the plan says it is.
+
+`ExportAllChannelBackups` works on pending channels, which the design listed as
+something the cold probe would have to verify. It goes through
+`chanbackup.FetchStaticChanBackups` over `ChannelStateDB.FetchAllChannels`,
+documented as "all open channels ... including pending open". Observed: a
+1,808-byte multi-channel backup covering three singles, taken while all three
+were pending and before anything was broadcast.
+
+### `PublishTransaction` is still not on the never-list, and now that is a decision
+
+The registry's never-list promises the operator that the baked credential cannot
+send coins, send payments, close a channel, sign a message, or widen itself.
+`WalletKit.PublishTransaction` is none of those: `walletkit_server.go`
+deserializes the bytes, hands them to the wallet, and returns — there is no
+signing step in it. So a credential holding it can relay a transaction that is
+*already* fully signed and nothing more, and producing one needs a signature this
+credential cannot obtain (`SendCoins`, `SendMany`, `SendOutputs`, `SignPsbt` and
+`FundPsbt` are all on the list). I-1 is why it has to be there at all, and
+WalletKit rather than Core is the route because it also puts the transaction in
+LND's wallet-level rebroadcaster — which is what restores the property
+`no_publish` took away.
+
+`OpenChannel` moved from `InHarness` to `InApp` with this work, exactly as its
+registry entry said it would. `ExportAllChannelBackups` is new. The macaroon the
+tool prints is wider by three methods than it was, and every one of them has a
+production call site the type-checker can see.
+
+### `SignWithMiner` is gone
+
+`regtestenv.SignWithMiner` signed with one key so the abort fixtures had a
+complete transaction, and its own doc comment said it did not model I-2. Now that
+`internal/combine` exists there is no reason to keep a weaker path around for
+tests to lean on, so it was replaced by `SignAndCombine`: both halves of the
+simulated cold wallet return partials, the app merges and finalizes them, and
+`testmempoolaccept` confirms the result without relaying. `internal/abort` and
+`internal/journal`'s fixtures now fund from the cold wallet rather than the miner
+and go through that path, which means the I-1-at-n=3 test is running the real
+signing flow rather than a shortcut.
+
+`regtestenv.BuildFundingPSBT` is likewise now a thin wrapper over
+`coldwallet.Build` rather than its own `walletcreatefundedpsbt` call, and
+`internal/plan`'s test fixture is too. A fixture with its own builder is a fixture
+that can drift from the thing it is meant to be testing, and the options that are
+not negotiable — `replaceable: false`, `lockUnspents`, `bip32derivs` — now live in
+the app, once.
+
 ## Next actions, in order
 
-1. **The happy path.** `internal/journal` already has the write points it needs,
-   `internal/reserve` is the Phase 0 gate in front of it, and `internal/plan`
-   now verifies the transaction before step 5 in either engine. Combining partial
-   signatures in-app is the part with no code yet — btcd's psbt package has no
-   `Combine`, and `regtestenv.SignWithMiner` deliberately does not model I-2.
-2. **Directed mode's step 4.** `internal/coldwallet` sets the wallet up and
-   splits its coins; nothing yet calls `walletcreatefundedpsbt` outside the test
-   fixtures. That is one function, and the verifier is already the thing that
-   checks it.
-3. **Signet, for the two things regtest cannot reach.** The descriptor-import
+1. **Phase 0 and Phase 2, the two ends the sequence does not include.**
+   `internal/arm` covers steps 2 to 9; what is around it is still the caller's
+   business. Phase 0 needs peer pre-flight (`ConnectPeer`, `GetNodeInfo`, the
+   shim probe that reads `accept_channel`), a fee rate from Core's
+   `estimatesmartfee`, and the dress rehearsal that measures a signing round —
+   the number the five-minute gate is supposed to compare against. Phase 2 needs
+   the confirmation watch and `UpdateChannelPolicy`, polled unconditionally so
+   the pending-but-inactive question stops mattering.
+2. **The server and the UI.** One binary, loopback bind, a startup token, strict
+   Origin and Host checks, no CORS. The transports the design asks for — base64,
+   file up/down, animated QR — and the countdown. The recovery screen's wording is
+   the highest-stakes copy in the product and `CLAUDE.md` says to write it before
+   the happy path; the happy path arrived first, so that debt is now due.
+3. **`winthistle doctor` and `winthistle.toml`.** The registry, the reserve
+   pre-flight, the coldwallet pre-flight and the coin filter are all already the
+   checks it has to run; what is missing is the config plumbing and the one place
+   that runs them in order.
+4. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
    `internal/coldwallet/coldwallet_regtest_test.go`.
+5. **The mainnet cold probe.** Everything it needs now exists: steps 1 to 8 are
+   the production code path, step 9 is one call it simply does not make, and the
+   abort paths it terminates through are tested.
 
-Done since the last handoff, all three from the previous list:
+Done since the last handoff, both from the previous list:
 
-- **`print-macaroon-command` from a method registry.** `internal/methods` is the
-  single source. `make macaroon` prints the `lncli bakemacaroon` line on stdout
-  and the reasoning on stderr, so `make macaroon | sh` bakes it. Three things
-  keep it from drifting, and only the last one catches a new call site before it
-  ships:
-  - the printed command is rendered from the registry, so the credential is a
-    function of the code;
-  - `lnd.Dial` installs gRPC unary and stream interceptors that refuse any call
-    to a method the registry does not list;
-  - `TestEveryLNDCallSiteIsRegistered` type-checks the whole module, finds every
-    call on an lnrpc/walletrpc client interface, and requires the registry to
-    list *exactly* those — a missing entry fails, and so does a spare one, since
-    a spare entry means the operator's macaroon is wider than the code needs. It
-    needs no harness, so it runs in `make check` and in `make test-unit`.
-
-  The detector follows types rather than text, which matters because this repo's
-  idiom is to take a narrow interface rather than the whole client:
-  `internal/reserve` accepts a three-method interface so a pre-flight cannot move
-  a coin, and the check resolves that by asking which generated LND client
-  satisfies it. It discovers the client interfaces from the dependency graph, so a
-  first call into `routerrpc` or `signrpc` is caught too.
-
-  A registry entry is tagged `InApp` or `InHarness`, and the tag is checked rather
-  than believed: `InApp` must have a call site outside the tests, `InHarness` must
-  have none. Note what that means today — `OpenChannel` is `InHarness`, because
-  this build has no funding flow and the credential it prints must not be able to
-  open a channel. It moves to `InApp` with the happy path.
-
-- **The reserved-value pre-flight.** `internal/reserve`, described in the
-  operations finding above.
+- **Combining and finalizing in-app** — `internal/combine`, described above.
+- **Directed mode's step 4** — `coldwallet.Build`, and the fixtures that used to
+  have their own copy of it now go through it.
 
 ## Watch out for
 
@@ -541,23 +713,75 @@ Done since the last handoff, all three from the previous list:
   legacy coin did exactly this to the miner wallet and broke every abort test.
   Two things now stop it: that fixture keeps its legacy coins inside its own
   wallet, and `regtestenv.BuildFundingPSBT` fences off the funding wallet's
-  non-SegWit coins with `coldwallet.FenceOff` before building. Worth knowing past
-  the harness — a real cold wallet with any legacy history is in the same
-  position, which is what the exclusion report in `Coins.Report` is for.
+  non-SegWit coins with `coldwallet.FenceOff` before handing over to
+  `coldwallet.Build`. Worth knowing past the harness — a real cold wallet with any
+  legacy history is in the same position, which is what the exclusion report in
+  `Coins.Report` is for.
 
 - **Locking is the only way to exclude a coin in Core.** There is no
   "do not spend these" option on `walletcreatefundedpsbt`, and Core does skip
   locked outputs. So `coldwallet.FenceOff` is `lockunspent`, and it inherits
   everything finding 2 above says about it.
 
-- **`internal/regtestenv.SignWithMiner` does not model I-2** and says so in its
-  doc comment. It signs with one key so the abort fixtures have a complete
-  transaction. Do not reach for it when the real signing path arrives — the
-  2-of-2 path is what `make -C regtest verify` covers, and btcd's psbt package
-  has no `Combine`, so combining partials in-app is code that still needs writing.
+- **A 2-of-3 with three signatures does not finalize.** btcd's
+  `checkIsMultiSigScript` requires the number of partial signatures to equal the
+  number the script demands, so asking one more device to sign "just in case"
+  breaks the batch. `internal/combine` catches it before `MaybeFinalizeAll` and
+  says so with the counts and the device labels; without that the operator gets
+  "Unsupported script type". Worth knowing before designing the signing UI: it
+  must collect exactly *m*.
+
+- **A device that returns a *finalized* PSBT is refused, on purpose.** That is
+  I-2: a finalized input is a complete witness, so that device held a
+  broadcastable transaction. It is the right refusal and it is also the one most
+  likely to surprise an operator in assisted mode, where a wallet's default "sign"
+  button may finalize. The design's answer is to let the external wallet apply
+  *m*−1 signatures and collect the last partial here.
+
+- **`internal/arm`'s publish test leaves open channels and spends cold coins.**
+  It is the only test that publishes, and it has to, because "the transaction
+  reaches the network on exactly one line" is not a claim a dry run can make.
+  Nothing can close what it opened — `CloseChannel` is on the never-list — so
+  `make harness` is the reset.
+
+- **A stream must be read promptly, or the funding manager waits.**
+  `funderProcessFundingSigned` sends `chan_pending` on `resCtx.updates`, a channel
+  with a buffer of 2 (`server.go`), and blocks on `f.quit` if it is full. One
+  buffered slot is spent on `psbt_fund`, so a batch that finalized every channel
+  before reading any receipt would be relying on that buffer. `arm.Finalize`
+  finalizes one at a time and reads each receipt, so it never gets close — but
+  this is why, and not merely tidiness.
 
 ## Open questions
 
-Listed at the end of `docs/design.html`, less the `shim_cancel`-after-verify one,
-which is now answered above. The two the cold probe cannot answer both sit past
-the broadcast line; one is defused by having Phase 2 poll unconditionally.
+Listed at the end of `docs/design.html`. Four are now closed:
+`shim_cancel`-after-verify, `chan_pending`-without-broadcast at *n* = 3,
+`RequiredReserve` for private channels, and Core's `finalizepsbt` — answered by
+not needing Core.
+
+The ten-minute clock is closed too, and the answer is not one of the two options
+the question offered. **We have no clock at all**: `pruneZombieReservations` skips
+PSBT reservations outright — *"these reservations are always initiated by us and
+the remote peer is likely going to cancel them after some idle time anyway"* — so
+the only clock is the peer's. On the peer it is `resCtx.lastUpdated`, set by
+`defer resCtx.updateTimestamp()` at the end of `handleFundingOpen`, which is the
+same handler that sends `accept_channel`. The two candidates are therefore one
+network round trip apart against a ten-minute budget: not distinguishable on
+regtest, and not worth distinguishing on mainnet either.
+
+What *is* answerable, and answered: the timeout is
+`chanfunding.DefaultReservationTimeout` = 10 minutes, checked by a sweeper on
+`lncfg.DefaultZombieSweeperInterval` = 1 minute, and neither is adjustable in a
+release build — `lncfg/dev.go` returns the constant and only a `dev`-tagged build
+reads the flags. So the countdown should start at our own `OpenChannel` call and
+treat 10:00 as an upper bound with up to a minute of slack past it, and none of it
+binds a peer that is not LND. `TestWhoOwnsTheTenMinuteClock` measures it against
+bob; it needs `WINTHISTLE_SLOW=1` because it takes eleven minutes. Measured
+**10m41s** on 2026-08-23, which is the predicted 10:00 plus sweeper granularity.
+What the operator sees is *"remote canceled funding, possibly timed out"* —
+`chanfunding.ErrRemoteCanceled` wrapped around a peer error whose own text is only
+"funding failed due to internal error". The "possibly" is ours; the peer does not
+say it timed out.
+
+The two that remain both sit past the broadcast line, and one is defused by having
+Phase 2 poll unconditionally.

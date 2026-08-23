@@ -300,7 +300,7 @@ func (p *Plan) Outputs() ([]Named, error) {
 		if ch.Peer != "" {
 			label = fmt.Sprintf("channel %d to %s", i+1, shortPeer(ch.Peer))
 		}
-		script, err := scriptFor(ch.Address, params)
+		script, err := ScriptFor(ch.Address, params)
 		if err != nil {
 			return nil, fmt.Errorf("%s: %w", label, err)
 		}
@@ -318,7 +318,7 @@ func (p *Plan) Outputs() ([]Named, error) {
 		if p.TopUp.Address == "" {
 			return nil, fmt.Errorf("the reserve top-up names no address")
 		}
-		script, err := scriptFor(p.TopUp.Address, params)
+		script, err := ScriptFor(p.TopUp.Address, params)
 		if err != nil {
 			return nil, fmt.Errorf("the reserve top-up: %w", err)
 		}
@@ -333,7 +333,7 @@ func (p *Plan) Outputs() ([]Named, error) {
 
 	switch {
 	case p.Change.Address != "":
-		script, err := scriptFor(p.Change.Address, params)
+		script, err := ScriptFor(p.Change.Address, params)
 		if err != nil {
 			return nil, fmt.Errorf("the change output: %w", err)
 		}
@@ -360,8 +360,8 @@ func (p *Plan) Outputs() ([]Named, error) {
 	return out, nil
 }
 
-// scriptFor decodes an address and renders its scriptPubKey.
-func scriptFor(addr string, params *chaincfg.Params) ([]byte, error) {
+// ScriptFor decodes an address and renders its scriptPubKey.
+func ScriptFor(addr string, params *chaincfg.Params) ([]byte, error) {
 	decoded, err := btcutil.DecodeAddress(addr, params)
 	if err != nil {
 		return nil, fmt.Errorf("%q is not an address: %w", addr, err)
