@@ -2360,6 +2360,19 @@ Done since the last handoff, all from the previous list:
   the node has, not the batch's. A test may assert "at least the batch"; on the
   harness it comes back with 33.
 
+- **"No device added a signature" is a harness fault, not a signing bug, and
+  `bootstrap` does not fix it.** A container restart leaves Core's non-default
+  wallets unloaded, which every wallet call reports as "Requested wallet does not
+  exist" and `make -C regtest bootstrap` cures. A *different* failure looks like a
+  code bug and is not: `internal/run` and `internal/settle` failing with
+  "combining the cold wallet's partials: no device added a signature — every
+  device returned the packet it was given" means `cold1`/`cold2` hold keys from a
+  different generation than the descriptors in `cold-watch`, so
+  `walletprocesspsbt` returns the packet untouched. Only `make -C regtest reset`
+  (~1 min) fixes that, and `winthistle doctor` will report the coins as fine
+  throughout, because they are. Reach for `reset` on that message rather than
+  reading the combine path.
+
 - **`internal/run`'s regtest tests open real channels and abort them.** Two
   channels to two peers for the cold-probe test, one stream for the failure
   test, all cancelled or abandoned — so they add to the pending-channel pressure
