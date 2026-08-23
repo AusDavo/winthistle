@@ -71,6 +71,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
+	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/run"
@@ -326,7 +327,7 @@ func Confirmation(r *server.Run, gate time.Duration) abort.Confirmation {
 			Prompt: prose.BluntConfirmation(req),
 			Choices: []server.Choice{
 				{Value: ChoiceNo, Label: "No — leave this channel alone"},
-				{Value: ChoiceYes, Label: "Abandon " + req.Channel.String() +
+				{Value: ChoiceYes, Label: "Yes — abandon " + short(req.Channel) +
 					" with i_know_what_i_am_doing"},
 			},
 			Deadline: deadlineFor(ctx, time.Now().Add(gate)),
@@ -457,17 +458,45 @@ func deadlineFor(ctx context.Context, by time.Time) time.Time {
 // keep in step with the plan document.
 func Summary(b *config.Batch) string {
 	var sb strings.Builder
-	fmt.Fprintf(&sb, "%d channel%s, %s in total\n\n", len(b.Channels),
+	fmt.Fprintf(&sb, "%d channel%s, %s in total\n", len(b.Channels),
 		prose.Plural(len(b.Channels)), prose.Sats(b.TotalSat()))
+	// The peer on its own line, indented, rather than beside the amount. Two
+	// spaces plus a 14-wide amount plus a 66-character pubkey is 84 characters
+	// against a 78-column pane, so the old single line always soft-wrapped — on
+	// the first screen an operator sees, which made a correct batch look
+	// mangled. The pubkey is not abbreviated: this is the screen where it is
+	// checked.
 	for _, ch := range b.Channels {
 		kind := ""
 		if ch.Private {
-			kind = "  (unannounced)"
+			kind = "   (unannounced)"
 		}
-		fmt.Fprintf(&sb, "  %14s  %s%s\n", prose.Sats(ch.AmountSat), ch.Peer, kind)
-		fmt.Fprintf(&sb, "                  %s\n", ch.Policy.Summary())
+		fmt.Fprintf(&sb, "\n  %s%s\n", prose.Sats(ch.AmountSat), kind)
+		fmt.Fprintf(&sb, "    %s\n", ch.Peer)
+		fmt.Fprintf(&sb, "    %s\n", ch.Policy.Summary())
 	}
 	return sb.String()
+}
+
+// short is an outpoint an operator can still recognise, on one line.
+//
+// The full 66-character txid went in this label until a browser rendered it: the
+// button wrapped to three centred lines and became the largest thing on the
+// screen, which made the dangerous choice visually dominant over "No — leave
+// this channel alone". That is the wrong affordance for the one prompt in this
+// product where a human authorises something that could lose funds if the
+// premise were wrong.
+//
+// Nothing is lost by shortening it. The prompt immediately above the buttons
+// states the outpoint in full, twice — once as the question and once inside LND's
+// verbatim rejection — and what stops a stale form answering about the wrong
+// channel is the question id, not the reader.
+func short(cp lnd.ChannelPoint) string {
+	txid := cp.TxID
+	if len(txid) > 12 {
+		txid = txid[:12] + "…"
+	}
+	return fmt.Sprintf("%s:%d", txid, cp.Index)
 }
 
 func signPrompt(req SignRequest) string {

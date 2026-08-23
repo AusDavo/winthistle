@@ -31,6 +31,11 @@ through `internal/combine` and `internal/arm`'s verifier untouched, then the
 teardown's per-channel blunt confirmations, then `StateAborted` with nothing in
 the mempool. `TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine`.
 
+**And it has now been driven in a real Chromium, which found a bug that made
+every form in the UI unusable.** See "The bug the first render found" below —
+`Origin: null` — and note the correction it carries: a browser *is* installed on
+this machine, and the previous two handoffs said otherwise.
+
 What is missing is the transports — file up and down, animated QR with webcam
 capture on the return leg; the browser transport is currently one field out and
 one field back — the countdown, the remaining screens, plus signet and the
@@ -2300,6 +2305,58 @@ teardown is not the RPCs, it is the blunt-abandon confirmation, which asks a hum
 once per channel. The web abort control depends on this fix entirely — it is the
 same cancellation from the other front door.
 
+### The bug the first render found, and why every test missed it
+
+**Chrome sends `Origin: null` on a same-origin top-level form POST.** The guard's
+Origin check read that literal as "a different origin" and refused with `403`, so
+nothing in this UI could be started, answered or stopped from a browser. The very
+first click on "Open this batch" found it.
+
+Measured rather than inferred, because it is the kind of claim that is worth
+being sure of: Chrome 152, with the referrer policy set to `no-referrer` and then
+to `same-origin` (it is not the referrer policy), from a genuine click and then
+from a scripted submit. Every time: `Origin: null`, `Sec-Fetch-Site: same-origin`,
+`Sec-Fetch-Mode: navigate`.
+
+*The fix.* `null` is the serialisation of an *opaque* origin, and an opaque origin
+says nothing in either direction — so it is treated as an absent `Origin`, and the
+decision falls through to the unsafe-method check, which requires
+`Sec-Fetch-Site: same-origin`. That check was already there as the belt to the
+Origin braces; it is now the load-bearing one for every form in the UI, and it is
+the better signal anyway: the browser computes it, it is a forbidden header name
+so page JavaScript cannot set it, and `same-origin` means the initiator was us.
+We cannot be framed into producing one either — `frame-ancestors 'none'` plus
+`X-Frame-Options: DENY`, and a sandboxed frame of our own page has an opaque
+origin and arrives as `cross-site`, which is refused before this point.
+`TestABrowsersFormPostIsAdmitted` is the table, including the halves that must
+still be refused: an opaque origin with no fetch metadata, an opaque origin from
+another site, and a real foreign origin claiming `same-origin`.
+
+**Why the whole suite passed.** Every test chose `Origin:
+http://127.0.0.1:7420`, and that is a header no browser sends here. A test that
+invents a header the browser controls is a test that asserts its own assumption.
+So the helpers now send what Chrome was measured sending, and they say so — if a
+future change makes a test fail because of it, that is the guard telling you it
+has stopped accepting browsers, not an invitation to put a real `Origin` back.
+
+Two render defects came out of the same session, and one of them was a safety
+affordance rather than a cosmetic:
+
+- **The blunt-abandon button carried the full 66-character outpoint**, so it
+  wrapped to three centred lines and became the largest thing on the screen —
+  making the dangerous choice visually dominant over "No — leave this channel
+  alone", on the one prompt in the product where a human authorises something
+  that could lose funds if the premise were wrong. The outpoint is now
+  abbreviated on the button; the prompt directly above still states it in full
+  twice, and what stops a stale form answering about the wrong channel is the
+  question id rather than the reader.
+- **The batch summary always soft-wrapped.** Two spaces plus a 14-wide amount
+  plus a 66-character pubkey is 84 characters against a 78-column pane, so the
+  first screen an operator sees made a correct batch look mangled. The peer is now
+  on its own indented line — not abbreviated, because this is the screen where it
+  is checked — and every line is inside the pane. `winthistle run`'s pre-arm
+  confirmation shares the function and gets the same fix.
+
 ### What this slice does not do
 
 No transports beyond the minimum — the browser signer is one read-only field out
@@ -2313,11 +2370,18 @@ mixed in — that is transport selection, and it belongs with item 1.4.
 Exercised against the live harness: the browser-driven cold probe above; `421` for
 a rebinding `Host`, `403` for a cross-origin fetch and for a missing token; and
 `GET /doctor` returning the ten-check report in about 250 ms.
-**Still not verified in an actual browser** — this machine has none installed — so
-the cookie-then-redirect flow, the CSP and every form on these screens are proven
-by `curl`, by the headers and by `httptest` rather than by a render. That is now a
-bigger gap than it was: a read-only page that renders wrong is a nuisance, and a
-form that renders wrong is a signing round nobody can answer.
+
+**And exercised in a real Chromium**, which is what found the `Origin: null` bug.
+The whole ceremony, in a browser, against the harness: the token-in-query traded
+for a cookie and `303`d to a bare `/`, the cold-probe checkbox, the run started by
+a click, four real partial signatures read out of a read-only `<textarea>` and
+pasted back into an editable one, two per-channel blunt confirmations each naming
+its own outpoint under its own question id, step 9 withheld, the batch taken
+apart, and the abort screen then declining to offer a control for a run that had
+stopped. **Zero console messages**, so the `default-src 'none'` CSP blocks nothing
+the pages need. The driver is not committed — it is a scratch script — but it is
+reproducible from this description in a few minutes, and the durable half of it is
+`TestABrowsersFormPostIsAdmitted`.
 
 ## Next actions, in order
 
@@ -2331,17 +2395,13 @@ form that renders wrong is a signing round nobody can answer.
    2. ~~An explicit abort control on the run screen~~ — done, as a link to a
       screen that says what stopping costs, refused for a run that reached the
       publish call.
-   3. **Render it in a browser.** Promoted to the top of this list, because it
-      was a nuisance while the UI was read-only and it is now the thing between
-      here and a usable product. A `<pre>` that renders wrong is ugly; a form
-      that renders wrong is a signing round nobody can answer. What has never
-      been executed by a browser engine: the token-in-query → cookie → `303`
-      exchange, the CSP against pages that now carry forms, multiple submit
-      buttons sharing `name="choice"` (standard HTML, no JavaScript, and
-      untested by a renderer), the read-only `<textarea>` an operator has to
-      select-all out of, and how a several-kilobyte base64 PSBT behaves in a
-      `pre-wrap` column. `npx @playwright/mcp install-browser
-      chrome-for-testing` is the cheapest way in; this machine has no browser.
+   3. ~~Render it in a browser~~ — done, and it was worth doing first: it found
+      a guard bug that made every form in the UI unusable, and two render
+      defects, one of which was a safety affordance. See "The bug the first
+      render found". A browser is installed here; `npx @playwright/mcp
+      install-browser chrome-for-testing` fetches the headless shell the MCP
+      wants. What has *not* been driven in a browser yet is `doctor` under a slow
+      node, and the screens that do not exist.
    4. **The transports.** File download and upload, and animated QR — BBQr and
       `ur:crypto-psbt` — with webcam capture on the return leg.
       `docs/design.html` calls this the one place a browser UI is genuinely
@@ -2379,10 +2439,11 @@ form that renders wrong is a signing round nobody can answer.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-4. **Nothing new at this level.** What remains is items 1 to 3, and all three
-   need something this machine does not have: a browser, a signet node, or
-   mainnet coins. The browser is the cheapest of the three to get and the one
-   that now blocks the most — see item 1.3.
+4. **Nothing new at this level.** What remains is items 1 to 3. Two of them still
+   need something this machine does not have — a signet node, or mainnet coins —
+   and the third does not: the browser turned out to be installed all along, and
+   the two handoffs that said otherwise cost a guard bug that a single click
+   would have found.
 
 Done since the last handoff, all from the previous list:
 
@@ -2409,13 +2470,17 @@ Done since the last handoff, all from the previous list:
   between two RPCs with *n* shims open. A tab closing is still nothing at all.
   Whatever else changes, do not let a *transport* event end a run.
 
-- **Nothing here has ever been rendered by a browser engine.** Two forms, a
-  read-only `<textarea>` an operator has to copy a PSBT out of, multiple submit
-  buttons sharing `name="choice"`, a CSP of `default-src 'none'`, and a
-  cookie-then-`303` exchange — all proven by `curl`, headers and `httptest`. This
-  was a nuisance while the UI was read-only. It is now the gap between here and a
-  usable product, which is why it was promoted to the top of the next-actions
-  list.
+- **A browser's same-origin form POST carries `Origin: null`, and a test may not
+  invent that header.** Measured on Chrome 152, both referrer policies, real click
+  and scripted submit. It is the opaque-origin serialisation and it means nothing
+  in either direction, so the guard treats it as absent and leans on
+  `Sec-Fetch-Site: same-origin` — which page JavaScript cannot set. Every test in
+  `internal/server` had chosen a real `Origin`, which is why a `403` on every form
+  in the UI shipped green. The helpers now send the measured headers and say why.
+
+- **A browser is installed on this machine.** Two handoffs said there was not,
+  and that claim was never checked; `which chromium google-chrome firefox` finds
+  three. Render before believing a page works.
 
 - **The seams' bound is the 5:00 gate and never the peers' ten minutes.** The
   gate is ours and enforceable; the peers' clock is theirs, because

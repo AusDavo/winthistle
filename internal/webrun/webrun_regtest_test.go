@@ -347,12 +347,16 @@ func get(t *testing.T, s *server.Server, path string) *http.Request {
 	return r
 }
 
+// form is a POST shaped the way a browser shapes one: an opaque Origin and
+// Sec-Fetch-Site: same-origin, which is what Chrome was measured sending. See
+// internal/server's post helper for why the exact headers matter.
 func form(t *testing.T, s *server.Server, path string, values url.Values) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(values.Encode()))
 	r.Host = "127.0.0.1:7420"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	r.Header.Set("Origin", "http://127.0.0.1:7420")
+	r.Header.Set("Origin", "null")
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
 	r.Header.Set("Authorization", "Bearer "+s.Token())
 	return r
 }

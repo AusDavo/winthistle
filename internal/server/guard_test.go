@@ -405,3 +405,70 @@ func TestAHostIsMatchedCaseInsensitively(t *testing.T) {
 		t.Errorf("a bind of MyBox.local built the host set %v", named.hosts)
 	}
 }
+
+// TestABrowsersFormPostIsAdmitted is the regression test for the bug the first
+// browser render found, and it is the one test in this file written from a
+// measurement rather than from the spec.
+//
+// Chrome 152 sends `Origin: null` on a same-origin top-level form POST to this
+// UI — measured, twice, with the referrer policy set to no-referrer and to
+// same-origin, and with a real click rather than a scripted submit. The guard's
+// Origin check read that literal as "a different origin" and refused, so every
+// form in the UI was unusable: nothing could be started, answered or stopped.
+//
+// The whole suite passed, because every test chose `Origin:
+// http://127.0.0.1:7420`. That is the lesson worth keeping more than the fix: a
+// header a browser controls is not a header a test may invent.
+func TestABrowsersFormPostIsAdmitted(t *testing.T) {
+	s := testServer(t)
+
+	for _, tc := range []struct {
+		name   string
+		origin string
+		site   string
+		admit  bool
+	}{
+		// What Chrome actually sends. Must be admitted.
+		{"a browser form post", opaqueOrigin, "same-origin", true},
+		// What a non-browser client sends: a real Origin, no fetch metadata.
+		{"a client with a real origin", "http://127.0.0.1:7420", "", true},
+		{"localhost's spelling", "http://localhost:7420", "", true},
+
+		// An opaque origin says nothing, so on its own it is not enough. This is
+		// the half that keeps the fix from being a hole: without Sec-Fetch-Site
+		// there is nothing to distinguish this from a form on someone else's page.
+		{"an opaque origin and no fetch metadata", opaqueOrigin, "", false},
+		// A sandboxed or cross-site initiator arrives as cross-site, whatever it
+		// claims about its origin.
+		{"an opaque origin from another site", opaqueOrigin, "cross-site", false},
+		{"an opaque origin from the same site", opaqueOrigin, "same-site", false},
+		// And a real foreign origin is still refused, both ways.
+		{"a foreign origin", "http://evil.example", "", false},
+		{"a foreign origin claiming same-origin", "http://evil.example", "same-origin", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodPost, "/runs", strings.NewReader(""))
+			r.Host = "127.0.0.1:7420"
+			r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			if tc.origin != "" {
+				r.Header.Set("Origin", tc.origin)
+			}
+			if tc.site != "" {
+				r.Header.Set("Sec-Fetch-Site", tc.site)
+			}
+			r.AddCookie(&http.Cookie{Name: cookieName, Value: s.token})
+
+			w := serveIt(s, r)
+			// Admitted means "reached a handler", not "succeeded": this server has
+			// no launcher, so the handler's own refusal is a 501. What must never
+			// happen is the guard's 403.
+			refused := w.Code == http.StatusForbidden
+			if tc.admit && refused {
+				t.Fatalf("the guard refused it:\n%s", w.Body.String())
+			}
+			if !tc.admit && !refused {
+				t.Fatalf("the guard admitted it, got %d:\n%s", w.Code, w.Body.String())
+			}
+		})
+	}
+}

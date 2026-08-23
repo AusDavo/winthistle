@@ -27,15 +27,24 @@ func awaitPending(t *testing.T, r *Run) *Question {
 	return nil
 }
 
-// post is a form submission that has already got past the guard.
+// post is a form submission shaped exactly the way a browser shapes one.
+//
+// The headers are not a plausible reconstruction; they are what Chrome 152 was
+// measured sending on a same-origin top-level form POST to this UI: an *opaque*
+// Origin, and Sec-Fetch-Site: same-origin. Getting this wrong is how a guard bug
+// that made every form in the UI unusable passed the whole suite — the tests all
+// chose `Origin: http://127.0.0.1:7420`, which no browser sends here.
+//
+// If you are tempted to "fix" a failing test by putting a real Origin back, that
+// is the test telling you the guard has stopped accepting browsers.
 func post(t *testing.T, s *Server, path string, form url.Values) *http.Request {
 	t.Helper()
 	r := httptest.NewRequest(http.MethodPost, path, strings.NewReader(form.Encode()))
 	r.Host = "127.0.0.1:7420"
 	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	// The guard requires an unsafe method to say where it came from, which a
-	// browser does with one of these two. See guard.go.
-	r.Header.Set("Origin", "http://127.0.0.1:7420")
+	r.Header.Set("Origin", opaqueOrigin)
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	r.Header.Set("Sec-Fetch-Mode", "navigate")
 	r.AddCookie(&http.Cookie{Name: cookieName, Value: s.token})
 	return r
 }

@@ -17,6 +17,23 @@ import (
 // package comment on what the token defends against and what it does not.
 const cookieName = "winthistle_token"
 
+// opaqueOrigin is the serialisation a browser sends when a request's origin is
+// opaque — and, measured against Chrome 152 on this UI, what it sends on *every*
+// same-origin top-level form POST, whatever the referrer policy is.
+//
+// That was found by rendering a page in a browser for the first time, and it had
+// made every form in this UI unusable: the Origin check below read "null" as "a
+// different origin" and refused, so nothing could be started, answered or
+// stopped. Every test had passed because every test chose an Origin header, and
+// the one no test chose was the one Chrome sends.
+//
+// It is treated as an absent Origin, which is what it is: an opaque origin says
+// nothing about who sent the request, in either direction. The decision then
+// falls to Sec-Fetch-Site, which is the better signal anyway — the browser
+// computes it, page JavaScript cannot set it, and "same-origin" means the
+// initiator was us. See the unsafe-method check.
+const opaqueOrigin = "null"
+
 // tokenParam is the one place the token may appear in a URL. The guard trades it
 // for the cookie and redirects, so it appears there exactly once per browser.
 const tokenParam = "token"
@@ -137,25 +154,41 @@ func (s *Server) guard(next http.Handler) http.Handler {
 			return
 		}
 
-		// Origin, when the browser sent one. Absent is not suspicious: a plain
-		// navigation carries no Origin, and that is most of this UI.
-		if origin := r.Header.Get("Origin"); origin != "" && !s.origins[origin] {
+		// Origin, when the browser sent a real one. Absent is not suspicious: a
+		// plain navigation carries no Origin, and that is most of this UI. Nor is
+		// the literal "null" — see opaqueOrigin, which is what Chrome sends on
+		// every form post here.
+		if origin := r.Header.Get("Origin"); origin != "" && origin != opaqueOrigin &&
+			!s.origins[origin] {
+
 			refuse(w, http.StatusForbidden, crossOriginRefusal)
 			return
 		}
 
 		// A request that means to change something must prove where it came
-		// from, rather than merely fail to disprove it. Browsers send Origin on
-		// every such request; a client that does not is not a browser and can
-		// send the header.
+		// from, rather than merely fail to disprove it.
+		//
+		// This is the load-bearing check for every form in this UI, not a belt
+		// alongside the Origin braces: a browser's form post arrives with an
+		// opaque Origin, so what admits it is Sec-Fetch-Site: same-origin and
+		// nothing else. That header is worth leaning on — the browser computes
+		// it, it is a forbidden header name so page JavaScript cannot set it, and
+		// "same-origin" means the initiator's origin is ours. We cannot be framed
+		// into producing one either: frame-ancestors 'none' and X-Frame-Options:
+		// DENY, and a sandboxed frame of our own page has an opaque origin and
+		// would arrive as cross-site, which the switch above already refuses.
+		//
+		// A client that is not a browser sends neither, and must send a real
+		// Origin instead. The refusal says so.
 		if !safeMethod(r.Method) && !s.origins[r.Header.Get("Origin")] &&
 			r.Header.Get("Sec-Fetch-Site") != "same-origin" {
 
 			refuse(w, http.StatusForbidden,
 				"A request that changes something has to say where it came from.\n\n"+
-					"This one carried no Origin header and no Sec-Fetch-Site: "+
-					"same-origin, so there is nothing to distinguish it from a form "+
-					"on somebody else's page pointed at your loopback interface.")
+					"This one carried no Origin this server answers to and no "+
+					"Sec-Fetch-Site: same-origin, so there is nothing to distinguish "+
+					"it from a form on somebody else's page pointed at your loopback "+
+					"interface.")
 			return
 		}
 
