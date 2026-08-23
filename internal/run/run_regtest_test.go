@@ -18,6 +18,8 @@ import (
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/run"
+	// Aliased because this file already has a local helper called setup().
+	setuppkg "github.com/AusDavo/winthistle/internal/setup"
 )
 
 // fixtureChannelSat matches the other packages' fixtures, so a peer that
@@ -269,3 +271,100 @@ func writeFile(t *testing.T, path, body string) string {
 }
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
+
+// TestARejectedWalletStopsTheRunBeforeAnythingIsAsked.
+//
+// The gate that was deliberately absent until it was not. `winthistle doctor`
+// refuses a wallet whose exact descriptors a human compared and rejected, and
+// nothing stopped `run` opening a batch against the same wallet — the two
+// commands shared a journal and not a gate.
+//
+// What matters here is not only that it refuses but *where*: first, before LND
+// is asked anything. A refusal at that point has cost nothing — no stream, no
+// reservation, no coin lock, and no peer has been told a channel is coming. So
+// the assertions are that the peer section never printed and that the failure is
+// the sentinel rather than something that happens to have gone wrong.
+func TestARejectedWalletStopsTheRunBeforeAnythingIsAsked(t *testing.T) {
+	env := regtestenv.Start(t)
+	peers := env.Peers(t)
+	if len(peers) < 1 {
+		t.Skip("this test needs a peer to prove one was not asked")
+	}
+	d, o, out, env := setup(t, peers[:1], []int64{fixtureChannelSat})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	// The harness cold wallet, as it is — and a human answer saying it is not
+	// theirs. The journal is this test's own temp file, so nothing leaks into
+	// another run.
+	descs, err := env.Cold.ListDescriptors(ctx)
+	if err != nil {
+		t.Fatalf("listing %s's descriptors: %v", regtestenv.ColdWallet, err)
+	}
+	var receive, change string
+	for _, dd := range descs {
+		switch {
+		case dd.Active && !dd.Internal:
+			receive = dd.Desc
+		case dd.Active && dd.Internal:
+			change = dd.Desc
+		}
+	}
+	if receive == "" || change == "" {
+		t.Fatalf("%s has no active pair — run: make harness", regtestenv.ColdWallet)
+	}
+	addrs, err := env.Node.DeriveAddresses(ctx, receive, 0, 0)
+	if err != nil {
+		t.Fatalf("deriving the first address: %v", err)
+	}
+	changeAddrs, err := env.Node.DeriveAddresses(ctx, change, 0, 0)
+	if err != nil {
+		t.Fatalf("deriving the first change address: %v", err)
+	}
+
+	// First: the same wallet with no answer recorded gets past the gate. Without
+	// this the test below would pass on a gate that refuses everything.
+	before, err := setuppkg.Check(ctx, env.Cold, d.Journal, o.Config.Bitcoind.Wallet)
+	if err != nil {
+		t.Fatalf("an unanswered wallet was refused: %v", err)
+	}
+	if before.Rejected() || before.Confirmed() {
+		t.Fatalf("the harness wallet already carries an answer in this journal: %+v",
+			before.Record)
+	}
+
+	if _, err := d.Journal.RecordSetup(ctx, journal.Setup{
+		Wallet: o.Config.Bitcoind.Wallet, Outcome: journal.SetupRejected,
+		Receive: receive, Change: change, SampleSize: 5,
+		FirstReceive: addrs[0], FirstChange: changeAddrs[0],
+	}); err != nil {
+		t.Fatalf("recording the rejection: %v", err)
+	}
+
+	res, err := run.Do(ctx, d, o)
+	t.Logf("\n%s", out.String())
+
+	if !errors.Is(err, setuppkg.ErrRejectedWallet) {
+		t.Fatalf("run returned %v, want ErrRejectedWallet", err)
+	}
+	if res != nil && res.Armed != nil {
+		t.Fatal("a rejected wallet armed a batch")
+	}
+	if strings.Contains(out.String(), "Phase 0 — the peers") {
+		t.Error("the run reached the peer pre-flight before refusing. The point of " +
+			"this gate is that it costs nothing: a peer that has been asked about a " +
+			"channel holds a pending-channel slot for about eleven minutes.")
+	}
+	screen := strings.Join(strings.Fields(out.String()), " ")
+	for _, want := range []string{
+		"did not match",
+		"Nothing was opened and nothing was asked of any peer",
+		"new wallet name",
+		"no RPC that removes a descriptor",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the refusal screen does not say %q:\n%s", want, out.String())
+		}
+	}
+}

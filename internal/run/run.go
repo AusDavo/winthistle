@@ -8,8 +8,16 @@
 //
 // # Where the gates are
 //
-// Four of them, and they are not decorations:
+// Five of them, and they are not decorations:
 //
+//   - setup.Check, first, before LND is asked anything. The cold wallet's
+//     descriptors are the one thing no check can validate — Core parses a wrong
+//     pair, the import succeeds, the read-back is self-consistent and the
+//     balance is a plausible partial one — so the only verdict that exists is a
+//     comparison a human made, and this is where it is read back. It refuses on
+//     an exact descriptor-pair match against a recorded rejection and on nothing
+//     else; every other state is a line on the screen. First, because a refusal
+//     here has cost nothing at all.
 //   - rehearsal.Gate, before arm.Open. A signing round slower than
 //     limits.abort_after_signing_seconds means the batch is not armed at all.
 //     The clock the gate protects has not started yet when it is checked, which
@@ -75,6 +83,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/AusDavo/winthistle/internal/settle"
+	"github.com/AusDavo/winthistle/internal/setup"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
@@ -256,6 +265,22 @@ type prepared struct {
 
 func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	p := &prepared{chans: o.Batch.ArmChannels()}
+
+	// 0. The cold wallet, before anything else. This is the only pre-flight that
+	// needs neither LND nor the network, and the only one whose evidence is a
+	// person: setup.Check reads the descriptor pair the wallet actually holds and
+	// refuses if a human has already compared those exact descriptors against
+	// their own wallet software and said they are not the cold wallet's. It fires
+	// on an exact pair match and nothing else, so it cannot stop a wallet that
+	// was fixed, re-imported, or never seen by this build — those are a line on
+	// the screen. It runs first because a refusal here has cost nothing: no
+	// stream, no reservation, no coin lock, no peer told anything.
+	section(d.Out, "Phase 0 — the cold wallet's setup")
+	standing, err := setup.Check(ctx, d.Wallet, d.Journal, o.Config.Bitcoind.Wallet)
+	fmt.Fprint(d.Out, standing.Note())
+	if err != nil {
+		return p, err
+	}
 
 	info, err := d.LND.Lightning.GetInfo(ctx, &lnrpc.GetInfoRequest{})
 	if err != nil {

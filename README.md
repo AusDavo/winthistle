@@ -62,8 +62,10 @@ wrong one. Core parses both, the import succeeds for both, and a wrong one shows
 a *partial* balance rather than an empty one — measured, on the harness's own
 2-of-2. So it ends by putting five addresses of each branch on screen and asking
 whether they are the ones your own wallet software shows. Run it again with no
-arguments to answer later; `winthistle doctor` reads the answer back and refuses
-a wallet whose descriptors were rejected.
+arguments to answer later. `winthistle doctor` reads the answer back and so does
+`winthistle run`, before it asks LND anything: a wallet whose exact descriptors
+somebody compared and rejected does not open a batch, and no flag overrides
+that.
 
 The last line of the block is the cold probe: the whole production sequence, with the one
 call that broadcasts withheld and the batch taken apart afterwards. It is not a

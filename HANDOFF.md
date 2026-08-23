@@ -510,6 +510,37 @@ Rejected is a `Fail` and unanswered is only a `Warn`, deliberately: a wallet
 imported by hand before this command existed is a working wallet that has not
 been checked, and failing on it would break a setup that works.
 
+### `winthistle run` reads it too, first, before LND is asked anything
+
+`setup.Check` is the gate and it is now step 0 of Phase 0 — ahead of `GetInfo`,
+ahead of the peer pre-flight, ahead of the coin fence. It refuses on **one**
+condition: the latest recorded answer is a rejection *and* it describes the exact
+descriptor pair the wallet holds right now. Everything else — nobody asked, an
+answer about a pair this wallet no longer derives from, a confirmation — is a
+line on the screen and not a stop, which is what makes the gate unable to refuse
+a wallet somebody has just fixed.
+
+It is first because a refusal there has cost nothing: no stream, no reservation,
+no coin lock, and no peer has been told a channel is coming. The regtest test
+asserts that as well as the refusal — it fails if the output ever reaches
+"Phase 0 — the peers", because a peer that has been asked holds a
+pending-channel slot for about eleven minutes whether or not the batch goes on.
+
+There is no flag that overrides it, for the same reason there is no `--yes` on
+the prompt. The way past a rejection is to answer the question again
+(`winthistle setup`, if the "no" was a slip) or to set up under a new wallet
+name; a switch that let a run proceed against a wallet a human had already
+disowned would be a switch on the only check in this build that a node cannot
+make.
+
+`setup.Check` also refuses everything `coldwallet.Read` refuses — private keys
+enabled, a legacy wallet, no active pair, no internal branch — and that is
+widening the gate on purpose rather than by accident. Each of those is a wallet
+that cannot fund a batch, and each of them otherwise surfaces later and worse:
+a missing internal branch becomes "Core cannot derive change", which becomes no
+change output, which becomes no CPFP, which is the only acceleration I-4 leaves
+available.
+
 ### The descriptors and the birthday come from a file, and the birthday is in it
 
 `winthistle example-descriptors` prints it: `[cold]` with `receive`, `change` and
@@ -1366,9 +1397,10 @@ it.
 
 ### `winthistle run`, and the one branch
 
-`run.Do` is `drive()` with the gates actually wired: `rehearsal.Gate` and
-`peers.ReadyToArm` before `arm.Open`, `reserve.Finding.StillApplies` once the
-streams are open, and the journal at the publish call. `--probe` is opt-in and
+`run.Do` is `drive()` with the gates actually wired: `setup.Check` first, before
+LND is asked anything, `rehearsal.Gate` and `peers.ReadyToArm` before
+`arm.Open`, `reserve.Finding.StillApplies` once the streams are open, and the
+journal at the publish call. `--probe` is opt-in and
 then waits out `Probe.HoldsUntil` before arming, because a successful probe is
 step 2 with the answer thrown away and the peer holds that reservation for about
 eleven minutes.
@@ -1799,17 +1831,6 @@ claiming they never existed.
    to 3, all of which need something this machine does not have: a browser, a
    signet node, or mainnet coins.
 
-One thing was deliberately **not** done, and it is a judgement worth revisiting
-rather than an oversight. **`winthistle run` does not read the setup record.**
-`doctor` fails on a wallet whose exact descriptors a human rejected, but nothing
-stops `run` opening a batch against one — the two commands share a journal and
-not a gate. Adding one is three lines and it cannot false-positive, because the
-record only fires on an exact descriptor-pair match. It is left out because it
-would be a new gate on the happy path that nothing on the happy path asked for,
-and because the honest ordering of the argument is: the check that matters is the
-one a human makes, and the place to enforce it is the pre-flight the operator
-already runs. If the first live batch says otherwise, the change is small.
-
 Done since the last handoff, all from the previous list:
 
 - **`winthistle setup`** — `internal/setup`, the `setups` journal table, the
@@ -2122,7 +2143,8 @@ is a better disguise and the reason the sample is five addresses rather than one
 That correction was measured in the earlier coldwallet work and had never reached
 the spec. The two new traps are the multipath descriptor Core silently halves and
 the descriptor Core deactivates but cannot forget. The section also now says where
-the operator's answer goes and what `doctor` does with it.
+the operator's answer goes, that both `doctor` and `run` read it back, and that
+nothing overrides the refusal.
 
 The ten-minute clock is closed too, and the answer is not one of the two options
 the question offered. **We have no clock at all**: `pruneZombieReservations` skips

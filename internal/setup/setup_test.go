@@ -208,3 +208,94 @@ func TestTheGateIsRecognitionAndNotAttribution(t *testing.T) {
 		t.Error("an address the wallet disowns passed the gate")
 	}
 }
+
+func standing(rec *journal.Setup, applies, stale bool) *Standing {
+	return &Standing{
+		Wallet: fixtureWallet, Landed: fixtureLanded(stale),
+		Record: rec, Applies: applies,
+	}
+}
+
+// TestTheRunGateRefusesOnlyAnExactPairRejection.
+//
+// The gate is narrow on purpose. "Somebody said no about these descriptors" is a
+// wallet that must not fund a batch; "somebody said no about a pair this wallet
+// no longer derives from" is no evidence at all, because Core cannot remove a
+// descriptor and a corrected setup leaves the old one behind. A gate that
+// conflated the two would refuse the wallet the operator had just fixed.
+func TestTheRunGateRefusesOnlyAnExactPairRejection(t *testing.T) {
+	rejected := confirmed()
+	rejected.Outcome = journal.SetupRejected
+
+	if !standing(rejected, true, false).Rejected() {
+		t.Error("an exact-pair rejection does not stop a run")
+	}
+	if standing(rejected, false, false).Rejected() {
+		t.Error("a rejection about other descriptors stops a run")
+	}
+	if standing(confirmed(), true, false).Rejected() {
+		t.Error("a confirmation stops a run")
+	}
+	if standing(nil, false, false).Rejected() {
+		t.Error("a wallet nobody has answered about stops a run")
+	}
+	var none *Standing
+	if none.Rejected() || none.Confirmed() {
+		t.Error("no standing at all reports an answer")
+	}
+
+	if !standing(confirmed(), true, false).Confirmed() {
+		t.Error("an exact-pair confirmation is not reported as one")
+	}
+	if standing(confirmed(), false, false).Confirmed() {
+		t.Error("a confirmation about other descriptors is reported as one")
+	}
+}
+
+// TestTheRunGateScreensSayWhatTheyKnow. Three no-evidence states and one
+// refusal, and they are four different amounts of knowledge about the
+// transaction that is about to be built — so they are four different screens.
+func TestTheRunGateScreensSayWhatTheyKnow(t *testing.T) {
+	rejected := confirmed()
+	rejected.Outcome = journal.SetupRejected
+
+	stop := standing(rejected, true, false).Note()
+	mustSay(t, stop, "Stopping")
+	mustSay(t, stop, "did not match")
+	mustSay(t, stop, "nothing was asked of any peer")
+	mustSay(t, stop, "new wallet name")
+
+	ok := standing(confirmed(), true, false).Note()
+	mustSay(t, ok, "confirmed 1 March 2026")
+	if strings.Contains(ok, "Stopping") {
+		t.Errorf("a confirmed wallet is told it is stopping:\n%s", ok)
+	}
+
+	other := standing(rejected, false, false).Note()
+	mustSay(t, other, "a different descriptor pair")
+	mustSay(t, other, "Not a reason to stop")
+
+	never := standing(nil, false, false).Note()
+	mustSay(t, never, "never compared")
+	mustSay(t, never, "plausible partial balance")
+	mustSay(t, never, "Not a reason to stop")
+
+	// The stale note rides along with any of the non-refusing screens, because a
+	// batch built here can spend those coins — but not on the refusal, which has
+	// bigger news.
+	mustSay(t, standing(confirmed(), true, true).Note(), "1 inactive descriptor")
+	if strings.Contains(standing(rejected, true, true).Note(), "inactive descriptor") {
+		t.Error("the refusal screen is padded with the stale-descriptor note")
+	}
+
+	for name, screen := range map[string]string{
+		"stop": stop, "ok": ok, "other": other, "never": never,
+	} {
+		for i, line := range strings.Split(screen, "\n") {
+			if n := len([]rune(line)); n > prose.PaneWidth {
+				t.Errorf("%s line %d is %d columns, over %d:\n%s",
+					name, i+1, n, prose.PaneWidth, line)
+			}
+		}
+	}
+}
