@@ -5,8 +5,12 @@ transaction, funded from single-sig or multisig cold storage. LND only.
 
 Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 
-**Status: design complete, unimplemented.** The safety model below is verified
-against LND source but has not yet been tested against a running node.
+**Status: implemented, and exercised against live regtest.** Every function has a
+non-test caller: `winthistle setup`, `run`, `bump`, `doctor` and `recover` all
+work against the cluster in `regtest/`. Still missing are the server, the UI,
+signet, and the mainnet cold probe. So the safety model below is verified against
+LND source *and* against a running node — but never yet against mainnet, which is
+what the cold probe is for.
 
 ---
 
@@ -63,18 +67,24 @@ UTXOs during coin selection and show which ones were excluded.
 ### I-4 · No RBF on the funding transaction, ever
 
 Replacing the funding tx changes the outpoints and destroys every channel in the
-batch. Always include a change output we control, sized so a CPFP child stays
-viable. **The funding transaction's** replaceability is disabled at construction
-(`coldwallet.Build` passes `replaceable: false`), is not operator-adjustable, and
-`internal/plan` refuses any funding input below `MaxNonReplaceableSequence`.
-There is no code path in this repository that replaces a funding transaction.
+batch. There is no code path in this repository that replaces a funding
+transaction, and `internal/plan` refuses any funding input below
+`MaxNonReplaceableSequence`.
 
-The heading used to read "No RBF, ever" and the last sentence used to say
-"replaceability is disabled at construction" with no subject. That was true when
-this build made one transaction. It now makes two, so the subject matters:
+I-4 used to carry a second sentence — "always include a change output we control,
+sized so a CPFP child stays viable" — and a heading reading "No RBF, ever".
+Neither belonged *here*. That sizing rule is still enforced and still mandatory,
+but it is a *mitigation* for what I-4 costs us rather than part of what I-4
+forbids — and it never was the unswitchable kind of rule, because the target it
+aims at already has a multiple (`DefaultCPFPMultiple`) and an override
+(`Fee.CPFPTargetSatPerVB`). A rule with knobs on it, sitting inside a section
+headed by rules that have none, is how a tunable gets mistaken for a promise. It
+now has its own section below, with the reasoning that actually holds.
+
+What the invariant covers, and what it does not:
 
 - **The funding transaction: never.** *n* peers hold commitment signatures
-  against its outpoints. Everything above applies to it, unchanged.
+  against its outpoints. Replacing it destroys the batch.
 - **The CPFP child: always.** `settle.buildChildAt` sets
   `plan.MaxBIP125Sequence` and `replaceable: true`, and `internal/bump`'s
   verifier *requires* it. Nobody has committed to anything about a child — it
@@ -83,13 +93,79 @@ this build made one transaction. It now makes two, so the subject matters:
   What it buys is the second lift: a batch needing acceleration twice gets an
   ordinary RBF of the child instead of a grandchild paying for a longer chain.
 
-This is a clarification of I-4's scope, not a relaxation of it. If a change ever
-makes a *funding* transaction replaceable, that is the invariant breaking and the
-answer is to stop, not to edit this section. Two verifiers is what lets both
-rules be stated at once; one verifier with a flag on it would be a switch on the
-invariant.
+Two verifiers is what lets both rules be stated at once; one verifier with a flag
+on it would be a switch on the invariant. If a change ever makes a *funding*
+transaction replaceable, that is the invariant breaking and the answer is to
+stop, not to edit this section.
+
+**`replaceable: false` is a statement of intent, not a defence.** `coldwallet.Build`
+passes it and should keep passing it, but do not mistake it for protection.
+Verified against Bitcoin Core v29 — the version `regtest/` runs and this build
+develops against — `mempoolfullrbf` does not exist even as a hidden debug option
+(`bitcoind -help-debug` has no such flag; the only RBF option left is
+`-walletrbf`, about what the wallet *signals* when sending), and
+`getmempoolinfo` reports `"fullrbf": true` with no way to turn it off. Full-RBF
+is unconditional, so a higher-fee conflict relays regardless of what our sequence
+numbers signal. What actually enforces I-4 is the first paragraph: only we can
+sign our inputs, and nothing here builds a replacement.
 
 ---
+
+## Why the change output is required
+
+The batch verifier refuses a transaction with no change output, or with change
+too small to fund a child that lifts the package to `Fee.cpfpTarget()`. **That
+gate stays.** What follows is why, because the reason it used to give was wrong,
+and the wrong reason was the dangerous part.
+
+**The old reason.** `internal/plan` called a change output below the floor "a
+batch with nothing to rescue it", and the plan report called change "the only
+way a stuck batch is ever accelerated". Both true — and both written in custody
+language, as though a stuck batch put coins at risk. It does not, and an operator
+who believes it does will reach, under pressure, for the one thing I-4 forbids.
+
+**Nothing is at risk while the batch is unconfirmed.** The coins are ours,
+unspent, in a transaction only we could have signed. Every channel reached
+`chan_pending`, which makes it recoverable by force-close *once the funding
+transaction confirms* — before that there is no channel yet, only a promise. So
+what a stuck batch costs is the **ceremony**: a cold-storage signing round, *n*
+peers' cooperation, the ten-minute windows, all to be done again.
+
+**But it cannot be abandoned either.** An unconfirmed funding transaction never
+becomes safe to abandon on its own: its inputs stay unspent, so it stays valid
+indefinitely, and eviction from mempools does not invalidate it. `run.RecoverOne`
+therefore refuses any run that reached the publish call
+(`journal.ErrMayBePublished`), because abandoning a pending channel whose funding
+transaction *later* confirms strands its funds with no force-close path. A batch
+that never confirms leaves its coins **frozen**: not abortable, not safely
+spendable, waiting on the mempool.
+
+**So CPFP is the exit from that state, not a speedup.** Confirm the batch, then
+close the *n* channels normally if you no longer want them — the funding fee plus
+*n* cooperative closes, and completely safe. That is the correct way to read the
+gate: it is not insurance against slowness, it is what keeps the batch from having
+no way out at all.
+
+**And it cannot rescue an evicted parent.** A child of an absent parent is an
+orphan, and `bump` refuses with `ErrParentMissing` rather than pretending.
+Covering that case would need Core's `submitpackage` for 1p1c relay, which would
+be a third path to the network and break the pinned call-site count. So the gate
+protects the case where the parent is *in* a mempool and confirming too slowly,
+which is the case that CPFP can actually address.
+
+**Which is what makes the gate proportionate.** The lever is cheap — a change
+output of a few tens of thousands of satoshis, sized by `ChangeFloor`. What it
+buys is not the coins, which were never at risk, but the ceremony and the escape
+from the freeze. That trade is worth making by default, and it is why this is
+enforced rather than offered.
+
+**The escape this build does not implement.** If a batch is frozen anyway — the
+fee market moved further than `DefaultCPFPMultiple` allowed for — the only route
+out is an out-of-band double-spend of one of its inputs, performed by the operator
+with their own tools. `docs/design.html` documents the procedure and the ordering
+that keeps it from losing funds: keep every channel's state until the replacement
+is deeply confirmed, and abandon only then. Documenting it is not a relaxation of
+I-4. No code path in this repository builds one, and none may be added.
 
 ## Rejected approaches — do not reintroduce
 
@@ -126,6 +202,14 @@ invariant.
 
 - **Bumping the funding transaction, by any route.** I-4. `winthistle bump`
   builds a child; nothing in this repository replaces a parent.
+
+  This is not contradicted by the frozen-batch escape documented in
+  `docs/design.html`. That procedure is something an operator performs with their
+  own tools, on their own judgement, and the reason it is written down rather than
+  built is precisely that building it would put a funding-transaction replacement
+  in this repository. The line is authorship, not knowledge: we may tell an
+  operator what the only way out is, and still refuse to be the thing that does
+  it.
 - **`AbandonChannel(i_know_what_i_am_doing)`** as the default. Use
   `pending_funding_shim_only`, which refuses unless the channel is both
   shim-funded and pending. Fall back to the blunt flag only on that specific

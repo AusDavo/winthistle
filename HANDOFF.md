@@ -723,6 +723,63 @@ spending the change script, and requires
 with `bumpTo` defaulting to three times the plan's target. On the live three-
 channel batch that comes out at 11,270 sat.
 
+**The reasoning behind that sum was wrong, and has been corrected in place.** The
+gate is unchanged — the verifier still refuses a batch with no change output or
+with change below the floor — but the copy around it used to be written in custody
+language, and that was the dangerous part.
+
+`internal/plan` called an undersized change output "a batch with nothing to rescue
+it"; the plan report called change "the only way a stuck batch is ever
+accelerated". Both true, and both reading as though a stuck batch put coins at
+risk. It does not, and an operator who believes it does will reach, under
+pressure, for the one thing I-4 forbids.
+
+What is actually true, and now written down in `CLAUDE.md` under "Why the change
+output is required" and in `docs/design.html` under "A batch that never confirms":
+
+- **Nothing is at risk while the batch is unconfirmed.** The coins are ours,
+  unspent, in a transaction only we could have signed. Every channel reached
+  `chan_pending`, so each is recoverable by force-close *once the funding
+  transaction confirms* — before that there is no channel, only a promise. What a
+  stuck batch costs is the **ceremony**.
+- **But it cannot be abandoned either.** An unconfirmed funding transaction never
+  becomes safe to abandon on its own: its inputs stay unspent, so it stays valid
+  indefinitely, and eviction does not invalidate it. That is why `run.RecoverOne`
+  refuses any run that reached the publish call (`journal.ErrMayBePublished`). So a
+  batch that never confirms leaves its coins **frozen** — not abortable, not safely
+  spendable.
+- **CPFP is therefore the exit from that state, not a speedup.** Confirm the batch,
+  then close the channels normally. That is what makes the gate proportionate: the
+  lever is cheap and what it buys — the ceremony, and an escape from the freeze —
+  is not.
+- **And it cannot rescue an evicted parent.** `bump` already refuses with
+  `ErrParentMissing`; covering that case would need Core's `submitpackage` for 1p1c
+  relay, which would be a third path to the network. So the gate protects the case
+  a child can actually address.
+
+`docs/design.html` now also documents the only route out of a frozen batch — an
+out-of-band double-spend — and the ordering that keeps it from losing funds, with
+*do not abandon anything first* as step one. It is documented rather than built on
+purpose: **the line is authorship, not knowledge.** No code path here builds a
+funding-transaction replacement and none may be added.
+
+**Verified in the same pass, not remembered: `replaceable: false` buys nothing at
+the relay layer.** Against the `polarlightning/bitcoind:29.0` container this repo
+runs, `mempoolfullrbf` is absent even from `bitcoind -help-debug` — the only RBF
+option left is `-walletrbf`, about what the wallet *signals* when sending — and
+`getmempoolinfo` reports `"fullrbf": true` with no way to turn it off. Full-RBF is
+unconditional, so a higher-fee conflict relays regardless of our sequence numbers.
+Both `CLAUDE.md` and `docs/design.html` previously implied the flag protected
+something; the flag stays set as a statement of intent, and what actually enforces
+I-4 is that only we can sign our inputs and nothing here builds a replacement.
+
+**Considered and rejected in the same session:** making the gate opt-in, and
+allowing a no-change "spend all" batch. Both were built, tested green, and
+reverted. The gate's cost is small, the freeze has no supported exit, and this
+build has not yet opened a real channel — a looser default is not the thing to
+ship ahead of the cold probe. What survived is the reasoning above, which is what
+the session was actually worth.
+
 ### The reserve top-up, proved
 
 `plan.ReserveTopUp` turns an `internal/reserve` finding into an output, aiming at
