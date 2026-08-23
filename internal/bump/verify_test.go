@@ -160,7 +160,7 @@ func (f *fixture) build(t *testing.T, s childSpec) ([]byte, bump.Expectation) {
 		s.spends = f.change
 	}
 	if s.sequence == 0 {
-		s.sequence = plan.MaxNonReplaceableSequence
+		s.sequence = plan.MaxBIP125Sequence
 	}
 	if s.paysTo == nil {
 		s.paysTo = f.w.pkScript
@@ -171,7 +171,7 @@ func (f *fixture) build(t *testing.T, s childSpec) ([]byte, bump.Expectation) {
 	if s.extraInput {
 		tx.AddTxIn(&wire.TxIn{
 			PreviousOutPoint: wire.OutPoint{Hash: chainhash.Hash{0x99}, Index: 1},
-			Sequence:         plan.MaxNonReplaceableSequence,
+			Sequence:         plan.MaxBIP125Sequence,
 		})
 	}
 	tx.AddTxOut(&wire.TxOut{Value: s.outputSat, PkScript: s.paysTo})
@@ -328,16 +328,67 @@ func TestASecondOutputIsRefused(t *testing.T) {
 	mustRefuse(t, raw, exp, bump.WrongOutputCount)
 }
 
-// The child is built non-replaceable, so a replaceable one is a transaction
-// somebody changed.
-func TestAReplaceableChildIsRefused(t *testing.T) {
+// TestANonReplaceableChildIsRefused is the check that inverted, and the reason
+// it inverted is worth stating in a test rather than only in a comment.
+//
+// The child is built BIP-125 replaceable so that a second lift is an ordinary
+// replacement rather than a grandchild. A non-replaceable one is not dangerous —
+// it is the *batch* that must never be replaced, and internal/plan still refuses
+// any funding input below plan.MaxNonReplaceableSequence — but it is not the
+// transaction that was built, and it would leave a stalled batch with one
+// acceleration and no second.
+func TestANonReplaceableChildIsRefused(t *testing.T) {
+	f := newFixture(t, 20)
+	vsize := f.childVsize(t)
+	for _, seq := range []uint32{
+		plan.MaxNonReplaceableSequence, // 0xfffffffe
+		wire.MaxTxInSequenceNum,        // 0xffffffff
+	} {
+		raw, exp := f.build(t, childSpec{
+			outputSat: changeSat - f.feeFor(t, vsize),
+			sequence:  seq,
+		})
+		mustRefuse(t, raw, exp, bump.NotReplaceable)
+	}
+}
+
+// TestASequenceThatIsATimelockIsRefused is the reason the check is equality
+// rather than "anything replaceable".
+//
+// The child is a version 2 transaction, so a sequence with bit 31 clear stops
+// being an RBF signal and becomes a BIP-68 relative timelock: the child would
+// not be spendable until the parent had confirmations, and a CPFP child that
+// cannot be mined beside its parent cannot enter a mempool at all. A verifier
+// that accepted the whole replaceable range would wave that through.
+func TestASequenceThatIsATimelockIsRefused(t *testing.T) {
+	f := newFixture(t, 20)
+	vsize := f.childVsize(t)
+	// 1 = "spendable one block after the input confirms", with BIP-68 enabled
+	// because the disable bit is clear. Replaceable, and useless.
+	raw, exp := f.build(t, childSpec{
+		outputSat: changeSat - f.feeFor(t, vsize),
+		sequence:  1,
+	})
+	mustRefuse(t, raw, exp, bump.TimelockedInput)
+}
+
+// And the value the build actually sets passes, which is what stops the two
+// tests above from passing for the wrong reason.
+func TestTheSequenceTheBuildSetsIsAccepted(t *testing.T) {
 	f := newFixture(t, 20)
 	vsize := f.childVsize(t)
 	raw, exp := f.build(t, childSpec{
 		outputSat: changeSat - f.feeFor(t, vsize),
-		sequence:  plan.MaxNonReplaceableSequence - 1,
+		sequence:  plan.MaxBIP125Sequence,
 	})
-	mustRefuse(t, raw, exp, bump.Replaceable)
+	v, err := bump.Verify(raw, exp)
+	if err != nil {
+		t.Fatalf("verifying: %v", err)
+	}
+	if !v.OK() {
+		t.Fatalf("the sequence the build sets was refused:\n%s",
+			v.Report("what was built"))
+	}
 }
 
 // The fee is the figure the package arithmetic called for, and the verifier holds

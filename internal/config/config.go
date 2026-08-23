@@ -18,8 +18,10 @@
 // One key is refused even when it is spelled correctly: allow_rbf. It appears
 // in docs/design.html's example block, and it is not a setting. I-4 is that
 // replacing the funding transaction moves every outpoint and destroys every
-// channel in the batch, so replaceability is disabled at construction and there
-// is no code path that reads a preference about it. Honouring the key would be
+// channel in the batch, so the funding transaction's replaceability is off at
+// construction and there is no code path that reads a preference about it. (The
+// CPFP child is replaceable, deliberately and unconditionally — see
+// plan.MaxBIP125Sequence — which is also not a preference.) Honouring the key would be
 // a lie and ignoring it silently would be worse, because an operator who wrote
 // allow_rbf = true and saw the run proceed would reasonably conclude it had
 // been honoured.
@@ -203,8 +205,11 @@ func Load(path string) (*Config, error) {
 	if lim.has("allow_rbf") {
 		errs = append(errs, fmt.Sprintf("%s: allow_rbf is not a setting. Replacing "+
 			"the funding transaction changes every outpoint in it, and every peer "+
-			"holds a commitment signature against the old ones, so replaceability "+
-			"is off at construction and nothing reads a preference about it (I-4). "+
+			"holds a commitment signature against the old ones, so the funding "+
+			"transaction's replaceability is off at construction and nothing reads "+
+			"a preference about it (I-4). The CPFP child `winthistle bump` builds "+
+			"is replaceable, so that a second lift replaces it — also not a "+
+			"preference. "+
 			"Delete the line.", where(path, lim.lineOf("allow_rbf"))))
 	}
 	secs, err := lim.integer(path, "abort_after_signing_seconds",

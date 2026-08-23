@@ -93,6 +93,52 @@ func (c *Client) MempoolEntry(ctx context.Context, txid string) (MempoolEntry, b
 	}, true, nil
 }
 
+// TxOut is one output of a transaction, as Core decodes it.
+type TxOut struct {
+	Vout      uint32
+	AmountSat int64
+	Address   string
+	ScriptHex string
+}
+
+// TxOutputs reads a transaction's outputs back out of the node.
+//
+// It exists for one case: finding a batch's change output after something has
+// already spent it. listunspent is the ordinary route and Core drops an output
+// from it the moment an unconfirmed transaction spends it, so a second CPFP lift
+// — which by definition spends what the first one spent — cannot see the coin it
+// is about to replace a spend of. The transaction itself still has the output,
+// and while the parent is unconfirmed it is in the mempool, so getrawtransaction
+// answers without txindex.
+//
+// verbose=true, so this needs no wallet scope: it is a node-level call about a
+// transaction, not a wallet's view of one.
+func (c *Client) TxOutputs(ctx context.Context, txid string) ([]TxOut, error) {
+	var raw struct {
+		Vout []struct {
+			Value        float64 `json:"value"`
+			N            uint32  `json:"n"`
+			ScriptPubKey struct {
+				Hex     string `json:"hex"`
+				Address string `json:"address"`
+			} `json:"scriptPubKey"`
+		} `json:"vout"`
+	}
+	if err := c.Call(ctx, "getrawtransaction", []any{txid, true}, &raw); err != nil {
+		return nil, fmt.Errorf("reading %s back out of the node: %w", txid, err)
+	}
+	out := make([]TxOut, 0, len(raw.Vout))
+	for _, v := range raw.Vout {
+		out = append(out, TxOut{
+			Vout:      v.N,
+			AmountSat: sats(v.Value),
+			Address:   v.ScriptPubKey.Address,
+			ScriptHex: v.ScriptPubKey.Hex,
+		})
+	}
+	return out, nil
+}
+
 // sats converts one of Core's BTC amounts to satoshis.
 //
 // Rounded rather than truncated: Core renders these as JSON numbers and a

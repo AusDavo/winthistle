@@ -51,6 +51,12 @@ func List(ctx context.Context, j *journal.Journal, w io.Writer) error {
 		"accelerate is exactly where it was — so unlike an unfinished run, there is "+
 		"nothing here to price. What a held lock does cost is a cold wallet that "+
 		"declines to spend its own change and does not say why."))
+	fmt.Fprint(w, "\n")
+	fmt.Fprint(w, prose.Para("A child that is out there and needs to go faster is a "+
+		"different thing from these, and it is not listed here: run "+
+		"`winthistle bump` again and it replaces it. The child is built BIP-125 "+
+		"replaceable so a second lift is a replacement rather than a chain of "+
+		"transactions each paying for the last."))
 
 	if anyMayBePublic(bumps) {
 		fmt.Fprint(w, "\n")

@@ -60,7 +60,17 @@ func (b *Bump) MayBePublic() bool {
 
 // Finished reports whether there is nothing left for an operator to decide.
 func (b *Bump) Finished() bool {
-	return b.State == BumpPublished || b.State == BumpAbandoned
+	return b.State == BumpPublished || b.State == BumpAbandoned ||
+		b.State == BumpSuperseded
+}
+
+// Standing reports whether this child's bytes may be in a mempool right now —
+// published, and not yet replaced by a later one.
+//
+// It is what a second lift has to find: the transaction it will be replacing,
+// and whose absolute fee BIP-125 rule 3 says it has to beat.
+func (b *Bump) Standing() bool {
+	return b.State == BumpPublished || b.State == BumpPublishing
 }
 
 // AbortTarget is what giving up on this child would undo.
@@ -105,6 +115,13 @@ func (b *Bump) AbortTarget() abort.Target {
 // has is one that can never confirm — it would spend an output that does not
 // exist. The journal is the component that knows which runs got that far, the
 // same way it is the one that knows whether every chan_pending arrived.
+//
+// It deliberately does *not* refuse a second bump of the same change outpoint.
+// The child is built BIP-125 replaceable, so a second lift is a replacement of
+// the first rather than a conflict with it, and both rows are real: the first
+// child's bytes were broadcast and the journal is a record. See StandingChild,
+// which is how the replacement finds what it is replacing, and Supersede, which
+// is what the first becomes afterwards.
 func (j *Journal) BeginBump(ctx context.Context, runID string, p BumpPlan) (int64, error) {
 	switch {
 	case p.ParentTxID == "":
@@ -386,6 +403,74 @@ func (j *Journal) AbandonBump(ctx context.Context, core abort.LockReleaser,
 			"complete: %w", seq, runID, errors.Join(rep.Failures...))
 	}
 	return rep, nil
+}
+
+// StandingChild is the published child of this run that currently spends the
+// given outpoint, if there is one.
+//
+// This is how a second lift finds what it is replacing, and it is *derived*
+// rather than recorded. Every bump row already carries the change outpoint it
+// spends, so "which child superseded which" is a fact about the chain of spends
+// of one outpoint and needs no column of its own — which is just as well, since
+// this journal has no migrations and a column would not reach an operator's
+// existing file.
+//
+// The highest sequence number wins. Two standing children of one outpoint should
+// be impossible — the second one's publish replaces the first, and MarkBumpPublished
+// is what Supersede is called next to — but if it ever happened, the newest is
+// the one in the mempool and the older is the stale record.
+func (j *Journal) StandingChild(ctx context.Context, runID string,
+	change bitcoind.Outpoint) (*Bump, error) {
+
+	rows, err := j.db.QueryContext(ctx,
+		`SELECT seq FROM bumps
+		  WHERE run_id = ? AND change_txid = ? AND change_vout = ? AND state IN (?, ?)
+		  ORDER BY seq DESC LIMIT 1`,
+		runID, change.TxID, change.Vout,
+		string(BumpPublished), string(BumpPublishing))
+	if err != nil {
+		return nil, fmt.Errorf("looking for a standing child of %s in run %s: %w",
+			change, runID, err)
+	}
+	defer rows.Close()
+
+	if !rows.Next() {
+		if err := rows.Err(); err != nil {
+			return nil, fmt.Errorf("looking for a standing child of %s in run %s: %w",
+				change, runID, err)
+		}
+		return nil, nil
+	}
+	var seq int64
+	if err := rows.Scan(&seq); err != nil {
+		return nil, fmt.Errorf("looking for a standing child of %s in run %s: %w",
+			change, runID, err)
+	}
+	rows.Close()
+	return j.LoadBump(ctx, runID, seq)
+}
+
+// Supersede records that a later child has replaced this one.
+//
+// Called after the replacement's publish returns, never before: until those
+// bytes are out, the older child is still the one in the mempool and saying
+// otherwise would be a claim about the network the journal cannot make. Its coin
+// lock is closed out at the same time, because the replacement's own row now
+// claims that outpoint and two rows offering the same lock forever is how a
+// recovery screen starts repeating itself.
+func (j *Journal) Supersede(ctx context.Context, runID string, seq int64) error {
+	return j.tx(ctx, func(tx *sql.Tx) error {
+		if err := j.setBumpState(ctx, tx, runID, seq, BumpSuperseded); err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE bump_locks SET released = 1 WHERE run_id = ? AND seq = ?`,
+			runID, seq); err != nil {
+			return fmt.Errorf("closing out the coin locks of superseded bump %d in "+
+				"run %s: %w", seq, runID, err)
+		}
+		return nil
+	})
 }
 
 // LoadBump reads one child back out of the journal.

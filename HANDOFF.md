@@ -1378,6 +1378,10 @@ What is shared is shared as code rather than as a convention:
 `plan.Params`. So the two verifiers cannot drift on the facts they both depend
 on.
 
+The two verifiers also disagree on purpose, and that turned out to be the point:
+`internal/plan` refuses a replaceable funding input and `internal/bump` requires
+a replaceable child. See "The second lift" below.
+
 `bump.Verify` runs on what goes out and `bump.Recheck` on what comes back —
 `internal/combine`'s discipline, for the same reason. The second pass needed one
 change to `internal/combine`: **`Finalized.View()` is now exported.** `Recheck`
@@ -1439,6 +1443,117 @@ runs on. Unlike that one it leaves nothing behind: the child pays the cold
 wallet's own change back to the cold wallet, so the only cost is the fee, and the
 cleanup mines it away.
 
+## The second lift, and the one sentence in I-4 that had to become precise
+
+`winthistle bump` shipped building a non-replaceable child, with the reasoning
+left in place from before there were two verifiers: *"one verifier for both
+transactions is worth more than the option to bump."* That reason stopped being
+true the moment `internal/bump` grew a verifier of its own — a one-in one-out
+child cannot go through `plan.Plan`, so there are two verifiers whether or not
+the child is replaceable, and keeping it non-replaceable was buying nothing while
+costing the second lift.
+
+The child is now built at `plan.MaxBIP125Sequence` with `replaceable: true`, and
+`internal/bump`'s verifier **requires** it. A second `winthistle bump` on the
+same run replaces the standing child instead of refusing.
+
+### I-4's heading changed, and it is a clarification rather than a relaxation
+
+It read *"No RBF, ever"*, and the body ended *"Replaceability is disabled at
+construction and is not operator-adjustable"* — with no subject. That was
+unambiguous when this build made one transaction. It makes two, so:
+
+- **the funding transaction: never.** `coldwallet.Build` passes
+  `replaceable: false`, `internal/plan` refuses any funding input below
+  `MaxNonReplaceableSequence`, and no code path in the repository replaces one.
+  Every word of I-4 applies to it, unchanged.
+- **the CPFP child: always.** Nobody holds a commitment signature against a
+  child's outpoints. It spends the batch's change and pays cold storage back, and
+  only cold storage can sign a replacement of it — so the operator gains an
+  option and no one else gains anything.
+
+The heading is now "No RBF on the funding transaction, ever", and CLAUDE.md says
+in as many words that if a change ever makes a *funding* transaction replaceable
+that is the invariant breaking and the answer is to stop rather than to edit the
+section. **Two verifiers is what makes both rules statable at once.** One
+verifier with a flag on it would have been a switch on the invariant, which is
+the shape to refuse.
+
+### Every part of it is Core's behaviour, and all of it was measured
+
+Three things had to hold and none was obvious from documentation:
+
+1. **Core will build a transaction spending an outpoint its own mempool already
+   shows as spent.** It does, because the input is named explicitly and
+   `add_inputs` is off, so there is no coin selection to refuse it. Probed
+   directly before any of this was written.
+2. **The package arithmetic is unchanged.** Core does *not* count the child being
+   replaced as an ancestor of the replacement, so `plan.ChildFeeSat` still
+   matches to the satoshi. Measured: a 141 vB parent at 2 sat/vB, a child at 10,
+   then a replacement at 40 — Core charged 10,998 sat and `ChildFeeSat` wanted
+   10,998. Had it counted the replaced child the figure would have been 14,100.
+3. **The replacement evicts the first.** Confirmed, and confirmed again in the
+   live end-to-end test: a 20 sat/vB child replaced by a 60 sat/vB one, the first
+   gone from the mempool, Core's own ancestor accounting reporting 60.05 sat/vB
+   over 1287 vB.
+
+### Two refusals that had to be added, and one that had to be exact
+
+**BIP-125 rule 3 is about an absolute fee, not a rate**, and on a second lift
+those are easy to confuse because the operator is thinking in package sat/vB
+while the network compares two totals. Core's refusal is `insufficient fee` and
+names neither figure. `bump.checkReplacement` runs before a device is asked,
+names both, and says what package target *would* clear the bar. Rule 4 is in
+there too — the replacement pays for its own bandwidth at
+`IncrementalRelaySatPerVB`, a constant rather than something read from the node,
+because a refusal that depends on a setting the operator cannot see in the
+message is harder to act on rather than easier.
+
+**The sequence check is equality, and the reason is BIP-68 rather than
+tidiness.** The child is a version 2 transaction, so a sequence with bit 31 clear
+stops being an RBF signal and becomes a *relative timelock*: the child would not
+be spendable until the parent had confirmations, and a CPFP child that cannot be
+mined beside its parent cannot enter a mempool at all. The replaceable-and-
+BIP-68-disabled range is `0x80000000`–`0xfffffffd`; accepting all of it would
+wave through a lot of ways to be subtly wrong. `TestASequenceThatIsATimelockIsRefused`
+pins it with sequence 1.
+
+### Finding the change output after something has spent it
+
+Core drops an output from `listunspent` the moment an unconfirmed transaction
+spends it — which is exactly the state a second lift starts in. So `bump.Change`
+now carries its own scripts and there are two routes to filling it:
+
+- `listunspent`, for a first lift. Still the identification rule rather than a
+  heuristic: every other output of a batch belongs to somebody else.
+- the parent's own outputs plus `getaddressinfo`, for a replacement. The parent
+  is unconfirmed, so `getrawtransaction` answers without `txindex`; the value and
+  `scriptPubKey` come from the transaction and the **witness script from
+  `getaddressinfo`'s `hex` field**, which is the script behind a P2WSH address.
+  The journal supplies only *which* output to look at, and ownership is
+  re-checked with `AddressInfo.Ours()` rather than taken from the row — so a
+  journal pointed at the wrong wallet produces a refusal instead of a transaction
+  paying a stranger.
+
+`AddressInfo.Ours()` matches `ismine || iswatchonly`, and both are needed: a
+watch-only descriptor wallet reports `ismine: true` and `iswatchonly: false`,
+observed on the harness's cold-watch, which is not what the names suggest.
+
+### No schema change, again
+
+Which child superseded which is **derived**, not recorded. Every bump row already
+carries the change outpoint it spends, so `journal.StandingChild` finds the
+published child of that outpoint with a query and nothing had to be stored.
+`BumpSuperseded` is a new *value* in an existing TEXT column, which is the only
+kind of growth this journal supports — see the note under "`winthistle bump`"
+about there being no migrations.
+
+`Supersede` is called after the replacement's publish returns and never before:
+until those bytes are out the older child is still the one in the mempool. The
+superseded row keeps its txid and its raw transaction, because it is a record —
+those bytes really were broadcast, and a journal that deleted them would be
+claiming they never existed.
+
 ## Next actions, in order
 
 1. **The server and the UI.** One binary, loopback bind, a startup token, strict
@@ -1466,15 +1581,8 @@ cleanup mines it away.
    `bitcoin-cli importdescriptors` line, which is a worse experience than the
    guided screen `Install` was written for. It needs the descriptors and the
    birthday, which is the one part of setup no program can supply.
-5. **A second lift on the same batch.** `winthistle bump` builds one child. The
-   child is built non-replaceable — a deliberate choice in `settle.buildChildAt`,
-   whose stated reason was "one verifier for both transactions is worth more than
-   the option to bump" — so accelerating further would mean a child of the child,
-   and nothing builds one. Worth flagging that the stated reason is now weaker
-   than it was: there *are* two verifiers, since a one-in one-out child cannot go
-   through `plan.Plan`. Flipping the child to replaceable would make a second
-   lift an ordinary RBF of the child, which touches no funding outpoint and is
-   safe under I-4. It was left alone rather than changed quietly.
+5. **Nothing, at this level.** The list above is what is left; `winthistle bump`
+   and the second lift are both built. See "The second lift" below.
 
 Done since the last handoff, all from the previous list:
 
@@ -1488,8 +1596,32 @@ Done since the last handoff, all from the previous list:
   wired, and the abort that any failure ends in.
 - **`winthistle bump`** — the CPFP child, end to end, and the enforced
   publish-call-site count that came with it.
+- **The second lift** — the child is now built BIP-125 replaceable, so a further
+  acceleration replaces it rather than chaining onto it. This was on the previous
+  next-actions list as the thing deliberately *not* done; it is done.
 
 ## Watch out for
+
+- **The CPFP child is replaceable and the funding transaction never is.** Two
+  verifiers enforce opposite rules on purpose: `internal/plan` refuses a funding
+  input below `MaxNonReplaceableSequence`, `internal/bump` requires exactly
+  `MaxBIP125Sequence`. If you find yourself wanting one verifier with a flag,
+  that is the invariant asking to be switched off — see "The second lift".
+
+- **The child's sequence check is equality, not "anything replaceable".** The
+  child is version 2, so a sequence with bit 31 clear is a BIP-68 relative
+  timelock rather than an RBF signal, and a timelocked CPFP child cannot enter a
+  mempool at all.
+
+- **A second lift has to beat an absolute fee.** BIP-125 rule 3 compares totals,
+  not rates, and Core says only `insufficient fee`. `bump.checkReplacement`
+  refuses before a device is asked and names the target that would work.
+
+- **`listunspent` cannot see a change output a mempool transaction has spent**,
+  which is the state every second lift starts in. The change is reconstructed
+  from the parent's outputs plus `getaddressinfo` — whose `hex` field is the
+  witness script behind a P2WSH address, and whose `ismine` is true on a
+  watch-only descriptor wallet while `iswatchonly` is false.
 
 - **A CPFP child has a fee-rate ceiling of 10,000 sat/vB and this build cannot
   raise it.** btcwallet calls `SendRawTransaction(tx, false)` and rpcclient turns

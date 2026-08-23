@@ -391,7 +391,25 @@ type AddressInfo struct {
 	// the singular parent_desc and listunspent with the plural parent_descs.
 	ParentDesc  string   `json:"parent_desc"`
 	ParentDescs []string `json:"parent_descs"`
+
+	// Hex is the redeem or witness script behind a P2SH or P2WSH address, which
+	// Core reports under the unhelpful name "hex". It is what a multisig spend
+	// has to be sized against, and it is the reason this field exists: once an
+	// output is spent by an unconfirmed transaction Core drops it from
+	// listunspent, so listunspent's witnessScript is no longer reachable and this
+	// is the remaining route to the same bytes. See internal/bump, which needs it
+	// to size a replacement of a standing CPFP child.
+	Hex string `json:"hex"`
 }
+
+// Ours reports whether the wallet considers this address its own, under either
+// of the two flags a descriptor wallet may use.
+//
+// Both, because a watch-only descriptor wallet reports ismine true and
+// iswatchonly false — observed on the harness's cold-watch — which is not what
+// the names suggest. Matching only iswatchonly would decide that a watch-only
+// wallet does not own its own addresses.
+func (a AddressInfo) Ours() bool { return a.IsMine || a.IsWatchOnly }
 
 // Parents returns the parent descriptors under either of Core's two spellings.
 func (a AddressInfo) Parents() []string {

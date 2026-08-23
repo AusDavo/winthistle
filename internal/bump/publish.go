@@ -52,6 +52,19 @@ import (
 // can be handed to Core directly with the ceiling switched off.
 const MaxChildFeeRateSatPerVB = 10_000
 
+// IncrementalRelaySatPerVB is the extra fee per virtual byte a BIP-125
+// replacement has to pay for its own bandwidth, on top of matching the fee of
+// the transaction it replaces.
+//
+// One sat/vB, which is Core's default -incrementalrelayfee. It is a constant
+// here rather than something asked of the node, deliberately: the point of
+// checking rule 4 before the signing round is to produce a refusal an operator
+// can act on, and a figure read from a node setting they cannot see in the
+// message would make it harder to act on rather than easier. A node running a
+// higher incremental fee will refuse a replacement this passes — at
+// testmempoolaccept, before anything is broadcast, with Core's own wording.
+const IncrementalRelaySatPerVB = 1
+
 // ceilingDetail is the operator's way out when the child is too dear to relay
 // through LND.
 func ceilingDetail(childRate float64) string {

@@ -142,6 +142,18 @@ const (
 	// BumpAbandoned: given up on, and its coin lock released. Nothing was
 	// broadcast — or if it was, the state would be one of the two above.
 	BumpAbandoned BumpState = "abandoned"
+
+	// BumpSuperseded: this child was published and a later child of the same
+	// change outpoint replaced it. The CPFP child is built BIP-125 replaceable,
+	// so a second lift is an ordinary replacement rather than a grandchild, and
+	// this is what the replaced one becomes once the replacement is out.
+	//
+	// It is a state rather than a deletion because the row is a record: those
+	// bytes really were broadcast, and a journal that removed them would be
+	// claiming they never existed. Adding it needed no schema change — the column
+	// is TEXT and the value is new — which is the only kind of growth this
+	// journal supports.
+	BumpSuperseded BumpState = "superseded"
 )
 
 // Journal is an open run journal.

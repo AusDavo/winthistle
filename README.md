@@ -58,10 +58,13 @@ test mode and not a separate code path — see the design's commissioning sectio
 
 If a batch goes out and then sits in the mempool, `winthistle bump <run-id>`
 builds a CPFP child from its change output, verifies it against the parent,
-takes it to the signers and broadcasts it. Never a replacement: replacing the
-funding transaction moves every outpoint in it and destroys every channel in the
-batch. The child spends cold-storage change, so a bump costs a second
-cold-wallet session — there is no version of this that does not.
+takes it to the signers and broadcasts it. The funding transaction is never
+replaced — replacing it moves every outpoint in it and destroys every channel in
+the batch, and no code path in the binary can. The *child* is replaceable, so
+running the command again lifts the batch further by replacing the child rather
+than chaining another transaction onto it. Either way it spends cold-storage
+change, so a bump costs a second cold-wallet session — there is no version of
+this that does not.
 
 ## Documentation
 

@@ -243,9 +243,9 @@ func TestTheChildsArithmeticAgreesWithCoresOnARealStalledParent(t *testing.T) {
 			"below is about the package rather than the transaction",
 			entry.AncestorCount-1)
 	}
-	if located.Change.TxID != parentTxID {
-		t.Fatalf("the change output found is %s:%d, not an output of the parent",
-			located.Change.TxID, located.Change.Vout)
+	if located.Change.Outpoint.TxID != parentTxID {
+		t.Fatalf("the change output found is %s, not an output of the parent",
+			located.Change.Outpoint)
 	}
 
 	// The countdown cannot be tested from this fixture: the run's channels are
@@ -423,7 +423,7 @@ func TestASecondBumpNamesWhatIsHoldingTheChange(t *testing.T) {
 		ParentTxID:     located.ParentTxID,
 		ParentVsizeVB:  located.Parent.VsizeVB,
 		ParentFeeSat:   located.Parent.FeeSat,
-		Change:         located.Change.Outpoint(),
+		Change:         located.Change.Outpoint,
 		ChangeSat:      located.Parent.ChangeSat,
 		TargetSatPerVB: 20,
 	})
@@ -431,7 +431,7 @@ func TestASecondBumpNamesWhatIsHoldingTheChange(t *testing.T) {
 		t.Fatalf("BeginBump: %v", err)
 	}
 	if _, err := env.Cold.LockForRun(ctx, []bitcoind.Outpoint{
-		located.Change.Outpoint(),
+		located.Change.Outpoint,
 	}); err != nil {
 		t.Fatalf("locking the change output: %v", err)
 	}
@@ -526,7 +526,7 @@ func TestCoreEnforcesTheRelayCeilingAndZeroLiftsIt(t *testing.T) {
 
 	inputs := []map[string]any{{
 		"txid": coin.TxID, "vout": coin.Vout,
-		"sequence": plan.MaxNonReplaceableSequence,
+		"sequence": plan.MaxBIP125Sequence,
 	}}
 	// Leave a dust-ish output; everything else is fee.
 	outputs := []map[string]any{{addr: prose.BTC(1_000)}}
@@ -535,7 +535,7 @@ func TestCoreEnforcesTheRelayCeilingAndZeroLiftsIt(t *testing.T) {
 	}
 	if err := env.Cold.Call(ctx, "walletcreatefundedpsbt",
 		[]any{inputs, outputs, 0, map[string]any{
-			"add_inputs": false, "includeWatching": true, "replaceable": false,
+			"add_inputs": false, "includeWatching": true, "replaceable": true,
 			"fee_rate": 1, "minconf": 1,
 		}, true}, &created); err != nil {
 		t.Skipf("could not build an absurdly-priced transaction: %v", err)
@@ -657,3 +657,185 @@ func base64Of(t *testing.T, raw []byte) string {
 }
 
 func hexOf(raw []byte) string { return hex.EncodeToString(raw) }
+
+// TestASecondLiftReplacesTheFirst is what making the child replaceable bought,
+// and it is checked against the node because every part of it is Core's
+// behaviour rather than ours.
+//
+// Three things have to hold and none of them is obvious. Core has to *build* a
+// transaction spending an outpoint its own mempool already shows as spent —
+// which it does only because the input is named explicitly and add_inputs is
+// off. The package arithmetic has to stay plan.ChildFeeSat, which means Core must
+// not count the child being replaced as an ancestor of the replacement. And the
+// replacement has to actually evict the first, rather than both sitting there.
+func TestASecondLiftReplacesTheFirst(t *testing.T) {
+	env := regtestenv.Start(t)
+	ctx := harnessCtx(t)
+	j, runID, parentTxID := stalled(t, env, 5_000_000)
+
+	var out bytes.Buffer
+	d := deps(t, env, j, &out)
+
+	first, err := bump.Do(ctx, d, bump.Options{RunID: runID, TargetSatPerVB: 20})
+	if err != nil {
+		t.Fatalf("the first lift did not finish: %v", err)
+	}
+	if !first.Published {
+		t.Fatal("the first lift did not publish")
+	}
+	firstTxID := first.Child.TxID
+	firstFee := first.Rechecked.FeeSat
+	t.Logf("first lift: %s, %s, package %.2f sat/vB", firstTxID,
+		prose.Sats(firstFee), first.Rechecked.PackageRate)
+
+	// The child is replaceable — the whole premise. Ask Core, not ourselves.
+	entry, in, err := env.Node.MempoolEntry(ctx, firstTxID)
+	if err != nil || !in {
+		t.Fatalf("the first child is not in the mempool: %v", err)
+	}
+	if !replaceableInMempool(t, env, firstTxID) {
+		t.Fatal("Core does not consider the first child BIP-125 replaceable, so a " +
+			"second lift could never replace it")
+	}
+	if entry.AncestorCount != 2 {
+		t.Errorf("the first child's ancestor package is %d transactions, want 2",
+			entry.AncestorCount)
+	}
+
+	// Now the second lift. Locate has to find the change output that Core has
+	// already dropped from listunspent, and recognise that this is a replacement.
+	out.Reset()
+	located, err := bump.Locate(ctx, d, runID)
+	if err != nil {
+		t.Fatalf("locating the parent for a second lift: %v", err)
+	}
+	if located.Replaces == nil {
+		t.Fatal("the second lift did not see the standing child, so it would have " +
+			"tried to build a fresh spend of an already-spent output")
+	}
+	if located.Replaces.ChildTxID != firstTxID {
+		t.Errorf("it thinks it is replacing %s, not %s",
+			located.Replaces.ChildTxID, firstTxID)
+	}
+	if located.StandingFeeSat != firstFee {
+		t.Errorf("it reads the standing fee as %d and Core says %d",
+			located.StandingFeeSat, firstFee)
+	}
+	// The change output was reconstructed from the parent's own outputs, so the
+	// figures have to match what the first lift found through listunspent.
+	if located.Change.Outpoint != first.Located.Change.Outpoint {
+		t.Errorf("the reconstructed change outpoint is %s and the first lift used %s",
+			located.Change.Outpoint, first.Located.Change.Outpoint)
+	}
+	if located.Change.AmountSat != first.Located.Change.AmountSat {
+		t.Errorf("the reconstructed change is %d sat and the first lift saw %d",
+			located.Change.AmountSat, first.Located.Change.AmountSat)
+	}
+	if len(located.Change.WitnessScript) == 0 {
+		t.Error("the reconstructed change has no witness script, so a multisig " +
+			"child could not have been sized from it")
+	}
+
+	// A lift that would pay less than the standing child is refused before any
+	// device is asked. That is BIP-125 rule 3, and Core's own refusal for it says
+	// only "insufficient fee".
+	if _, err := bump.Do(ctx, d, bump.Options{RunID: runID, TargetSatPerVB: 10}); !errors.Is(
+		err, bump.ErrCheaperThanStanding) {
+		t.Errorf("a cheaper second lift was not refused with the right sentinel: %v", err)
+	} else {
+		t.Logf("cheaper lift refused, correctly: %v", err)
+	}
+
+	// And the real one.
+	out.Reset()
+	second, err := bump.Do(ctx, d, bump.Options{RunID: runID, TargetSatPerVB: 60})
+	t.Logf("\n%s", out.String())
+	if err != nil {
+		t.Fatalf("the second lift did not finish: %v", err)
+	}
+	if !second.Published {
+		t.Fatal("the second lift did not publish")
+	}
+	if second.Child.TxID == firstTxID {
+		t.Fatal("the second lift produced the same transaction as the first")
+	}
+
+	// The first is gone. That is what a replacement does, and it is the property
+	// a grandchild would not have had.
+	if env.InMempool(t, firstTxID) {
+		t.Error("the first child is still in the mempool, so this was not a " +
+			"replacement — both are competing for the same outpoint")
+	}
+	if !env.InMempool(t, second.Child.TxID) {
+		t.Fatalf("the replacement %s is not in the mempool", second.Child.TxID)
+	}
+	if !env.InMempool(t, parentTxID) {
+		t.Error("the parent left the mempool")
+	}
+
+	// Core's arithmetic for the replacement excludes the transaction it replaced.
+	// If it had counted it, the package would be a third bigger and the rate
+	// would not land on the target.
+	rentry, in, err := env.Node.MempoolEntry(ctx, second.Child.TxID)
+	if err != nil || !in {
+		t.Fatalf("no mempool entry for the replacement: %v", err)
+	}
+	if rentry.AncestorCount != 2 {
+		t.Errorf("the replacement's ancestor package is %d transactions, want 2 — "+
+			"Core is counting the child it replaced", rentry.AncestorCount)
+	}
+	if got := rentry.AncestorRate(); math.Abs(got-60) > 1 {
+		t.Errorf("Core says the replacement's package pays %.2f sat/vB, want ~60", got)
+	}
+	t.Logf("replacement: %s, %s, Core's package %.2f sat/vB over %d vB",
+		second.Child.TxID, prose.Sats(rentry.FeeSat), rentry.AncestorRate(),
+		rentry.AncestorVsizeVB)
+
+	// The journal says which is which, and does not pretend the first never
+	// happened.
+	one, err := j.LoadBump(ctx, runID, first.Seq)
+	if err != nil {
+		t.Fatalf("LoadBump(first): %v", err)
+	}
+	if one.State != journal.BumpSuperseded {
+		t.Errorf("the replaced child is %s, want %s", one.State, journal.BumpSuperseded)
+	}
+	if one.ChildTxID != firstTxID || one.RawTx == "" {
+		t.Error("the superseded row lost the transaction it had broadcast; it is a " +
+			"record and those bytes really did go out")
+	}
+	two, err := j.LoadBump(ctx, runID, second.Seq)
+	if err != nil {
+		t.Fatalf("LoadBump(second): %v", err)
+	}
+	if two.State != journal.BumpPublished {
+		t.Errorf("the replacement is %s, want %s", two.State, journal.BumpPublished)
+	}
+
+	// Neither row is left offering a coin lock, so no later screen re-offers it.
+	for _, b := range []*journal.Bump{one, two} {
+		if n := len(b.AbortTarget().Locks); n != 0 && b.State == journal.BumpSuperseded {
+			t.Errorf("bump %d is superseded and still offers %d lock(s)", b.Seq, n)
+		}
+	}
+
+	// Confirm the pair so the harness is left clean.
+	env.Mine(t, 1)
+	if env.InMempool(t, second.Child.TxID) {
+		t.Error("the replacement did not confirm")
+	}
+}
+
+// replaceableInMempool asks Core whether it considers a transaction BIP-125
+// replaceable, which is the only opinion that matters.
+func replaceableInMempool(t *testing.T, env *regtestenv.Env, txid string) bool {
+	t.Helper()
+	ctx := harnessCtx(t)
+	var raw struct {
+		Replaceable bool `json:"bip125-replaceable"`
+	}
+	if err := env.Node.Call(ctx, "getmempoolentry", []any{txid}, &raw); err != nil {
+		t.Fatalf("getmempoolentry(%s): %v", txid, err)
+	}
+	return raw.Replaceable
+}

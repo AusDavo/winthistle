@@ -6,6 +6,7 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/bump"
+	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/settle"
@@ -252,5 +253,57 @@ func mustNotSay(t *testing.T, got, unwanted string) {
 	t.Helper()
 	if strings.Contains(flat(got), flat(unwanted)) {
 		t.Errorf("the screen says %q and should not:\n%s", unwanted, got)
+	}
+}
+
+// TestTheReplacementScreenSaysWhatItIsAndIsNot is the copy for a second lift.
+//
+// It has to hold two things at once, and getting either wrong is a real cost.
+// The operator has to understand that this replaces rather than chains — so the
+// standing child is going away — and they have to understand that this is not
+// I-4 being bent, because "replacing a transaction" is exactly the phrase the
+// invariant forbids for the batch.
+func TestTheReplacementScreenSaysWhatItIsAndIsNot(t *testing.T) {
+	l := located(1500, true, plainEntry())
+	l.Replaces = &journal.Bump{
+		RunID: l.RunID, Seq: 1, State: journal.BumpPublished,
+		ChildTxID: "aa1e9a3f7b2d8046a1c3e5f70981b2d4c6e8f0a2b4c6d8e0f2a4b6c8d0e2f402",
+	}
+	l.StandingFeeSat = 136_133
+
+	got := l.Report()
+	mustSay(t, got, "This is a second lift")
+	mustSay(t, got, "will *replace* the child already in the mempool rather than "+
+		"chain onto it")
+	mustSay(t, got, "it was built BIP-125 replaceable for exactly this")
+	mustSay(t, got, "Replacing a child is not I-4")
+	mustSay(t, got, "Nobody has committed to anything about a child")
+	mustSay(t, got, "only cold storage can sign the replacement")
+	mustSay(t, got, "BIP-125 rule 3 wants more total fee")
+	mustSay(t, got, "Nothing is lost by trying")
+	mustSay(t, got, l.Replaces.ChildTxID)
+}
+
+// A first lift must not mention replacement at all — there is nothing to
+// replace, and saying so would be noise on the ordinary path.
+func TestAFirstLiftSaysNothingAboutReplacing(t *testing.T) {
+	got := located(1500, true, plainEntry()).Report()
+	mustNotSay(t, got, "second lift")
+	mustNotSay(t, got, "replace the child")
+}
+
+// The replacement screens are read in the same pane as everything else.
+func TestTheReplacementScreenStaysInThePane(t *testing.T) {
+	l := located(100, true, plainEntry())
+	l.Replaces = &journal.Bump{
+		RunID: l.RunID, Seq: 2, State: journal.BumpPublished,
+		ChildTxID: "bb1e9a3f7b2d8046a1c3e5f70981b2d4c6e8f0a2b4c6d8e0f2a4b6c8d0e2f403",
+	}
+	l.StandingFeeSat = 136_133
+	for i, line := range strings.Split(l.Report(), "\n") {
+		if n := len([]rune(line)); n > prose.PaneWidth {
+			t.Errorf("replacement screen line %d is %d columns, over the %d-column "+
+				"pane:\n%s", i+1, n, prose.PaneWidth, line)
+		}
 	}
 }

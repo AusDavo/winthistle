@@ -154,6 +154,20 @@ var (
 // already-confirmed coin would make a cheaper child, and it would also mean the
 // acceleration no longer depends on the parent, which is the one property CPFP
 // has to have.
+//
+// # The child is replaceable, and the parent never is
+//
+// This transaction signals BIP-125, which makes a second lift an ordinary
+// replacement rather than a grandchild. It is the only transaction in this build
+// that does. I-4 is about the funding transaction and is untouched: n peers hold
+// commitment signatures against its outpoints and internal/plan still refuses
+// any funding input below plan.MaxNonReplaceableSequence. Nobody has committed
+// to anything about a child, and only cold storage can sign a replacement of
+// one.
+//
+// Consequence worth knowing: a replacement has to beat the standing child's
+// *absolute* fee, not just its rate (BIP-125 rule 3). Core refuses a cheaper one
+// with "insufficient fee", and internal/bump checks it before a device is asked.
 func BuildChild(ctx context.Context, req ChildRequest) (*Child, error) {
 	switch {
 	case req.Wallet == nil:
@@ -307,11 +321,29 @@ func buildChildAt(ctx context.Context, req ChildRequest, addr string, rate float
 	inputs := []map[string]any{{
 		"txid": req.Parent.Change.TxID,
 		"vout": req.Parent.Change.Vout,
-		// I-4's habit rather than I-4 itself: replacing the *child* would not
-		// touch a funding outpoint, so it would be safe. It is disabled anyway,
-		// because internal/plan refuses any input below this sequence and one
-		// verifier for both transactions is worth more than the option to bump.
-		"sequence": plan.MaxNonReplaceableSequence,
+		// Replaceable, and this is the one transaction in the build that is.
+		//
+		// It used to be non-replaceable, on the reasoning that internal/plan
+		// refuses any input below MaxNonReplaceableSequence and one verifier for
+		// both transactions was worth more than the option to bump. That reason
+		// stopped being true when internal/bump grew a verifier of its own: a
+		// one-in one-out child cannot go through plan.Plan at all, so there are
+		// two verifiers whether or not the child is replaceable, and keeping it
+		// non-replaceable was buying nothing while costing the second lift.
+		//
+		// What it buys: a batch that needs accelerating twice gets an ordinary
+		// RBF of the child. The alternative was a grandchild — a child of the
+		// child — which is a longer chain, a bigger package to pay for, and code
+		// nothing in this build has.
+		//
+		// Why it is not I-4. I-4 is about the *funding* transaction: n peers hold
+		// commitment signatures against its outpoints, so replacing it destroys
+		// the batch. Nobody has committed to anything about this transaction. It
+		// spends the batch's change and pays cold storage back, and only cold
+		// storage can sign a replacement — so the operator gains an option and
+		// no one else gains anything. internal/plan's refusal of a replaceable
+		// funding input is untouched.
+		"sequence": plan.MaxBIP125Sequence,
 	}}
 	outputs := []map[string]any{{addr: prose.BTC(req.Parent.ChangeSat)}}
 
@@ -337,9 +369,12 @@ func buildChildAt(ctx context.Context, req ChildRequest, addr string, rate float
 		// Off, and this is the load-bearing one. A second confirmed input would
 		// make a cheaper child and would also let a miner take the child without
 		// the parent, which is the one thing CPFP must not allow.
-		"add_inputs":      false,
-		"lockUnspents":    true,
-		"replaceable":     false,
+		"add_inputs":   false,
+		"lockUnspents": true,
+		// See the sequence above. This is the only true "replaceable" in the
+		// repository; internal/coldwallet's Build — the funding transaction —
+		// passes false and I-4 is why.
+		"replaceable":     true,
 		"includeWatching": true,
 	}
 

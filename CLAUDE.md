@@ -60,11 +60,34 @@ This is also why all inputs must be segwit — see `verifyAllInputsSegWit` in
 `lnwallet/chanfunding/psbt_assembler.go` ("risk of malleability"). Filter legacy
 UTXOs during coin selection and show which ones were excluded.
 
-### I-4 · No RBF, ever
+### I-4 · No RBF on the funding transaction, ever
 
 Replacing the funding tx changes the outpoints and destroys every channel in the
 batch. Always include a change output we control, sized so a CPFP child stays
-viable. Replaceability is disabled at construction and is not operator-adjustable.
+viable. **The funding transaction's** replaceability is disabled at construction
+(`coldwallet.Build` passes `replaceable: false`), is not operator-adjustable, and
+`internal/plan` refuses any funding input below `MaxNonReplaceableSequence`.
+There is no code path in this repository that replaces a funding transaction.
+
+The heading used to read "No RBF, ever" and the last sentence used to say
+"replaceability is disabled at construction" with no subject. That was true when
+this build made one transaction. It now makes two, so the subject matters:
+
+- **The funding transaction: never.** *n* peers hold commitment signatures
+  against its outpoints. Everything above applies to it, unchanged.
+- **The CPFP child: always.** `settle.buildChildAt` sets
+  `plan.MaxBIP125Sequence` and `replaceable: true`, and `internal/bump`'s
+  verifier *requires* it. Nobody has committed to anything about a child — it
+  spends the batch's change and pays cold storage back — so replacing one moves
+  nothing anyone depends on, and only cold storage can sign the replacement.
+  What it buys is the second lift: a batch needing acceleration twice gets an
+  ordinary RBF of the child instead of a grandchild paying for a longer chain.
+
+This is a clarification of I-4's scope, not a relaxation of it. If a change ever
+makes a *funding* transaction replaceable, that is the invariant breaking and the
+answer is to stop, not to edit this section. Two verifiers is what lets both
+rules be stated at once; one verifier with a flag on it would be a switch on the
+invariant.
 
 ---
 

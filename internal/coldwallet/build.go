@@ -87,9 +87,12 @@ type Built struct {
 //
 // The three options that are not negotiable:
 //
-//   - replaceable: false. I-4 at construction. Replacing the funding transaction
-//     changes every outpoint in it and destroys every channel in the batch, so
-//     there is no mode in which this is true and no operator control over it.
+//   - replaceable: false. I-4 at construction, and this is the transaction I-4 is
+//     about: replacing the funding transaction changes every outpoint in it and
+//     destroys every channel in the batch, so there is no mode in which this is
+//     true and no operator control over it. The CPFP child that accelerates this
+//     transaction is the opposite — always replaceable, so a second lift is an
+//     ordinary RBF of the child — and internal/settle builds that one.
 //   - lockUnspents: true. Core then holds the chosen coins unspendable for the
 //     duration of the run, which is what stops a second process — or a second
 //     tab — spending an input this transaction depends on. The locks are

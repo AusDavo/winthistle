@@ -161,14 +161,44 @@ type Located struct {
 	// Entry is what Core said, unmodified, so the report can show its working.
 	Entry bitcoind.MempoolEntry
 
-	// Change is the batch's change output as the cold wallet holds it.
-	Change bitcoind.UTXO
+	// Change is the batch's change output, however it had to be found.
+	Change Change
+
+	// Replaces is the standing child this lift will replace, or nil for a first
+	// lift. Non-nil means the change output is already spent by a child of ours
+	// that is sitting in a mempool, and this bump is an RBF of it rather than a
+	// new spend — which is what building the child replaceable bought.
+	Replaces *journal.Bump
+
+	// StandingFeeSat is what that child pays, from Core's mempool entry rather
+	// than from the journal: BIP-125 rule 3 is about the fee the network can see,
+	// and the row records what was intended.
+	StandingFeeSat int64
 
 	// ExpiryBlocks is the smallest funding_expiry_blocks across the batch's
 	// members that LND still lists as pending, and HasExpiry whether there was
 	// one to report. This is the clock the signing round is racing.
 	ExpiryBlocks int32
 	HasExpiry    bool
+}
+
+// Change is the batch's change output: the one thing a CPFP child spends.
+//
+// It carries its own scripts because there are two ways to find it and only one
+// of them is listunspent. Once an unconfirmed transaction spends an output Core
+// drops it from listunspent, so a *second* lift — which by definition spends
+// what the first one spent — has to reconstruct the coin from the parent's own
+// outputs plus getaddressinfo. Both routes fill the same four fields, so
+// everything downstream is indifferent to which one ran.
+type Change struct {
+	Outpoint  bitcoind.Outpoint
+	AmountSat int64
+
+	// ScriptPubKey and WitnessScript are what sizing a spend of this output
+	// needs. WitnessScript is empty for a single-sig cold wallet, which is fine —
+	// plan.ChildVsize only wants it for P2WSH.
+	ScriptPubKey  []byte
+	WitnessScript []byte
 }
 
 var (
@@ -180,9 +210,14 @@ var (
 	// in a block. That is a re-broadcast, not a bump.
 	ErrParentMissing = errors.New("the batch is in neither the mempool nor the chain")
 
-	// ErrChangeSpent means something already spends the batch's change output —
-	// almost always an earlier child.
-	ErrChangeSpent = errors.New("the batch's change output is already spent")
+	// ErrChangeSpent means something already spends the batch's change output and
+	// it is not a child this journal knows about — so it is not ours to replace.
+	ErrChangeSpent = errors.New("the batch's change output is spent by something this journal did not build")
+
+	// ErrCheaperThanStanding means the lift asked for would produce a replacement
+	// paying less than the child already in the mempool. BIP-125 rule 3 refuses
+	// that, and so does this, before a device is asked for anything.
+	ErrCheaperThanStanding = errors.New("the replacement would pay less than the child it replaces")
 
 	// ErrChangeAmbiguous means the cold wallet holds more than one output of the
 	// parent, so which one is the change cannot be decided.
@@ -280,8 +315,26 @@ func Locate(ctx context.Context, d Deps, runID string) (*Located, error) {
 		TxID:      run.TxID,
 		VsizeVB:   vsize,
 		FeeSat:    fee,
-		Change:    plan.Outpoint{TxID: change.TxID, Vout: change.Vout},
-		ChangeSat: satsOf(change.Amount),
+		Change:    plan.Outpoint{TxID: change.Outpoint.TxID, Vout: change.Outpoint.Vout},
+		ChangeSat: change.AmountSat,
+	}
+
+	// Is a child of ours already spending it? If so this lift is a replacement,
+	// and what it has to beat is that child's absolute fee.
+	standing, err := d.Journal.StandingChild(ctx, runID, change.Outpoint)
+	if err != nil {
+		return l, err
+	}
+	if standing != nil {
+		l.Replaces = standing
+		l.StandingFeeSat = standing.ChildFeeSat
+		// Core's figure rather than the journal's where both exist: the row says
+		// what was intended and BIP-125 rule 3 is about what the network can see.
+		if standing.ChildTxID != "" {
+			if e, in, err := d.Node.MempoolEntry(ctx, standing.ChildTxID); err == nil && in {
+				l.StandingFeeSat = e.FeeSat
+			}
+		}
 	}
 
 	l.ExpiryBlocks, l.HasExpiry, err = nearestExpiry(ctx, d.LND, run.TxID)
@@ -294,13 +347,26 @@ func Locate(ctx context.Context, d Deps, runID string) (*Located, error) {
 	return l, nil
 }
 
-// locateChange picks the batch's change output out of the cold wallet.
+// locateChange picks the batch's change output out, by whichever of the two
+// routes applies.
+//
+// listunspent is the ordinary one, and it identifies the change without a
+// heuristic: every other output of a batch belongs to somebody else, since the
+// funding outputs are the peers' 2-of-2 scripts and the reserve top-up pays the
+// node's own wallet through lnrpc NewAddress rather than the Core wallet.
+//
+// The second route exists because of the second lift. Core drops an output from
+// listunspent the moment an unconfirmed transaction spends it, so a replacement
+// of a standing child cannot see the coin it is about to re-spend. When the
+// journal says a child of ours is out there, the coin is reconstructed from the
+// parent's own outputs — which are still in the mempool, so getrawtransaction
+// answers — plus getaddressinfo for the scripts. Same four fields either way.
 func locateChange(ctx context.Context, d Deps, runID, parentTxID string,
-	entry bitcoind.MempoolEntry) (bitcoind.UTXO, error) {
+	entry bitcoind.MempoolEntry) (Change, error) {
 
 	utxos, err := d.Wallet.ListUnspent(ctx, 0, math.MaxInt32)
 	if err != nil {
-		return bitcoind.UTXO{}, fmt.Errorf("listing the cold wallet's outputs: %w", err)
+		return Change{}, fmt.Errorf("listing the cold wallet's outputs: %w", err)
 	}
 	var found []bitcoind.UTXO
 	for _, u := range utxos {
@@ -310,46 +376,166 @@ func locateChange(ctx context.Context, d Deps, runID, parentTxID string,
 	}
 	switch len(found) {
 	case 1:
-		return found[0], nil
+		return changeFromUTXO(found[0])
 	case 0:
-		if entry.DescendantCount > 1 {
-			return bitcoind.UTXO{}, fmt.Errorf("%w: Core lists %d transaction(s) "+
-				"already spending outputs of %s (%v), and the cold wallet no longer "+
-				"holds its change.\nThat is almost certainly an earlier child. A "+
-				"second lift would have to be a child of *that* transaction, and "+
-				"this build does not make one: the child it builds is "+
-				"non-replaceable, so there is nothing to replace and nothing to "+
-				"chain onto. `winthistle recover` lists what the journal knows about "+
-				"this run's children",
-				ErrChangeSpent, entry.DescendantCount-1, parentTxID, entry.SpentBy)
-		}
-		// Core filters locked outputs out of listunspent, so an unfinished bump
-		// of this run looks exactly like a spent change output from here. Saying
-		// which is which is the difference between one command and an afternoon:
-		// the journal knows, and it is the only thing that does.
-		if held, err := heldByAnotherBump(ctx, d, runID); err == nil && held != "" {
-			return bitcoind.UTXO{}, fmt.Errorf("the cold wallet reports no unspent "+
-				"output of %s, and %s. Core leaves locked outputs out of listunspent, "+
-				"so a coin this run is already holding is indistinguishable from a "+
-				"spent one from here — the journal is what tells them apart.\n"+
-				"Give up on that bump first, which releases the lock: "+
-				"`winthistle bump %s --abandon`", parentTxID, held, runID)
-		}
-		return bitcoind.UTXO{}, fmt.Errorf("the cold wallet holds no unspent output "+
-			"of %s. Every other output of a batch belongs to somebody else — the "+
-			"funding outputs are the peers' scripts and the reserve top-up pays "+
-			"LND's own wallet — so the change is the only one this wallet should "+
-			"see. Check that this is the wallet that funded the batch", parentTxID)
+		// Spent, or locked, or not ours — and those need different answers.
+		return spentChange(ctx, d, runID, parentTxID, entry)
 	default:
 		ops := make([]string, 0, len(found))
 		for _, u := range found {
 			ops = append(ops, fmt.Sprintf("%s:%d (%s)", u.TxID, u.Vout,
 				prose.Sats(satsOf(u.Amount))))
 		}
-		return bitcoind.UTXO{}, fmt.Errorf("%w: %v. A batch has exactly one output "+
+		return Change{}, fmt.Errorf("%w: %v. A batch has exactly one output "+
 			"this wallet owns, and which of these is the CPFP lever cannot be "+
 			"guessed", ErrChangeAmbiguous, ops)
 	}
+}
+
+func changeFromUTXO(u bitcoind.UTXO) (Change, error) {
+	script, err := hex.DecodeString(u.ScriptPubKey)
+	if err != nil {
+		return Change{}, fmt.Errorf("the change output's script is not hex: %w", err)
+	}
+	// Empty for a single-sig wallet, which is not an error: plan.ChildVsize only
+	// wants a witness script for P2WSH.
+	witness, err := hex.DecodeString(u.WitnessScript)
+	if err != nil {
+		return Change{}, fmt.Errorf("the change output's witness script is not hex: %w", err)
+	}
+	return Change{
+		Outpoint:      u.Outpoint(),
+		AmountSat:     satsOf(u.Amount),
+		ScriptPubKey:  script,
+		WitnessScript: witness,
+	}, nil
+}
+
+// spentChange handles every reason listunspent showed nothing, and they are not
+// interchangeable.
+//
+// A child of ours already spending it is the second-lift case and the whole
+// point of building the child replaceable: reconstruct the coin and carry on.
+// A lock this run is holding looks identical from Core's side and needs the
+// opposite advice. Something else spending it is not ours to replace.
+func spentChange(ctx context.Context, d Deps, runID, parentTxID string,
+	entry bitcoind.MempoolEntry) (Change, error) {
+
+	// The journal first, because it is the only thing that can tell a coin we
+	// are holding from a coin somebody spent.
+	bumps, err := d.Journal.Bumps(ctx, runID)
+	if err != nil {
+		return Change{}, err
+	}
+	var (
+		standing *journal.Bump
+		holding  *journal.Bump
+	)
+	for _, b := range bumps {
+		switch {
+		case b.Standing():
+			standing = b
+		case !b.Finished() && heldLocks(b) > 0:
+			holding = b
+		}
+	}
+
+	if standing != nil {
+		change, err := changeFromParent(ctx, d, parentTxID, standing.Plan.Change)
+		if err != nil {
+			return Change{}, fmt.Errorf("a child of this run (bump %d, %s) is "+
+				"standing in the mempool, so this lift would replace it — but the "+
+				"change output it spends could not be read back: %w",
+				standing.Seq, standing.ChildTxID, err)
+		}
+		return change, nil
+	}
+
+	if holding != nil {
+		return Change{}, fmt.Errorf("the cold wallet reports no unspent output of "+
+			"%s, and bump %d of this run is %s and still holds a lock on %s. Core "+
+			"leaves locked outputs out of listunspent, so a coin this run is "+
+			"already holding is indistinguishable from a spent one from here — the "+
+			"journal is what tells them apart.\n"+
+			"Give up on that bump first, which releases the lock: "+
+			"`winthistle bump %s --abandon`",
+			parentTxID, holding.Seq, holding.State, holding.Plan.Change, runID)
+	}
+
+	if entry.DescendantCount > 1 {
+		return Change{}, fmt.Errorf("%w: Core lists %d transaction(s) already "+
+			"spending outputs of %s (%v), and this journal has no child of this "+
+			"run in a mempool.\nA child this build made would be journalled, so "+
+			"either this is not the journal that made it or something else is "+
+			"spending the batch's change. Replacing a transaction whose history is "+
+			"not on disk is not something to do from a command line",
+			ErrChangeSpent, entry.DescendantCount-1, parentTxID, entry.SpentBy)
+	}
+
+	return Change{}, fmt.Errorf("the cold wallet holds no unspent output of %s. "+
+		"Every other output of a batch belongs to somebody else — the funding "+
+		"outputs are the peers' scripts and the reserve top-up pays LND's own "+
+		"wallet — so the change is the only one this wallet should see. Check that "+
+		"this is the wallet that funded the batch", parentTxID)
+}
+
+// changeFromParent reconstructs a change output Core will no longer list.
+//
+// Every figure comes from Core: the value and script from the parent's own
+// outputs, and the witness script from getaddressinfo, whose "hex" field is the
+// script behind a P2WSH address. The journal supplies only *which* output to
+// look at, which is the one thing Core cannot say once the coin is spent.
+//
+// Ownership is re-checked rather than assumed. The journal names an outpoint;
+// this asks the wallet whether that outpoint is still one of its own, so a
+// journal pointed at the wrong wallet produces a refusal rather than a
+// transaction paying a stranger.
+func changeFromParent(ctx context.Context, d Deps, parentTxID string,
+	want bitcoind.Outpoint) (Change, error) {
+
+	outs, err := d.Node.TxOutputs(ctx, parentTxID)
+	if err != nil {
+		return Change{}, err
+	}
+	for _, o := range outs {
+		if o.Vout != want.Vout {
+			continue
+		}
+		if o.Address == "" {
+			return Change{}, fmt.Errorf("output %d of %s pays a non-standard script, "+
+				"so the cold wallet cannot be asked whether it owns it", o.Vout, parentTxID)
+		}
+		info, err := d.Wallet.GetAddressInfo(ctx, o.Address)
+		if err != nil {
+			return Change{}, fmt.Errorf("asking the cold wallet about %s: %w",
+				o.Address, err)
+		}
+		if !info.Ours() {
+			return Change{}, fmt.Errorf("the journal says the batch's change is "+
+				"output %d of %s, and the cold wallet does not own that address (%s). "+
+				"This is not the wallet that funded the batch", o.Vout, parentTxID,
+				o.Address)
+		}
+		script, err := hex.DecodeString(o.ScriptHex)
+		if err != nil {
+			return Change{}, fmt.Errorf("output %d of %s has a script that is not "+
+				"hex: %w", o.Vout, parentTxID, err)
+		}
+		// Empty unless the address is P2SH or P2WSH, which is right: a single-sig
+		// change output has no witness script and plan.ChildVsize wants none.
+		witness, err := hex.DecodeString(info.Hex)
+		if err != nil {
+			return Change{}, fmt.Errorf("the witness script behind %s is not hex: %w",
+				o.Address, err)
+		}
+		return Change{
+			Outpoint:      want,
+			AmountSat:     o.AmountSat,
+			ScriptPubKey:  script,
+			WitnessScript: witness,
+		}, nil
+	}
+	return Change{}, fmt.Errorf("%s has no output %d", parentTxID, want.Vout)
 }
 
 // heldByAnotherBump names an unfinished bump of this run that is still holding a
@@ -456,11 +642,15 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 			settle.ErrNoChildNeeded, located.Parent.Rate(), target)
 	}
 
-	// The ceiling, checked against the arithmetic before anything is built. It
-	// is worth doing here as well as in Verify: this is the cheapest possible
-	// moment to find out, and the alternative is an operator who has already
-	// fetched two hardware devices.
-	if err := checkCeiling(ctx, d, located, target); err != nil {
+	// The ceiling, and — on a second lift — whether the replacement can beat what
+	// it is replacing. Both are checked against the arithmetic before anything is
+	// built, because this is the cheapest possible moment to find out and the
+	// alternative is an operator who has already fetched two hardware devices.
+	childVsize := estimateChildVsize(located)
+	if err := checkCeiling(located, target, childVsize); err != nil {
+		return res, err
+	}
+	if err := checkReplacement(located, target, childVsize); err != nil {
 		return res, err
 	}
 
@@ -468,7 +658,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		ParentTxID:     located.Parent.TxID,
 		ParentVsizeVB:  located.Parent.VsizeVB,
 		ParentFeeSat:   located.Parent.FeeSat,
-		Change:         located.Change.Outpoint(),
+		Change:         located.Change.Outpoint,
 		ChangeSat:      located.Parent.ChangeSat,
 		TargetSatPerVB: target,
 	})
@@ -518,6 +708,18 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return res, err
 	}
 	res.Published = true
+
+	// Only now. Until those bytes were out, the older child was still the one in
+	// the mempool, and a journal that had already called it superseded would have
+	// been making a claim about the network it could not make.
+	if located.Replaces != nil {
+		if err := d.Journal.Supersede(ctx, o.RunID, located.Replaces.Seq); err != nil {
+			fmt.Fprintf(d.Out, "\nthe replacement was published and the journal could "+
+				"not record that bump %d is superseded: %v\nBoth rows say published, "+
+				"which is untidy rather than dangerous — the network has replaced one "+
+				"with the other regardless.\n", located.Replaces.Seq, err)
+		}
+	}
 	fmt.Fprint(d.Out, published(signed, located))
 	return res, nil
 }
@@ -684,26 +886,30 @@ func Sign(ctx context.Context, d Deps, runID string, seq int64, child *settle.Ch
 	}, nil
 }
 
+// estimateChildVsize sizes the child before Core has built one, from the change
+// output's own scripts.
+//
+// The same estimate internal/plan used when it decided this change output was
+// big enough, and the same one internal/settle falls back to when Core refuses
+// outright. Two figures arrived at the same way are comparable, which is the
+// only reason it is worth computing here rather than waiting for the build.
+// Zero means it could not be worked out, and the checks below then decline to
+// guess — Verify still runs on the built child, before any device is asked.
+func estimateChildVsize(l *Located) int64 {
+	n, err := plan.ChildVsize(l.Change.ScriptPubKey, l.Change.WitnessScript)
+	if err != nil || n <= 0 {
+		return 0
+	}
+	return n
+}
+
 // checkCeiling refuses a lift the node could not broadcast, before a device is
 // asked for anything.
 //
-// The child's size is not known until Core has built it, so this uses
-// plan.ChildVsize over the change output's own scripts — the same estimate
-// internal/plan used when it decided this change output was big enough, and the
-// same one internal/settle falls back to when Core refuses outright. Two
-// estimates arrived at the same way are comparable; that is the only reason it
-// is worth doing here rather than waiting for Verify.
-func checkCeiling(ctx context.Context, d Deps, l *Located, target float64) error {
-	script, err := hex.DecodeString(l.Change.ScriptPubKey)
-	if err != nil {
-		return nil // Verify will still catch it; a guess here is not worth an error.
-	}
-	witness, err := hex.DecodeString(l.Change.WitnessScript)
-	if err != nil {
-		return nil
-	}
-	childVsize, err := plan.ChildVsize(script, witness)
-	if err != nil || childVsize <= 0 {
+// See MaxChildFeeRateSatPerVB for why a CPFP child meets this ceiling and
+// nothing else in the build does.
+func checkCeiling(l *Located, target float64, childVsize int64) error {
+	if childVsize <= 0 {
 		return nil
 	}
 	fee := plan.ChildFeeSat(l.Parent.VsizeVB, l.Parent.FeeSat, target, childVsize)
@@ -717,6 +923,54 @@ func checkCeiling(ctx context.Context, d Deps, l *Located, target float64) error
 		"parent from %.2f to %.2f sat/vB.\n%s",
 		rate, MaxChildFeeRateSatPerVB, childVsize, prose.Sats(fee),
 		l.Parent.VsizeVB, l.Parent.Rate(), target, ceilingDetail(rate))
+}
+
+// checkReplacement is BIP-125 rule 3, applied before a cold wallet comes out.
+//
+// A replacement has to pay more *absolute* fee than the transaction it replaces,
+// not merely a higher rate — and on a second lift the two are easy to confuse,
+// because the operator is thinking in package sat/vB while the network is
+// comparing two absolute figures. Core refuses a cheaper replacement with
+// "insufficient fee", which names neither number.
+//
+// Rule 4 is in here too: the replacement must also pay for its own bandwidth at
+// the incremental relay rate, so the fee has to rise by at least
+// childVsize * incrementalRelayFee on top of matching. One sat/vB is Core's
+// default -incrementalrelayfee and this uses it as a floor rather than asking,
+// because asking would make the refusal depend on a node setting the operator
+// cannot see in the message.
+//
+// This is a refusal rather than a warning for the same reason everything else
+// here is: the only purpose of the transaction is to reach a rate, and a
+// signing round that ends in "insufficient fee" has spent a cold-wallet session
+// on nothing.
+func checkReplacement(l *Located, target float64, childVsize int64) error {
+	if l.Replaces == nil {
+		return nil
+	}
+	if childVsize <= 0 || l.StandingFeeSat <= 0 {
+		return nil
+	}
+	fee := plan.ChildFeeSat(l.Parent.VsizeVB, l.Parent.FeeSat, target, childVsize)
+	need := l.StandingFeeSat + childVsize*IncrementalRelaySatPerVB
+	if fee >= need {
+		return nil
+	}
+
+	// What target *would* clear the bar, so the refusal is actionable. Invert
+	// ChildFeeSat: fee = ceil(target * (parent + child)) - parentFee.
+	enough := float64(need+l.Parent.FeeSat) / float64(l.Parent.VsizeVB+childVsize)
+	return fmt.Errorf("%w: bump %d of this run is in the mempool paying %s, and a "+
+		"%.2f sat/vB lift would pay %s.\n"+
+		"A replacement has to beat the standing transaction's *absolute* fee, not "+
+		"just its rate — BIP-125 rule 3 — and pay for its own bandwidth on top, "+
+		"which for a %d vB child is another %s. So it needs %s, or about "+
+		"%.2f sat/vB on the package.\n"+
+		"The child already out there is not lost by asking: it stays in the "+
+		"mempool, and the batch keeps whatever acceleration it already has",
+		ErrCheaperThanStanding, l.Replaces.Seq, prose.Sats(l.StandingFeeSat),
+		target, prose.Sats(fee), childVsize,
+		prose.Sats(childVsize*IncrementalRelaySatPerVB), prose.Sats(need), enough)
 }
 
 // giveUp releases the coin lock the build took, and says what it freed.

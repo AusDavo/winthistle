@@ -53,7 +53,43 @@ func (l *Located) Report() string {
 		"guess: the funding outputs are the peers' own 2-of-2 scripts, and the " +
 		"reserve top-up pays this node's wallet rather than the Core one."))
 
+	b.WriteString(l.replacing())
 	b.WriteString(l.horizon())
+	return b.String()
+}
+
+// replacing is the second-lift preamble: what is already out there, and what
+// this lift has to beat.
+func (l *Located) replacing() string {
+	if l.Replaces == nil {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(prose.Para(fmt.Sprintf(
+		"This is a second lift, and it will *replace* the child already in the "+
+			"mempool rather than chain onto it. Bump %d of this run is out there "+
+			"paying %s, and it was built BIP-125 replaceable for exactly this.",
+		l.Replaces.Seq, prose.Sats(l.StandingFeeSat))))
+	b.WriteString("  standing child\n    " + orNone(l.Replaces.ChildTxID) + "\n\n")
+	b.WriteString(prose.Para("Replacing a child is not I-4. I-4 is about the " +
+		"funding transaction, whose outpoints every peer in the batch holds a " +
+		"commitment signature against — replacing that destroys the batch, and " +
+		"nothing in this build can. Nobody has committed to anything about a " +
+		"child: it spends the batch's change and pays cold storage back, so " +
+		"replacing it moves nothing anyone depends on, and only cold storage can " +
+		"sign the replacement."))
+	b.WriteString("\n")
+	b.WriteString(prose.Para(fmt.Sprintf(
+		"What it has to clear is an absolute figure, not a rate: BIP-125 rule 3 "+
+			"wants more total fee than the %s above, and rule 4 wants the child's own "+
+			"bandwidth on top. If the lift asked for does not clear both, this stops "+
+			"before any device is asked and says what would.",
+		prose.Sats(l.StandingFeeSat))))
+	b.WriteString("\n")
+	b.WriteString(prose.Para("Nothing is lost by trying. Until the replacement is " +
+		"broadcast the standing child stays exactly where it is, so the batch keeps " +
+		"whatever acceleration it already has."))
 	return b.String()
 }
 
@@ -185,13 +221,13 @@ func (v *Verification) Report(what string) string {
 				"a measurement and the rates are the rates this transaction will " +
 				"actually pay rather than floors. It spends the batch's change and " +
 				"nothing else, pays the one cold-wallet script it was built to pay, " +
-				"is not replaceable, and its fee is the figure the arithmetic called " +
-				"for."))
+				"signals BIP-125 so a further lift can replace it, and its fee is " +
+				"the figure the arithmetic called for."))
 		} else {
 			b.WriteString(prose.Para("It spends the batch's change output and nothing " +
 				"else, pays back to the one cold-wallet script the app asked Core for, " +
-				"signals no replaceability, and its fee is the figure the package " +
-				"arithmetic called for. The size is an upper bound — every signature " +
+				"signals BIP-125 so a further lift replaces it rather than chaining " +
+				"onto it, and its fee is the figure the package arithmetic called for. The size is an upper bound — every signature " +
 				"is counted at the largest a DER encoding can be — so the rates above " +
 				"are floors rather than estimates."))
 		}
@@ -278,8 +314,15 @@ func reportRace(ctx context.Context, d Deps, before *Located) string {
 // published is the ending when the child went out.
 func published(s *Signed, l *Located) string {
 	var b strings.Builder
-	b.WriteString("\nPublished the CPFP child.\n\n")
+	if l.Replaces == nil {
+		b.WriteString("\nPublished the CPFP child.\n\n")
+	} else {
+		b.WriteString("\nPublished the replacement.\n\n")
+	}
 	b.WriteString("  child txid\n    " + s.TxID + "\n")
+	if l.Replaces != nil {
+		b.WriteString("  replaces\n    " + orNone(l.Replaces.ChildTxID) + "\n")
+	}
 	b.WriteString("  parent txid\n    " + l.ParentTxID + "\n\n")
 	b.WriteString(prose.Table([]prose.Row{
 		prose.Note("the pair now pays", s.FeeSat+l.Parent.FeeSat,
@@ -291,10 +334,20 @@ func published(s *Signed, l *Located) string {
 		"reason the child was built with add_inputs off. Both transactions are in " +
 		"LND's wallet-level rebroadcaster now, so it keeps offering them until they " +
 		"confirm, and both are in the journal to re-send by hand if they need it."))
+	if l.Replaces != nil {
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"The child this replaced is gone from the mempool — that is what a "+
+				"replacement does — and bump %d is journalled as superseded rather "+
+				"than deleted, because those bytes really were broadcast once. The "+
+				"batch is now accelerated by this transaction and no other.",
+			l.Replaces.Seq)))
+	}
 	b.WriteString("\n")
-	b.WriteString(prose.Para("Nothing was replaced. The batch's outpoints are what " +
-		"they were, so every commitment signature every peer holds is still against " +
-		"the right transaction (I-4)."))
+	b.WriteString(prose.Para("The batch's own outpoints are what they were, so " +
+		"every commitment signature every peer holds is still against the right " +
+		"transaction (I-4). Nothing in this build can replace a funding " +
+		"transaction."))
 	b.WriteString("\n")
 	b.WriteString(prose.Para("`winthistle run` is not what watches this — the " +
 		"settlement pass ended when that command did. Watch it with Core, or run " +

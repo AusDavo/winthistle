@@ -25,7 +25,8 @@ const (
 	MismatchedUTXO
 	WrongInputValue
 	LegacyInput
-	Replaceable
+	NotReplaceable
+	TimelockedInput
 	WrongOutputCount
 	WrongOutput
 	DustOutput
@@ -52,8 +53,10 @@ func (c Code) String() string {
 		return "input is not worth what the parent's change is worth"
 	case LegacyInput:
 		return "input is not a segwit spend"
-	case Replaceable:
-		return "replaceable"
+	case NotReplaceable:
+		return "not replaceable, so a second lift would have nothing to replace"
+	case TimelockedInput:
+		return "sequence engages a BIP-68 relative timelock"
 	case WrongOutputCount:
 		return "wrong number of outputs"
 	case WrongOutput:
@@ -163,9 +166,16 @@ func (v *Verification) OK() bool { return len(v.Problems) == 0 }
 //
 // What is shared is the floor, and it is shared as code rather than as a
 // convention: plan.IsSegwitSpend reads the prevout script rather than trusting a
-// field, plan.MaxNonReplaceableSequence is the same constant, plan.SizeOf uses
-// the same upper bounds, and plan.DustSat is the same floor. So the two
-// verifiers cannot drift on the facts they both depend on.
+// field, plan.SizeOf uses the same upper bounds, and plan.DustSat is the same
+// floor. So the two verifiers cannot drift on the facts they both depend on.
+//
+// Where they deliberately disagree is replaceability, and having two verifiers
+// is what makes that expressible at all. internal/plan refuses any funding input
+// below plan.MaxNonReplaceableSequence, because n peers hold commitment
+// signatures against that transaction's outpoints. This one *requires*
+// plan.MaxBIP125Sequence, because nobody has committed to anything about a child
+// and a replaceable one turns a second lift into an ordinary RBF. One verifier
+// with a flag on it would have been a switch on the invariant.
 //
 // # Why it runs twice
 //
@@ -254,18 +264,42 @@ func checkInputs(packet *psbt.Packet, exp Expectation, v *Verification,
 					"under I-4 the batch would still have no remedy.")
 		}
 
-		// I-4's habit rather than I-4 itself. Replacing the child would move no
-		// funding outpoint and would be safe, and the build sets
-		// replaceable: false anyway; this is the check that the returned packet
-		// still says so.
-		if txIn.Sequence < plan.MaxNonReplaceableSequence {
-			add(Replaceable, where,
-				fmt.Sprintf("Sequence is %#x, which signals BIP-125 replaceability.",
-					txIn.Sequence),
-				"The child is built non-replaceable, so this is a change somebody "+
-					"made to it. Replacing the child would not by itself touch a "+
-					"funding outpoint — I-4 is about the parent — but a returned "+
-					"transaction that is not the one that was built is not one to sign.")
+		// The child is built replaceable, and this checks that it still is —
+		// which is the opposite of what internal/plan asks of a funding input.
+		// Both are right: I-4 is about the parent, whose outpoints n peers hold
+		// commitment signatures against, and nobody has committed to anything
+		// about a child. Replaceability is what makes a second lift an ordinary
+		// RBF rather than a grandchild nothing builds.
+		//
+		// Exactly plan.MaxBIP125Sequence, not merely "something replaceable", and
+		// the reason is BIP-68 rather than tidiness. This transaction is version 2,
+		// so a sequence with bit 31 clear stops being an RBF signal and becomes a
+		// *relative timelock* — the child would not be spendable until the parent
+		// had confirmations, and a CPFP child that cannot be mined beside its
+		// parent cannot enter a mempool at all. Values from 0x80000000 to
+		// 0xfffffffd are replaceable with BIP-68 disabled, so accepting that whole
+		// range would accept many ways to be subtly wrong. The check is equality
+		// with what the build set.
+		switch {
+		case txIn.Sequence > plan.MaxBIP125Sequence:
+			add(NotReplaceable, where,
+				fmt.Sprintf("Sequence is %#x, which does not signal BIP-125 "+
+					"replaceability.", txIn.Sequence),
+				fmt.Sprintf("The child is built at %#x so that a second lift can "+
+					"replace it rather than needing a child of its own. A "+
+					"non-replaceable child is not dangerous — it is the batch that "+
+					"must never be replaced (I-4) — but it is not the transaction that "+
+					"was built, and it would leave a stalled batch with one "+
+					"acceleration and no second.", plan.MaxBIP125Sequence))
+		case txIn.Sequence != plan.MaxBIP125Sequence:
+			add(TimelockedInput, where,
+				fmt.Sprintf("Sequence is %#x and the child is built at %#x.",
+					txIn.Sequence, plan.MaxBIP125Sequence),
+				"On a version 2 transaction a sequence with the top bit clear is a "+
+					"BIP-68 relative timelock rather than an RBF signal, and a CPFP "+
+					"child under a timelock could not be mined beside the parent it is "+
+					"paying for — it could not enter a mempool at all. Only the value "+
+					"the build set is accepted.")
 		}
 
 		in := packet.Inputs[i]

@@ -23,6 +23,31 @@ import (
 // which the app accepts a replaceable funding transaction.
 const MaxNonReplaceableSequence = wire.MaxTxInSequenceNum - 1
 
+// MaxBIP125Sequence is the largest input sequence that *does* signal BIP-125
+// replaceability — 0xfffffffd, which is what Core uses for `replaceable: true`
+// and which still leaves nLockTime honoured.
+//
+// It is here rather than in internal/bump because internal/settle builds the
+// transaction that uses it and cannot import internal/bump, and because a
+// sequence number is a fact about Bitcoin rather than about either package. It
+// is used for exactly one transaction in this build and this is the whole list:
+//
+//   - the CPFP child of a published batch, and nothing else.
+//
+// **This is not a relaxation of I-4, and the distance matters.** I-4 is about
+// the funding transaction, whose outpoints n peers hold commitment signatures
+// against; replacing one destroys the batch. A child's outpoints are load-bearing
+// for nobody: it spends the batch's change and pays cold storage back, so
+// replacing it moves nothing anyone has committed to. What replaceability buys
+// is the second lift — a batch that needs accelerating twice gets an ordinary
+// RBF of the child rather than a grandchild nothing builds.
+//
+// The verifier that enforces this is internal/bump's, and internal/plan's still
+// refuses any funding input below MaxNonReplaceableSequence. Two verifiers is
+// what makes the two rules expressible at once; one verifier with a flag would
+// be a switch on the invariant.
+const MaxBIP125Sequence = wire.MaxTxInSequenceNum - 2
+
 // Code identifies a finding, so a UI can react to one without matching prose.
 type Code int
 
