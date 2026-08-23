@@ -25,6 +25,21 @@ type Derived struct {
 	// is checked against its own descriptor, this also establishes that the
 	// address came from the branch it was derived on.
 	//
+	// It is information and NOT a gate, and the reason is measured. parent_desc
+	// is singular, and a wallet can hold two descriptors that derive the same
+	// address — which is precisely what a corrected setup leaves behind, since
+	// Core cannot remove a descriptor and sortedmulti and multi agree at about
+	// half of all indices. Core then attributes the address to one of them, and
+	// on Core 29 that is the one whose key manager was created first, active or
+	// not. Observed on the harness: a wallet that held a rejected multi() pair
+	// and then imported the correct sortedmulti() pair reported three of five
+	// receive addresses as belonging to the rejected descriptor — on a pair that
+	// was entirely correct, and whose addresses the real cold wallet owns.
+	//
+	// So a false FromImported means "another descriptor in this wallet derives
+	// this address too", which is worth saying and is not a reason to withhold
+	// the comparison.
+	//
 	// Note what is deliberately not used here: getaddressinfo's ischange. It
 	// looks like the read-back of the import's internal flag and is not. Core's
 	// IsChange means "an output of ours with no address-book entry", so it is
@@ -35,6 +50,10 @@ type Derived struct {
 	// reports ischange=true because nothing ever did. The authoritative read-back
 	// of the internal flag is listdescriptors, which Confirm checks.
 	FromImported bool
+
+	// Parent is the descriptor Core named, whichever it was. It is what turns
+	// "this belongs to something else" into a line an operator can act on.
+	Parent string
 }
 
 // AddressCheck is the round trip: the first few addresses of each branch,
@@ -52,20 +71,69 @@ type AddressCheck struct {
 	ChangeDesc  string
 }
 
-// Consistent reports whether Core recognises every derived address as belonging
-// to the descriptor that was imported.
+// Recognised reports whether the wallet claims every derived address as its own
+// and knows how to spend it.
 //
-// This is an internal-consistency check and nothing more. It cannot tell a
-// sortedmulti wallet from a multi one, or the right derivation path from a
-// wrong one — both are wholly self-consistent. Only the operator's comparison
-// against their own wallet software can.
-func (a AddressCheck) Consistent() bool {
-	for _, d := range append(append([]Derived{}, a.Receive...), a.Change...) {
-		if !d.Mine || !d.Solvable || !d.FromImported {
+// This is the property that has to hold before the comparison is worth making,
+// and it is the only one. An address the wallet disowns is not part of the wallet
+// a batch would be built from — the ordinary cause is an imported range that does
+// not reach the index being shown, which Config.Validate refuses — and an
+// operator who answered "they match" to a screen of addresses the wallet does not
+// hold would have confirmed nothing.
+//
+// It deliberately says nothing about *which* descriptor the addresses came from.
+// See Derived.FromImported.
+func (a AddressCheck) Recognised() bool {
+	for _, d := range a.all() {
+		if !d.Mine || !d.Solvable {
 			return false
 		}
 	}
 	return len(a.Receive) > 0 && len(a.Change) > 0
+}
+
+// Attributed reports whether Core credits every address to the descriptor it was
+// derived from.
+//
+// False is not a fault. It means some other descriptor in this wallet derives the
+// same address, which is the state a corrected setup leaves behind — see
+// Derived.FromImported for the measurement. Worth reporting, never worth refusing
+// on.
+func (a AddressCheck) Attributed() bool {
+	for _, d := range a.all() {
+		if !d.FromImported {
+			return false
+		}
+	}
+	return len(a.Receive) > 0 && len(a.Change) > 0
+}
+
+// Consistent is Recognised and Attributed together: the wallet holds every
+// address and credits each to the descriptor it came from.
+//
+// Still an internal-consistency check and nothing more. It cannot tell a
+// sortedmulti wallet from a multi one, or the right derivation path from a
+// wrong one — both are wholly self-consistent. Only the operator's comparison
+// against their own wallet software can.
+func (a AddressCheck) Consistent() bool { return a.Recognised() && a.Attributed() }
+
+// Elsewhere are the other descriptors in this wallet that derive an address the
+// operator is being shown, deduplicated and in the order they were met.
+func (a AddressCheck) Elsewhere() []string {
+	var out []string
+	seen := map[string]bool{}
+	for _, d := range a.all() {
+		if d.FromImported || d.Parent == "" || seen[d.Parent] {
+			continue
+		}
+		seen[d.Parent] = true
+		out = append(out, d.Parent)
+	}
+	return out
+}
+
+func (a AddressCheck) all() []Derived {
+	return append(append([]Derived{}, a.Receive...), a.Change...)
 }
 
 // DeriveCheck builds the round-trip check.
@@ -114,7 +182,8 @@ func DeriveCheck(ctx context.Context, node, wallet *bitcoind.Client,
 			for _, parent := range info.Parents() {
 				if parent == branch.desc {
 					d.FromImported = true
-					break
+				} else if d.Parent == "" {
+					d.Parent = parent
 				}
 			}
 			*branch.into = append(*branch.into, d)

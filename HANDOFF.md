@@ -3,18 +3,18 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State: the three phases exist as packages, something composes them, and every
-function in *them* now has a caller — the setup path is the one part of the build
-that is still written and uncalled.** `winthistle run` drives Phase 0 —
-peer pre-flight, fee rate, anchor reserve, dress rehearsal — then Phase 1's
-armed window and its single publish, then Phase 2's confirmation watch and
-policy pass; `winthistle bump` builds, verifies, signs and broadcasts the CPFP
-child of a batch that went out too cheap; `winthistle doctor` runs every
-pre-flight in order and prints the command that fixes each failure;
+**State: every function in this repository now has a non-test caller.**
+`winthistle setup` builds the watch-only wallet from the cold wallet's
+descriptors and ends by asking a human to compare addresses; `winthistle run`
+drives Phase 0 — peer pre-flight, fee rate, anchor reserve, dress rehearsal —
+then Phase 1's armed window and its single publish, then Phase 2's confirmation
+watch and policy pass; `winthistle bump` builds, verifies, signs and broadcasts
+the CPFP child of a batch that went out too cheap; `winthistle doctor` runs
+every pre-flight in order and prints the command that fixes each failure;
 `winthistle recover` is the recovery screen and the abort behind it. All of it
-is configured by `winthistle.toml` and a batch file, and all of it is exercised
-against the live regtest node. What is missing is the server, the UI, signet,
-and the mainnet cold probe.
+is configured by `winthistle.toml`, a batch file and a descriptor file, and all
+of it is exercised against the live regtest node. What is missing is the server,
+the UI, signet, and the mainnet cold probe.
 
 **The rule that said "there must be no other publish call site" has changed,
 deliberately, and it is now enforced rather than asserted.** There are two calls
@@ -54,6 +54,7 @@ mainnet and the abort paths work.
 | `internal/lnd` | gRPC client, `PendingChanID`, `ChannelPoint` |
 | `internal/bitcoind` | Core JSON-RPC client, coin-lock lock/release, and the descriptor-wallet calls directed mode needs |
 | `internal/coldwallet` | directed mode's setup: create the watch-only wallet, checksum and import the descriptors, read back what landed, and end in the round-trip address check. Also the segwit-only coin filter, and step 4's `walletcreatefundedpsbt` |
+| `internal/setup` | `winthistle setup`: the install, the resume, and the one question the program cannot answer for itself. Records the answer, keyed on the descriptors it was about |
 | `internal/plan` | the batch plan and its verifier — the check LND does not make |
 | `internal/prose` | the operator-facing copy primitives: one column, one way to render a satoshi |
 | `internal/abort` | `CancelShim`, `AbandonPending`, `Run` — the three abort paths |
@@ -67,7 +68,7 @@ mainnet and the abort paths work.
 | `internal/rehearsal` | Phase 0's dress rehearsal and the measurement the 5:00 abort gate compares against |
 | `internal/settle` | Phase 2: the confirmation watch, `UpdateChannelPolicy` polled unconditionally, LND's funding horizon, and the CPFP child |
 | `internal/policy` | one channel's forwarding policy: chosen in Phase 0, shown in the plan document, applied by Phase 2. Its own package because those are three packages, and `internal/settle` already imports `internal/plan` |
-| `internal/config` | `winthistle.toml` and the batch file, read by a strict reader that refuses every key it does not know — and refuses `allow_rbf` even when spelled correctly |
+| `internal/config` | `winthistle.toml`, the batch file and the cold wallet's descriptor file, read by a strict reader that refuses every key it does not know — and refuses `allow_rbf` even when spelled correctly |
 | `internal/signers` | how a base64 PSBT reaches a device and a partial comes back: a command, or a file handshake |
 | `internal/doctor` | every pre-flight in order, each failure with the command that fixes it. Also the credential check, which asks LND rather than calling things |
 | `internal/run` | the composition: Phase 0, the armed window, Phase 2, and the abort that any failure ends in |
@@ -369,6 +370,7 @@ wrong one.
 
 Four things came out of building it that were not in `docs/design.html`, and
 three of them are Core behaving in a way the obvious code would have got wrong.
+Four more came out of building its caller — see "`winthistle setup`" below.
 
 ### The wrong descriptor does not show a zero balance. It shows a partial one.
 
@@ -427,6 +429,210 @@ that block's header and compares it against the birthday, and
 `Config.Validate` refuses a birthday it was not given — both are written, neither
 is proved. That needs signet, per `CLAUDE.md`. The regtest tests say so in a
 named constant rather than by omission.
+
+## `winthistle setup`, and the four things Core does that the obvious code gets wrong
+
+`internal/coldwallet` was the last written-and-uncalled package in the
+repository. `internal/setup` is the caller, and it is a thin composition over
+`Install`, `Read`, `DeriveCheck` and one journal table — but building it turned
+up four more pieces of Core behaviour, one of which would have made the command
+fail on a wallet that was entirely correct.
+
+### It cannot end in success, so the interface is "ask again"
+
+`Install`'s only successful verdict is `AwaitingAddressCheck`, and that is not a
+placeholder. Nothing the program can check separates a correct descriptor from a
+plausible wrong one: Core parses both, the import succeeds for both, the
+read-back is self-consistent for both, and the balance does not separate them
+either — the multi()-where-you-wanted-sortedmulti() wallet finds 5.45 BTC of the
+harness cold wallet's coins, on a wallet that is wrong.
+
+So the command has two shapes and they are the same screen:
+
+- `winthistle setup --descriptors cold.toml` installs. Idempotent, because
+  `createwallet` accepts a wallet that exists and `Import` widens to whatever
+  range Core has grown to.
+- `winthistle setup` reads the wallet back — `coldwallet.Read`, new — derives the
+  addresses from what is actually in it, and asks again.
+
+`deriveaddresses` has no side effect, so the second form can be run as often as
+it takes. That is the whole answer to "the operator has gone to find a hardware
+wallet": nothing is lost by walking away, and the same addresses are there
+tomorrow.
+
+**There is no `--yes`, and there must not be.** Every other prompt in this tool
+guards a decision the operator made by running the command. This one is the
+operator *supplying evidence* — that they looked at a device and saw the same
+addresses — and a flag that answered it would fabricate the evidence. The prompt
+is three-way instead: yes, no, and anything-else-means-not-yet. A stray keypress
+cannot confirm a wallet nobody looked at, and it cannot condemn a working one
+either.
+
+### The answer lives in a new journal table, and it is keyed on what it was about
+
+`setups`, alongside `bumps`: **new tables are the only growth this journal
+supports**, because `Open` runs one `CREATE TABLE IF NOT EXISTS` block with no
+version table and no migrations, so an `ALTER` would silently not reach a
+journal an earlier build wrote.
+
+A file was the alternative and it is worse. This journal is already the tool's
+only durable state, already opened by every command, already the one thing the
+design tells an operator to back up, already `STRICT` so a typo cannot land as an
+integer, and already the home of the other record that must never be rewritten
+(`BumpSuperseded`). A second store would be a second format, a second set of
+permissions and a second way to be half-written, for nothing.
+
+"Nothing at all" was the other alternative, and it fails on a consumer: `doctor`'s
+cold-wallet check previously had to warn unconditionally, because it had no way to
+know whether anybody had ever looked. It can only stop warning if somebody wrote
+down *which descriptors* were compared.
+
+Which is the load-bearing part. The row stores the descriptors as
+`listdescriptors` reports them, the sample size, and index 0 of each branch —
+every field a read-back rather than an input. `Setup.Describes` then makes the
+record self-invalidating: a confirmation from before a re-import describes a pair
+this wallet no longer derives from, and `doctor` says exactly that rather than
+believing it or ignoring it. Four verdicts, all tested against the live node:
+
+| journal says | doctor says |
+|---|---|
+| nothing | **warn** — nobody has compared this wallet's addresses |
+| confirmed, this pair | **ok** — confirmed on *date*, *n* per branch |
+| answered, a different pair | **warn** — it says nothing about these addresses |
+| rejected, this pair | **FAIL** — this wallet must not fund a batch |
+
+The rows are append-only and the *latest* wins whatever it says. A reader that
+searched for the newest confirmation would find one from before the descriptors
+were corrected and report a wallet as checked when the last thing a human said
+about it was no.
+
+Rejected is a `Fail` and unanswered is only a `Warn`, deliberately: a wallet
+imported by hand before this command existed is a working wallet that has not
+been checked, and failing on it would break a setup that works.
+
+### The descriptors and the birthday come from a file, and the birthday is in it
+
+`winthistle example-descriptors` prints it: `[cold]` with `receive`, `change` and
+`birthday`. Three required keys, no defaults, and the same strict reader
+`winthistle.toml` uses, so a misspelled key is a refusal naming its line.
+
+Not flags. A descriptor is three hundred characters of extended public key, and
+`CLAUDE.md`'s rule is the reason: one of them deanonymises the whole cold
+wallet's history, permanently. A flag puts it in the shell history of every
+machine it is typed on and in `ps` output for every other local user for the
+length of the rescan, which on mainnet is hours.
+
+Not `winthistle.toml`. That file is read by every command on every run and holds
+the *paths* to secrets rather than secrets. This one is read once, by one
+command, and then the descriptors live in Core where they are needed.
+
+The birthday is in the same file rather than beside it because it belongs to the
+same wallet — a birthday supplied separately is how the right descriptor gets
+paired with the wrong date. One format, `YYYY-MM-DD`, or the literal `genesis`.
+`03/04` is refused rather than guessed at: it is two different days depending on
+where it was written, and a rescan from the wrong one finds part of the wallet and
+reports it as all of it.
+
+`[bitcoind] wallet` is where the wallet name comes from — not a flag of its own.
+The wallet setup builds has to be the wallet the run spends from, and a second
+place to name it is a second thing to get wrong.
+
+**`.gitignore` grew four lines for it, and two more that were already missing.**
+It blocked `descriptors*.json` and `*wallet-export*`, which a file called
+`cold.toml` is neither — and `cold.toml` is what the README, the design and
+`doctor`'s fix line all tell an operator to create. `batch.toml` went in at the
+same time: it is not key material, and it is exactly the set of facts — which
+peers, how much, when — that the no-third-party-APIs rule exists to keep off
+other people's servers, so it does not belong in a repo either. Nothing tracked
+matched either pattern.
+
+### A multipath descriptor is refused, because Core silently keeps half of it
+
+Most wallet software now exports the whole wallet as one line with a `<0;1>`
+derivation step. Core 29's `getdescriptorinfo` on one of those returns a
+`multipath_expansion` array with both branches, a `checksum` for the multipath
+form — and a `descriptor` field holding **the first expansion alone**, under a
+different checksum:
+
+```
+in:         wsh(sortedmulti(2,…/<0;1>/*,…/<0;1>/*))
+checksum:   pq9yk6vg          ← for what was passed in
+descriptor: wsh(sortedmulti(2,…/0/*,…/0/*))#pdl90q54   ← what you get back
+```
+
+So the obvious use of it — paste the one descriptor into both fields — imports
+the receive branch twice, once where it belongs and once as the wallet's change
+branch, and the wallet then derives change to the addresses the batch is also
+funded from. `importdescriptors` would have refused the multipath form outright
+(*"Cannot have multipath descriptor while also specifying 'internal'"*), but it
+never sees it: `Prepare` sends what `getdescriptorinfo` returned.
+
+`Config.Validate` refuses it locally, before anything is created, and says what
+Core would have done with it. It is fatal rather than a warning because there is
+nothing to weigh.
+
+### Core deactivates the descriptor it replaces, and keeps its coins
+
+This is the one that changes what to tell an operator. A Core descriptor wallet
+holds **one** active external descriptor and **one** active internal one. A second
+active import does not replace the first — it *deactivates* it and leaves it in
+the wallet. Observed on Core 29:
+
+```
+active= False internal= None  #pdl90q54   ← was active; note `internal` is gone
+active= True  internal= False #huwq79j5
+```
+
+And the deactivated descriptor's coins are still in `listunspent`. Measured on the
+same wallet: 3 coins and 6 BTC before the deactivation, 3 coins and 6 BTC after.
+There is no RPC that removes a descriptor from a Core wallet.
+
+So the ordinary recovery path — compare, find them wrong, fix the descriptor,
+re-run — leaves a wallet whose balance is partly the wallet the operator meant and
+partly the one they rejected, with coin selection unable to tell which found
+what. The advice after a rejection is therefore **a new wallet name**, which is
+one line of `winthistle.toml`, and `coldwallet.StaleWarning` says so at the point
+it is read. `doctor` warns about inactive descriptors for the same reason.
+
+### The round-trip check can fail on a wallet that is entirely correct, twice over
+
+Both are now closed, and the second one is the reason
+`AddressCheck.Consistent()` is no longer a gate.
+
+**A gap limit below the sample size.** The import covers `[0, gap limit]` and the
+check derives `0` to `sample-1`. An address outside the imported range is not in
+the wallet at all: `getaddressinfo` for index 5000 of a wallet imported to
+`[0,1132]` answers `ismine: false`, `solvable: false`, no parent descriptor — the
+same three flags a wrong descriptor produces, on the same screen, with nothing to
+tell the operator which they are looking at. `Config.Validate` now refuses it
+before anything is created.
+
+**`parent_desc` is singular, and Core names the wrong descriptor.** A wallet can
+hold two descriptors that derive the same address — which is exactly what a
+corrected setup leaves behind, because Core cannot remove the old one and
+sortedmulti and multi agree wherever the derived keys were already in order. Core
+then credits the address to one of them, and on Core 29 that is the key manager
+created *first*, active or not.
+
+Measured: a wallet that held a rejected `multi()` pair and then imported the
+correct `sortedmulti()` pair reported **three of five receive addresses** as
+belonging to the rejected descriptor. `FromImported` was false on a pair that was
+entirely correct, whose addresses the real cold wallet owns.
+
+`Consistent()` was going to be the gate in front of the question. It would have
+refused to ask about the corrected wallet — the exact case this command exists
+for, and the failure that would make an operator distrust a working setup. So:
+
+- `AddressCheck.Recognised()` — `ismine` and `solvable` for every address — is
+  the gate. That is the property that has to hold, because an address the wallet
+  disowns is not part of the wallet a batch would be built from.
+- `AddressCheck.Attributed()` is reported, never gated on. A false one means
+  "another descriptor in this wallet derives this address too", and
+  `Elsewhere()` names it.
+- `Consistent()` is the two together, unchanged for existing callers.
+
+`TestACorrectedSetupCanStillBeConfirmed` walks the whole path against the live
+node and asserts the corrected pair is confirmable with attribution broken.
 
 ## The batch-plan verifier, and the gap it fills
 
@@ -1045,10 +1251,10 @@ callers, and the only place the whole sequence was assembled was `drive()` in
 `settle.BuildChild` was the last of *that* list with no caller, and
 `internal/bump` is now that caller.
 
-**One package is still written and uncalled, and it is not this list:**
-`internal/coldwallet`'s setup path. `Install`, `Confirm` and `RunPreflight` have
-test callers only — `winthistle setup` is what would call them, and it does not
-exist. See next actions.
+`internal/coldwallet`'s setup path was the last package on nobody's list.
+`Install`, `Confirm` and `RunPreflight` had test callers only; `internal/setup`
+is now the caller, and there is no written-and-uncalled code left. See
+"`winthistle setup`" above — it was not the wiring job the rest of this list was.
 
 ### `winthistle.toml`, and the two keys nothing read
 
@@ -1109,6 +1315,13 @@ config file, LND, the macaroon, Core, the cold wallet, the coins, the anchor
 reserve, the fee rate, the peers (with `--batch`), and the journal — including
 Core's coin locks that no run in the journal claims, which is what a crash
 between `walletcreatefundedpsbt` and the journal write leaves behind.
+
+The cold-wallet check now reads the answer to the round-trip address check out of
+the journal and has four verdicts about it, one of them a refusal — see
+"`winthistle setup`" above. Its `bitcoin-cli importdescriptors` fix line is gone;
+it prints `winthistle setup` instead. `doctor` also opens the journal once, at the
+top of `Run`, rather than inside `checkJournal`: two checks need it now, and
+opening it twice would report the same failure in two places.
 
 The credential check is the part with a finding in it.
 
@@ -1580,18 +1793,28 @@ claiming they never existed.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-4. **`winthistle setup`, or the honest absence of it.** `coldwallet.Install` —
-   create the watch-only wallet, checksum and import the descriptors, read them
-   back, derive the round-trip address check — still has no caller outside its
-   tests. `doctor` diagnoses a wallet that has not been set up and prints the
-   `bitcoin-cli importdescriptors` line, which is a worse experience than the
-   guided screen `Install` was written for. It needs the descriptors and the
-   birthday, which is the one part of setup no program can supply.
-5. **Nothing new at this level.** `winthistle bump` and the second lift are both
-   built — see "The second lift" below. What is left is items 1 to 4, and item 4
-   is the only remaining written-but-uncalled code in the repository.
+4. **Nothing new at this level.** `winthistle setup` was item 4 on the previous
+   list and is built — see "`winthistle setup`" above. There is no
+   written-but-uncalled code left in this repository, so what remains is items 1
+   to 3, all of which need something this machine does not have: a browser, a
+   signet node, or mainnet coins.
+
+One thing was deliberately **not** done, and it is a judgement worth revisiting
+rather than an oversight. **`winthistle run` does not read the setup record.**
+`doctor` fails on a wallet whose exact descriptors a human rejected, but nothing
+stops `run` opening a batch against one — the two commands share a journal and
+not a gate. Adding one is three lines and it cannot false-positive, because the
+record only fires on an exact descriptor-pair match. It is left out because it
+would be a new gate on the happy path that nothing on the happy path asked for,
+and because the honest ordering of the argument is: the check that matters is the
+one a human makes, and the place to enforce it is the pre-flight the operator
+already runs. If the first live batch says otherwise, the change is small.
 
 Done since the last handoff, all from the previous list:
+
+- **`winthistle setup`** — `internal/setup`, the `setups` journal table, the
+  descriptor file, and four more pieces of Core behaviour that the obvious code
+  would have got wrong. This was item 4 and the last written-but-uncalled code.
 
 - **`winthistle.toml`** — `internal/config`, and the two keys that were named by
   code and read from nowhere.
@@ -1608,6 +1831,19 @@ Done since the last handoff, all from the previous list:
   next-actions list as the thing deliberately *not* done; it is done.
 
 ## Watch out for
+
+- **`getaddressinfo`'s `parent_desc` can name the wrong descriptor, and it is not
+  a gate.** A Core wallet can hold two descriptors that derive the same address —
+  the state a corrected setup leaves behind — and Core credits the address to the
+  key manager created first, active or not. Measured: three of five addresses of a
+  *correct* pair attributed to a rejected one. `AddressCheck.Recognised()` is what
+  the setup question is gated on; `Attributed()` is reported. If you find yourself
+  gating on `Consistent()` again, that is the bug — see "`winthistle setup`".
+
+- **Core deactivates the descriptor it replaces and keeps its coins.** One active
+  external and one active internal per wallet, no RPC to remove either, and
+  `listunspent` still lists a deactivated descriptor's coins. So a corrected setup
+  is a new wallet name, not a second import.
 
 - **The CPFP child is replaceable and the funding transaction never is.** Two
   verifiers enforce opposite rules on purpose: `internal/plan` refuses a funding
@@ -1877,6 +2113,16 @@ been republished:
 - the commissioning section names `winthistle run --stop-before-publish` and
   says what composing it actually cost: one `if`, between `arm.Finalize` and
   `arm.Publish`.
+
+**One more change went into the doc with `winthistle setup`, and it has been
+republished.** The "Two setup traps" box is now four, and one of the original two
+was wrong: the doc said a `multi()`-where-you-wanted-`sortedmulti()` wallet "shows
+a zero balance", and the harness says it shows a plausible *partial* one — which
+is a better disguise and the reason the sample is five addresses rather than one.
+That correction was measured in the earlier coldwallet work and had never reached
+the spec. The two new traps are the multipath descriptor Core silently halves and
+the descriptor Core deactivates but cannot forget. The section also now says where
+the operator's answer goes and what `doctor` does with it.
 
 The ten-minute clock is closed too, and the answer is not one of the two options
 the question offered. **We have no clock at all**: `pruneZombieReservations` skips

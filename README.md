@@ -6,8 +6,9 @@ web interface.
 
 > ### Status: works on regtest, never run on mainnet. Do not use.
 >
-> There is a working command line — `winthistle doctor`, `winthistle run`,
-> `winthistle bump`, `winthistle recover` — and the web interface described in
+> There is a working command line — `winthistle setup`, `winthistle doctor`,
+> `winthistle run`, `winthistle bump`, `winthistle recover` — and the web
+> interface described in
 > the design does not exist yet. The central safety property below was verified by reading LND's
 > source and **has since been observed on regtest at *n* = 3**: three channels
 > armed from one transaction, with an empty mempool checked after every
@@ -46,13 +47,25 @@ to broadcast afterwards; an orchestrator is not bound by that.
 
 ```sh
 winthistle example-config > winthistle.toml   # then edit it
+winthistle example-descriptors > cold.toml    # the cold wallet's two branches
+                                              #   and its birthday
+winthistle setup --descriptors cold.toml      # build the watch-only wallet
 winthistle print-macaroon-command | sh        # bake the narrow credential
 winthistle doctor                             # every prerequisite, with fixes
 winthistle example-batch > batch.toml         # then edit it: peers, amounts, policy
 winthistle run --batch batch.toml --stop-before-publish
 ```
 
-The last line is the cold probe: the whole production sequence, with the one
+`setup` does not end in a success message, and that is deliberate: nothing a
+program can check separates a correct cold-storage descriptor from a plausible
+wrong one. Core parses both, the import succeeds for both, and a wrong one shows
+a *partial* balance rather than an empty one — measured, on the harness's own
+2-of-2. So it ends by putting five addresses of each branch on screen and asking
+whether they are the ones your own wallet software shows. Run it again with no
+arguments to answer later; `winthistle doctor` reads the answer back and refuses
+a wallet whose descriptors were rejected.
+
+The last line of the block is the cold probe: the whole production sequence, with the one
 call that broadcasts withheld and the batch taken apart afterwards. It is not a
 test mode and not a separate code path — see the design's commissioning section.
 

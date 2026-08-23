@@ -30,6 +30,21 @@ descriptors*.json
 *wallet-export*
 !testdata/**/*.psbt
 
+# The cold wallet's descriptor file, which `winthistle setup` reads: two
+# extended public keys and a date. One xpub deanonymises the whole wallet's
+# history, permanently, and git history cannot be un-published. These are the
+# names the README, the design and doctor's fix lines use.
+cold.toml
+cold-*.toml
+descriptors.toml
+*-descriptors.toml
+
+# The batch file: which peers, how much, and when. Not key material, and
+# exactly the set of facts the no-third-party-APIs rule exists to keep off
+# other people's servers — so it does not belong in a repo either.
+batch.toml
+batch-*.toml
+
 # --- Build output ---
 /winthistle
 /dist/

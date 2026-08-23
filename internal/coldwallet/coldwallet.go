@@ -189,6 +189,11 @@ var (
 
 	// branch matches the trailing /N/* of a ranged key expression.
 	branch = regexp.MustCompile(`/([0-9]+)/\*`)
+
+	// multipath matches a <a;b;…> derivation step: one descriptor standing for
+	// several branches. Core parses it and then keeps only the first — see
+	// Shape.Multipath.
+	multipath = regexp.MustCompile(`<[0-9]+h?'?(?:;[0-9]+h?'?)+>`)
 )
 
 // Shape is what can be read off a descriptor string without asking anything.
@@ -202,6 +207,11 @@ type Shape struct {
 	Keys        int
 	Origins     int
 	HasPrivate  bool
+
+	// Multipath is a <a;b> derivation step, which is how most wallet software
+	// now exports both branches as one line. It has to be refused rather than
+	// accepted, and the reason is Core's, not a preference — see Validate.
+	Multipath bool
 
 	// Branches are the /N/* indices found, deduplicated. A well-formed pair has
 	// exactly one each, and they differ.
@@ -223,6 +233,7 @@ func Inspect(desc string) Shape {
 		PlainMulti:  all-sorted > 0,
 		Origins:     len(origin.FindAllString(body, -1)),
 		HasPrivate:  strings.Contains(body, "prv"),
+		Multipath:   multipath.MatchString(body),
 	}
 
 	// Count keys as extended keys plus raw pubkeys that are not part of one.
@@ -302,6 +313,19 @@ func (c Config) Validate() []Concern {
 					"the last signature (I-2). Export the public descriptor instead.")
 			continue
 		}
+		if s.Multipath {
+			add(true, p.subject, "That descriptor covers more than one branch at once.",
+				"It has a <0;1>-style derivation step, which is how most wallet "+
+					"software now exports the whole wallet as one line. Core parses "+
+					"it and then keeps only the first branch: getdescriptorinfo "+
+					"answers with the /0/* expansion alone, under a checksum that is "+
+					"not even the one it was given. So this would import your receive "+
+					"branch where the change branch belongs, and the wallet would "+
+					"derive change from the addresses it also funds. Split it into "+
+					"two lines — the same descriptor with /0/* in one and /1/* in the "+
+					"other.")
+			continue
+		}
 		if !s.Ranged {
 			add(true, p.subject, "That descriptor is not ranged.",
 				"It has no /* at the end, so it describes one address rather than a "+
@@ -368,6 +392,26 @@ func (c Config) Validate() []Concern {
 	if c.SampleSize < 0 {
 		add(true, "the address check",
 			fmt.Sprintf("A sample size of %d is not a number of addresses.", c.SampleSize), "")
+	}
+	// The one way this build can make the address check fail on a wallet that is
+	// entirely correct, and therefore the one thing worth refusing outright.
+	//
+	// The import covers [0, gap limit]; the check derives indices 0 to
+	// sample size - 1. An address outside the imported range is not in the
+	// wallet, so getaddressinfo answers ismine false, solvable false and no
+	// parent descriptor — the same three flags a wrong descriptor produces, on
+	// the same screen, with no way for the operator to tell which they are
+	// looking at. Observed on the harness against index 5000 of a wallet
+	// imported to [0,1132].
+	if c.GapLimit >= 0 && c.SampleSize >= 0 && c.gapLimit()+1 < c.sampleSize() {
+		add(true, "the gap limit", fmt.Sprintf(
+			"A gap limit of %d does not reach the %d addresses the check compares.",
+			c.gapLimit(), c.sampleSize()),
+			"The import would cover indices 0 to "+fmt.Sprint(c.gapLimit())+
+				" and the check would ask about 0 to "+fmt.Sprint(c.sampleSize()-1)+
+				". The wallet would disown the addresses past its own range, which "+
+				"looks exactly like a wrong descriptor and is not one. Raise the gap "+
+				"limit or lower the sample size.")
 	}
 	return out
 }
@@ -572,6 +616,107 @@ func Confirm(ctx context.Context, wallet *bitcoind.Client, cfg Config, p Prepare
 			"not active=true internal=true", l.Change.Active, l.Change.Internal)
 	}
 	return l, nil
+}
+
+// Read reads a wallet back without being told what to expect.
+//
+// Confirm answers "is this the wallet we just built?"; this answers "what is in
+// this wallet?", which is the question a second run of setup has. The address
+// check is deliberately re-runnable — deriveaddresses has no side effect, so an
+// operator can walk away, find their hardware and come back — and a re-run that
+// re-read the operator's descriptor file would be checking the file. Reading the
+// wallet checks the wallet.
+//
+// It refuses anything other than exactly one active external descriptor and one
+// active internal one. Not tidiness: Core keeps at most one of each, so two
+// would be impossible and none means there is nothing here to compare.
+func Read(ctx context.Context, wallet *bitcoind.Client) (Landed, error) {
+	info, err := wallet.GetWalletInfo(ctx)
+	if err != nil {
+		return Landed{}, fmt.Errorf("reading the wallet back: %w", err)
+	}
+	if info.PrivateKeysEnabled {
+		return Landed{}, fmt.Errorf("the Core wallet %q has private keys enabled. "+
+			"This app must be structurally incapable of signing (I-2)", info.Name)
+	}
+	if !info.Descriptors {
+		return Landed{}, fmt.Errorf("the Core wallet %q is a legacy wallet, which "+
+			"cannot hold an imported ranged descriptor", info.Name)
+	}
+
+	descs, err := wallet.ListDescriptors(ctx)
+	if err != nil {
+		return Landed{}, fmt.Errorf("listing the wallet's descriptors: %w", err)
+	}
+
+	l := Landed{Info: info}
+	for _, d := range descs {
+		switch {
+		case d.Active && !d.Internal && l.Receive.Desc == "":
+			l.Receive = d
+		case d.Active && d.Internal && l.Change.Desc == "":
+			l.Change = d
+		default:
+			l.Others = append(l.Others, d)
+		}
+	}
+	switch {
+	case l.Receive.Desc == "" && l.Change.Desc == "":
+		return l, fmt.Errorf("the Core wallet %q has no active descriptors, so it "+
+			"knows about no coins at all and there is nothing to compare", info.Name)
+	case l.Receive.Desc == "":
+		return l, fmt.Errorf("the Core wallet %q has an active change descriptor "+
+			"and no active receive descriptor", info.Name)
+	case l.Change.Desc == "":
+		return l, fmt.Errorf("the Core wallet %q has an active receive descriptor "+
+			"and no active change descriptor. Without an internal branch Core "+
+			"cannot derive change, and a batch with no change output cannot be "+
+			"fee-bumped by CPFP (I-4)", info.Name)
+	}
+	return l, nil
+}
+
+// Stale are the descriptors in this wallet that are no longer active.
+//
+// They are not clutter, and this is the part of the setup path that surprised
+// the build. Core holds at most one active external descriptor and one active
+// internal one, so importing a corrected pair does not replace the wrong pair —
+// it *deactivates* it, and leaves it in the wallet. Observed on Core 29: after a
+// second active external import, listdescriptors reports the first with
+// "active": false and no "internal" field at all.
+//
+// The consequence is the one that matters. A deactivated descriptor's coins are
+// still in listunspent — measured, same node, same wallet, 6 BTC before and 6
+// BTC after the deactivation — so coin selection can still spend them, and there
+// is no RPC that removes a descriptor from a Core wallet. An operator who
+// compared the addresses, found them wrong, fixed the descriptor and re-ran is
+// therefore left with a wallet whose balance is partly the wallet they meant and
+// partly the one they rejected. The way out is a new wallet name, which is one
+// line of winthistle.toml.
+func (l Landed) Stale() []bitcoind.WalletDescriptor {
+	var out []bitcoind.WalletDescriptor
+	for _, d := range l.Others {
+		if !d.Active {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// OtherActive are active descriptors in the wallet that are neither of ours.
+//
+// Core allows one active external and one active internal, so on a wallet this
+// package built there are none. A wallet built by something else can hold an
+// active descriptor of another kind — a taproot branch, a single-sig branch —
+// and its coins are as selectable as anything else here.
+func (l Landed) OtherActive() []bitcoind.WalletDescriptor {
+	var out []bitcoind.WalletDescriptor
+	for _, d := range l.Others {
+		if d.Active {
+			out = append(out, d)
+		}
+	}
+	return out
 }
 
 func describeAll(descs []bitcoind.WalletDescriptor) string {

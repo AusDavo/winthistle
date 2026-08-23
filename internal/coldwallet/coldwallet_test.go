@@ -425,3 +425,76 @@ func TestScanProgressCopesWithBothOfCoresShapes(t *testing.T) {
 		t.Errorf("scanning object misread: %+v", s)
 	}
 }
+
+// TestAMultipathDescriptorIsRefused.
+//
+// This is the modern shape of the design's second setup trap. Most wallet
+// software now exports one descriptor with a <0;1> step in it, and Core parses
+// it — getdescriptorinfo answers with a multipath_expansion array and a
+// checksum for the whole thing, but its `descriptor` field is the *first branch
+// alone*. So the obvious use of it imports the receive branch twice: once where
+// it belongs and once as the wallet's change branch, which would derive change
+// to the addresses the batch is also funded from.
+//
+// Measured on Core 29 against the harness's own pair. It is fatal rather than a
+// warning because there is nothing to weigh: the descriptor cannot be imported
+// as given (importdescriptors refuses a multipath entry that also specifies
+// `internal`), and the thing Core would silently accept instead is wrong.
+func TestAMultipathDescriptorIsRefused(t *testing.T) {
+	multi := strings.ReplaceAll(harnessReceive, "/0/*", "/<0;1>/*")
+	cfg := goodConfig()
+	cfg.Receive = multi
+
+	cs := cfg.Validate()
+	if len(fatalConcerns(cs)) == 0 {
+		t.Fatalf("a <0;1> descriptor was accepted:\n%+v", cs)
+	}
+	if !mentions(cs, "more than one branch") {
+		t.Errorf("the refusal does not say what is wrong:\n%+v", cs)
+	}
+	if !mentions(cs, "keeps only the first branch") {
+		t.Errorf("the refusal does not say what Core would do with it:\n%+v", cs)
+	}
+	if !Inspect(multi).Multipath {
+		t.Error("Inspect does not see the multipath step")
+	}
+	if Inspect(harnessReceive).Multipath {
+		t.Error("Inspect sees a multipath step in an ordinary descriptor")
+	}
+}
+
+// TestAGapLimitBelowTheSampleIsRefused is the one way this build could make the
+// round-trip check fail on a wallet that is entirely correct, so it is refused
+// before anything is created.
+//
+// The import covers [0, gap limit] and the check derives 0 to sample-1. An
+// address outside the imported range is not in the wallet at all: measured on the
+// harness, getaddressinfo for index 5000 of a wallet imported to [0,1132]
+// answers ismine false, solvable false and no parent descriptor — the same three
+// flags a wrong descriptor produces, on the same screen, with nothing to tell the
+// operator which one they are looking at.
+func TestAGapLimitBelowTheSampleIsRefused(t *testing.T) {
+	cfg := goodConfig()
+	cfg.GapLimit = 3
+	cfg.SampleSize = 5
+
+	cs := cfg.Validate()
+	if len(fatalConcerns(cs)) == 0 {
+		t.Fatalf("a gap limit of 3 with a sample of 5 was accepted:\n%+v", cs)
+	}
+	if !mentions(cs, "does not reach") {
+		t.Errorf("the refusal does not say what will not reach what:\n%+v", cs)
+	}
+
+	// The boundary: [0,4] is exactly five addresses.
+	cfg.GapLimit = 4
+	if cs := fatalConcerns(cfg.Validate()); len(cs) != 0 {
+		t.Errorf("a gap limit of 4 with a sample of 5 was refused:\n%+v", cs)
+	}
+
+	// And the defaults must never collide, whichever way they move.
+	if DefaultGapLimit+1 < DefaultSampleSize {
+		t.Errorf("DefaultGapLimit %d cannot cover DefaultSampleSize %d",
+			DefaultGapLimit, DefaultSampleSize)
+	}
+}

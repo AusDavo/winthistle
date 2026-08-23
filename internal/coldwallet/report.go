@@ -102,20 +102,67 @@ func (r *Result) Report() string {
 			b.WriteString(prose.Bullet(w))
 		}
 	}
-	if len(r.Landed.Others) > 0 {
-		b.WriteString("\n")
-		b.WriteString(prose.Para(fmt.Sprintf(
-			"This wallet already held %d other descriptor(s). Nothing was removed. "+
-				"Coin selection will see their coins too, so a wallet that was not "+
-				"created for this purpose is worth looking at before it funds a batch:",
-			len(r.Landed.Others))))
-		for _, d := range r.Landed.Others {
-			b.WriteString(prose.Bullet(d.Desc))
-		}
-	}
+	b.WriteString(StaleWarning(r.Landed))
 
 	b.WriteString("\n")
 	b.WriteString(r.Check.Report())
+	return b.String()
+}
+
+// StaleWarning is what to say about descriptors in the wallet that are not the
+// pair being compared. Empty when there are none.
+//
+// This is the highest-stakes copy in the setup path, because it is read in
+// exactly the situation setup exists to produce: the operator compared the
+// addresses, found them wrong, fixed the descriptor and ran it again. Core does
+// not let them undo the first attempt — there is no RPC that removes a
+// descriptor from a wallet — and the wrong descriptor's coins stay selectable.
+// So the copy has to say that plainly and name the way out, which is a different
+// wallet rather than a repair of this one.
+func StaleWarning(l Landed) string {
+	stale, other := l.Stale(), l.OtherActive()
+	if len(stale) == 0 && len(other) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\n")
+
+	if len(stale) > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"This wallet holds %d descriptor%s that %s no longer active. Core keeps "+
+				"one active receive branch and one active change branch, so importing "+
+				"a pair does not replace an earlier pair — it deactivates it and "+
+				"leaves it here. There is no RPC that removes a descriptor from a "+
+				"Core wallet.",
+			len(stale), prose.Plural(len(stale)), prose.IsAre(len(stale)))))
+		for _, d := range stale {
+			b.WriteString(prose.Bullet(d.Desc))
+		}
+		b.WriteString("\n")
+		b.WriteString(prose.Para("Their coins are still in this wallet's own coin " +
+			"list, so coin selection can still spend them — deactivating a " +
+			"descriptor does not hide what it found. If the descriptor above is one " +
+			"you rejected, this wallet's balance is now partly the wallet you meant " +
+			"and partly the one you did not, and no import can separate them again."))
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf("What to do: set up under a new wallet "+
+			"name and point winthistle.toml at it. It is one line — [bitcoind] "+
+			"wallet — and it costs another rescan and nothing else. Keeping %q is "+
+			"only safe if you know what the inactive descriptor is and are content "+
+			"for a batch to spend its coins.", l.Info.Name)))
+	}
+
+	if len(other) > 0 {
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"It also holds %d active descriptor%s this setup did not import. Coin "+
+				"selection will see their coins as well, so a wallet that was not "+
+				"created for this purpose is worth reading before it funds a batch:",
+			len(other), prose.Plural(len(other)))))
+		for _, d := range other {
+			b.WriteString(prose.Bullet(d.Desc))
+		}
+	}
 	return b.String()
 }
 
@@ -136,12 +183,25 @@ func (a AddressCheck) Report() string {
 	b.WriteString("\n  change\n")
 	b.WriteString(addresses(a.Change))
 
-	if !a.Consistent() {
+	if !a.Recognised() {
 		b.WriteString("\n")
 		b.WriteString(prose.Para("Core does not recognise every address above as its " +
-			"own, which it should before you compare anything. Something is wrong " +
-			"with the import rather than with the descriptor — the detail is on each " +
-			"line."))
+			"own, which it should before you compare anything. That is the import " +
+			"rather than the descriptor: the usual cause is an imported range that " +
+			"does not reach the index being shown. The detail is on each line."))
+	}
+	if elsewhere := a.Elsewhere(); len(elsewhere) > 0 {
+		b.WriteString("\n")
+		b.WriteString(prose.Para("Some of the addresses above are derived by another " +
+			"descriptor in this wallet as well, and Core credits each address to only " +
+			"one. This is what a wallet looks like after a descriptor has been " +
+			"corrected — Core cannot remove the old one, and two descriptors over the " +
+			"same keys agree wherever the keys were already in order. It does not " +
+			"make the addresses wrong and it does not change what to compare them " +
+			"against. The other descriptor is:"))
+		for _, d := range elsewhere {
+			b.WriteString(prose.Bullet(d))
+		}
 	}
 
 	b.WriteString("\n")
@@ -166,7 +226,8 @@ func addresses(ds []Derived) string {
 			flags = append(flags, "the wallet cannot work out how to spend it")
 		}
 		if d.Mine && !d.FromImported {
-			flags = append(flags, "it belongs to a different descriptor in this wallet")
+			flags = append(flags, "another descriptor in this wallet derives this "+
+				"address too, and Core credits it to that one")
 		}
 		b.WriteString(line + "\n")
 		for _, f := range flags {
@@ -204,6 +265,13 @@ func rescan(c Config, l Landed) string {
 }
 
 // concerns renders the warnings, or the refusals when fatal is set.
+//
+// Each item leads with its subject on a line of its own. That is not decoration:
+// the same concern applies to the receive and the change descriptor often enough
+// that a list of two identically-worded refusals is the ordinary case — a
+// multipath descriptor pasted into both fields produces exactly that — and a
+// refusal an operator cannot attribute to a line of their file is a refusal they
+// have to guess at.
 func concerns(cs []Concern, fatal bool) string {
 	var b strings.Builder
 	var n int
@@ -212,6 +280,14 @@ func concerns(cs []Concern, fatal bool) string {
 			continue
 		}
 		n++
+		if c.Subject != "" {
+			b.WriteString("  - " + c.Subject + "\n")
+			b.WriteString(prose.Wrap(c.Headline, "      ", "      "))
+			if c.Detail != "" {
+				b.WriteString(prose.Wrap(c.Detail, "      ", "      "))
+			}
+			continue
+		}
 		b.WriteString(prose.Wrap(c.Headline, "  - ", "    "))
 		if c.Detail != "" {
 			b.WriteString(prose.Wrap(c.Detail, "    ", "    "))

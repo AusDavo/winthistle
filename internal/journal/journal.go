@@ -238,6 +238,27 @@ func (j *Journal) Close() error { return j.db.Close() }
 // So each of the three mirrors the shape of its batch counterpart, and Bump
 // carries its own small state machine: no shims, no channels, no peers, and an
 // abort that is one action rather than three.
+//
+// # And why the setup answer is in here at all
+//
+// `setups` is not a run either, and it is not a transaction. It is one row
+// saying that a human looked at a list of addresses and said whether they
+// matched — which is the only check that can tell a correct cold-storage
+// descriptor from a plausible wrong one, and therefore the only fact about a
+// setup worth keeping.
+//
+// It is here rather than in a file of its own because this file is already the
+// tool's whole durable state: it is opened by every command, it is the one thing
+// the design tells an operator to back up, its columns are STRICT so a typo
+// cannot land as an integer, and it already holds the other record that must
+// never be rewritten (see BumpSuperseded). A second store would be a second
+// format, a second set of permissions and a second way to be half-written, in
+// exchange for nothing.
+//
+// It has no foreign key to runs, and that is the point rather than an omission:
+// a setup is not on the I-1 state machine, so Unfinished never lists one,
+// Run.AbortTarget never builds one, and Recover never runs abort.Run over one.
+// The only thing that reads it is winthistle doctor.
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
     id         TEXT PRIMARY KEY,
@@ -312,6 +333,20 @@ CREATE TABLE IF NOT EXISTS bump_locks (
     released INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, seq, txid, vout),
     FOREIGN KEY (run_id, seq) REFERENCES bumps(run_id, seq)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS setups (
+    wallet         TEXT    NOT NULL,
+    seq            INTEGER NOT NULL,
+    outcome        TEXT    NOT NULL,
+    receive_desc   TEXT    NOT NULL,
+    change_desc    TEXT    NOT NULL,
+    sample_size    INTEGER NOT NULL,
+    first_receive  TEXT    NOT NULL,
+    first_change   TEXT    NOT NULL,
+    rescanned_from INTEGER NOT NULL,
+    answered_at    TEXT    NOT NULL,
+    PRIMARY KEY (wallet, seq)
 ) STRICT;
 `
 

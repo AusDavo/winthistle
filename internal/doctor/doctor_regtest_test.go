@@ -8,6 +8,7 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/doctor"
+	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 )
@@ -152,5 +153,146 @@ func TestDoctorWithABatchChecksThatBatch(t *testing.T) {
 	if !strings.Contains(joined, "Nothing here is a verdict") {
 		t.Error("the peer check does not say that none of it is authoritative. " +
 			"The peer's minimum is enforced conversationally and published nowhere.")
+	}
+}
+
+// TestTheColdWalletCheckReportsTheAddressCheck runs the four verdicts doctor can
+// reach about the only check whose evidence is a human.
+//
+// Nothing a node can be asked separates a correct cold-storage descriptor from a
+// plausible wrong one: Core parses both, the import succeeds for both, the
+// read-back is self-consistent for both, and the balance does not separate them
+// either. So the answer is written down, keyed on the descriptors it was about —
+// and each of these four is a different thing to tell an operator.
+func TestTheColdWalletCheckReportsTheAddressCheck(t *testing.T) {
+	env := regtestenv.Start(t)
+	ctx := ctxFor(t)
+	dir := t.TempDir()
+
+	cfg, err := config.Load(env.ConfigFile(t, dir))
+	if err != nil {
+		t.Fatalf("the harness config file: %v", err)
+	}
+
+	// The harness's cold wallet, as it actually is.
+	descs, err := env.Cold.ListDescriptors(ctx)
+	if err != nil {
+		t.Fatalf("listing %s's descriptors: %v", regtestenv.ColdWallet, err)
+	}
+	var receive, change string
+	for _, d := range descs {
+		switch {
+		case d.Active && !d.Internal:
+			receive = d.Desc
+		case d.Active && d.Internal:
+			change = d.Desc
+		}
+	}
+	if receive == "" || change == "" {
+		t.Fatalf("%s has no active pair — run: make harness", regtestenv.ColdWallet)
+	}
+
+	addrs, err := env.Node.DeriveAddresses(ctx, receive, 0, 0)
+	if err != nil {
+		t.Fatalf("deriving the first receive address: %v", err)
+	}
+	changeAddrs, err := env.Node.DeriveAddresses(ctx, change, 0, 0)
+	if err != nil {
+		t.Fatalf("deriving the first change address: %v", err)
+	}
+
+	record := func(t *testing.T, s journal.Setup) {
+		t.Helper()
+		j, err := journal.Open(ctx, cfg.Server.Journal)
+		if err != nil {
+			t.Fatalf("opening the journal: %v", err)
+		}
+		defer j.Close()
+		if _, err := j.RecordSetup(ctx, s); err != nil {
+			t.Fatalf("recording the answer: %v", err)
+		}
+	}
+	coldCheck := func(t *testing.T) doctor.Check {
+		t.Helper()
+		report := doctor.Run(ctx, cfg, doctor.Options{})
+		for _, c := range report.Checks {
+			if c.Name == "the cold wallet" {
+				return c
+			}
+		}
+		t.Fatal("no cold wallet check ran")
+		return doctor.Check{}
+	}
+
+	// 1. Nobody has answered. A warning rather than a failure: a wallet imported
+	// by hand before this command existed is a working wallet that has not been
+	// checked.
+	c := coldCheck(t)
+	if c.Status != doctor.Warn {
+		t.Errorf("an unchecked wallet is %v, want warn:\n%s", c.Status,
+			strings.Join(c.Lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(c.Lines, " "), "Nobody has compared") &&
+		!strings.Contains(strings.Join(c.Lines, " "), "nobody has compared") {
+
+		t.Errorf("the check does not say the comparison has not been made:\n%s",
+			strings.Join(c.Lines, "\n"))
+	}
+	if len(c.Fix) == 0 || !strings.Contains(strings.Join(c.Fix, " "), "winthistle setup") {
+		t.Errorf("the fix is not `winthistle setup`: %v", c.Fix)
+	}
+
+	answered := journal.Setup{
+		Wallet: cfg.Bitcoind.Wallet, Outcome: journal.SetupConfirmed,
+		Receive: receive, Change: change, SampleSize: 5,
+		FirstReceive: addrs[0], FirstChange: changeAddrs[0],
+	}
+
+	// 2. Confirmed, for these exact descriptors.
+	record(t, answered)
+	c = coldCheck(t)
+	if c.Status == doctor.Fail {
+		t.Errorf("a confirmed wallet failed:\n%s", strings.Join(c.Lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(c.Lines, " "), "addresses confirmed on") {
+		t.Errorf("the confirmation is not reported:\n%s", strings.Join(c.Lines, "\n"))
+	}
+
+	// 3. Confirmed, but about a different pair — so it says nothing about this
+	// one. This is what stops a record ageing into a claim, and it is reachable
+	// because Core cannot remove a descriptor.
+	elsewhere := answered
+	elsewhere.Receive = strings.Replace(receive, "sortedmulti(", "multi(", 1)
+	record(t, elsewhere)
+	c = coldCheck(t)
+	if c.Status != doctor.Warn {
+		t.Errorf("an answer about other descriptors is %v, want warn:\n%s",
+			c.Status, strings.Join(c.Lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(c.Lines, " "), "different descriptor pair") {
+		t.Errorf("the check does not say the answer was about something else:\n%s",
+			strings.Join(c.Lines, "\n"))
+	}
+
+	// 4. Rejected. The one state where doctor refuses rather than warns: a human
+	// looked at these exact descriptors and said they are not the cold wallet's.
+	rejected := answered
+	rejected.Outcome = journal.SetupRejected
+	record(t, rejected)
+	c = coldCheck(t)
+	if c.Status != doctor.Fail {
+		t.Fatalf("a rejected wallet is %v, want FAIL:\n%s", c.Status,
+			strings.Join(c.Lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(c.Lines, " "), "must not fund a batch") {
+		t.Errorf("the refusal does not say what it means:\n%s",
+			strings.Join(c.Lines, "\n"))
+	}
+	if !strings.Contains(strings.Join(c.Fix, " "), "new wallet name") &&
+		!strings.Contains(strings.Join(c.Lines, " "), "new wallet name") {
+
+		t.Errorf("the refusal does not say to use a new wallet name — importing a "+
+			"corrected pair here leaves the rejected one's coins selectable:\n%s",
+			strings.Join(c.Lines, "\n"))
 	}
 }

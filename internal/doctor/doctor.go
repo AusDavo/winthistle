@@ -187,14 +187,39 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) *Report {
 	}
 	checkMacaroon(ctx, r, cfg, cli)
 
+	// One journal handle for the whole report. The cold-wallet check needs it —
+	// the answer to the round-trip address check is the only thing that
+	// distinguishes a correct descriptor from a plausible wrong one, and it is
+	// written down there — and opening it twice in one run would report the same
+	// failure in two places.
+	j, journalErr := openJournal(ctx, cfg)
+	if j != nil {
+		defer j.Close()
+	}
+
 	node, wallet := checkCore(ctx, r, cfg)
-	checkColdWallet(ctx, r, cfg, wallet)
+	checkColdWallet(ctx, r, cfg, node, wallet, j)
 	checkCoins(ctx, r, cfg, wallet)
 	checkReserve(ctx, r, cli, opts)
 	checkFees(ctx, r, cfg, node)
 	checkPeers(ctx, r, cli, opts)
-	checkJournal(ctx, r, cfg, wallet)
+	checkJournal(ctx, r, cfg, wallet, j, journalErr)
 	return r
+}
+
+// openJournal makes the directory and opens the file, which is the one thing
+// doctor creates: a journal that does not exist yet is not a fault.
+func openJournal(ctx context.Context, cfg *config.Config) (*journal.Journal, error) {
+	if dir := filepath.Dir(cfg.Server.Journal); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, fmt.Errorf("making %s: %w", dir, err)
+		}
+	}
+	j, err := journal.Open(ctx, cfg.Server.Journal)
+	if err != nil {
+		return nil, fmt.Errorf("opening %s: %w", cfg.Server.Journal, err)
+	}
+	return j, nil
 }
 
 func checkConfig(r *Report, cfg *config.Config) {
@@ -480,7 +505,9 @@ func checkCore(ctx context.Context, r *Report, cfg *config.Config) (node, wallet
 	return node, wallet
 }
 
-func checkColdWallet(ctx context.Context, r *Report, cfg *config.Config, wallet *bitcoind.Client) {
+func checkColdWallet(ctx context.Context, r *Report, cfg *config.Config,
+	node, wallet *bitcoind.Client, j *journal.Journal) {
+
 	c := r.add(Check{Name: "the cold wallet"})
 	if wallet == nil {
 		c.Status = Skip
@@ -537,26 +564,136 @@ func checkColdWallet(ctx context.Context, r *Report, cfg *config.Config, wallet 
 	switch active {
 	case 0:
 		c.fail("no active descriptors, so this wallet knows about no coins at all.")
-		c.say("Importing them is the one part of setup no program can do for you: " +
-			"the descriptors come out of your own wallet software, and the birthday " +
-			"is yours. Nothing here can guess either.")
-		c.fix("bitcoin-cli -rpcwallet=%q importdescriptors "+
-			"'[{\"desc\":\"<receive>\",\"active\":true,\"internal\":false,"+
-			"\"range\":[0,999],\"timestamp\":<birthday>}, "+
-			"{\"desc\":\"<change>\",\"active\":true,\"internal\":true,"+
-			"\"range\":[0,999],\"timestamp\":<birthday>}]'", cfg.Bitcoind.Wallet)
+		c.say("The descriptors and the birthday are the one part of setup no " +
+			"program can supply: they come out of your own wallet software, and " +
+			"nothing here can guess either. `winthistle setup` does the rest — " +
+			"creates the wallet, checksums and imports the pair, reads back what " +
+			"landed, and ends by asking you to compare addresses.")
+		c.fix("winthistle example-descriptors > cold.toml\n" +
+			"# fill in the two descriptors and the birthday, then:\n" +
+			"winthistle setup --descriptors cold.toml")
+		return
 	case 2:
 		c.say("two active descriptors, which is a receive branch and a change branch")
 	default:
 		c.warn("%d active descriptors. A cold wallet is normally two: receive and "+
 			"change.", active)
 	}
-	if active > 0 {
-		c.say("Core cannot tell a correct descriptor from a plausible wrong one, " +
-			"and neither can a balance: sortedmulti and multi agree at about half " +
-			"of all indices. The round-trip address check is the only thing that " +
-			"settles it.")
+	if stale := len(descs) - active; stale > 0 {
+		c.warn("%d descriptor%s in this wallet %s inactive, and their coins are "+
+			"still in this wallet's coin list. Core keeps one active receive branch "+
+			"and one active change branch, so an import replaces an earlier pair by "+
+			"deactivating it — there is no RPC that removes a descriptor. A batch "+
+			"built here can still spend those coins.",
+			stale, prose.Plural(stale), prose.IsAre(stale))
 	}
+	checkAddressCheck(ctx, c, cfg, node, j, descs)
+}
+
+// checkAddressCheck reports whether anybody has ever compared this wallet's
+// addresses against the wallet software that holds the keys.
+//
+// This is the only check on this screen whose evidence is a human rather than a
+// node, and it is here because nothing a node can be asked separates a correct
+// descriptor from a plausible wrong one. Core parses both, the import succeeds
+// for both, the read-back is self-consistent for both, and the balance does not
+// separate them either — a multi()-where-you-wanted-sortedmulti() wallet finds
+// most of the harness cold wallet's balance, because sortedmulti sorts the
+// derived keys and the two agree wherever they were already in order. A
+// plausible partial balance is a better disguise than zero.
+//
+// The record is keyed on the descriptors it was about, so it invalidates itself:
+// a confirmation from before a re-import describes descriptors this wallet no
+// longer derives from, and saying so is more useful than either believing it or
+// ignoring it.
+func checkAddressCheck(ctx context.Context, c *Check, cfg *config.Config,
+	node *bitcoind.Client, j *journal.Journal,
+	descs []bitcoind.WalletDescriptor) {
+
+	if j == nil {
+		c.warn("the address check cannot be read: the journal is not open, and that " +
+			"is where the answer to it lives.")
+		return
+	}
+	var receive, change string
+	for _, d := range descs {
+		switch {
+		case d.Active && !d.Internal:
+			receive = d.Desc
+		case d.Active && d.Internal:
+			change = d.Desc
+		}
+	}
+
+	prev, err := j.LatestSetup(ctx, cfg.Bitcoind.Wallet)
+	if errors.Is(err, journal.ErrNoSetup) {
+		c.warn("nobody has compared this wallet's addresses against your own wallet " +
+			"software, and that comparison is the only thing that can tell a correct " +
+			"descriptor from a plausible wrong one. It is a warning rather than a " +
+			"failure because a wallet imported by hand before this command existed " +
+			"is a working wallet — but it has not been checked.")
+		c.fix("winthistle setup")
+		return
+	}
+	if err != nil {
+		c.warn("reading the address check: %v", err)
+		return
+	}
+
+	when := prev.AnsweredAt.UTC().Format("2006-01-02")
+	if !prev.Describes(receive, change) {
+		c.warn("the addresses were answered about on %s, and the answer was %q — "+
+			"but about a different descriptor pair from the one in this wallet now, "+
+			"so it says nothing about the addresses a batch would be built against. "+
+			"The record names the pair it was about, which is what stops it ageing "+
+			"into a claim about this one.", when, prev.Outcome)
+		c.fix("winthistle setup")
+		return
+	}
+	if prev.Outcome == journal.SetupRejected {
+		c.fail("on %s these exact descriptors were compared against your own wallet "+
+			"software and they did not match. This wallet must not fund a batch. "+
+			"Export the descriptors again from the software that holds the keys, and "+
+			"set up under a new wallet name — importing a corrected pair here would "+
+			"leave the rejected one's coins selectable.", when)
+		c.fix("winthistle example-descriptors > cold.toml\n"+
+			"# then change [bitcoind] wallet in %s and:\n"+
+			"winthistle setup --descriptors cold.toml", cfg.Path)
+		return
+	}
+
+	c.say("addresses confirmed on %s, %d per branch, against these exact descriptors",
+		when, prev.SampleSize)
+
+	// The tripwire. The descriptor strings match, so derivation is deterministic
+	// and this should never differ — which is exactly why it is worth asking:
+	// a mismatch here means the recorded address did not come from the recorded
+	// descriptor, and no amount of reasoning about descriptors would find that.
+	if node == nil {
+		return
+	}
+	addrs, err := node.DeriveAddresses(ctx, receive, 0, 0)
+	if err != nil {
+		c.warn("re-deriving the confirmed address: %v", err)
+		return
+	}
+	if len(addrs) == 0 || addrs[0] != prev.FirstReceive {
+		c.fail("the confirmed receive address is not the one this wallet's " +
+			"descriptor derives today.")
+		c.say("    confirmed: %s", prev.FirstReceive)
+		c.say("    derives:   %s", first(addrs))
+		c.say("The descriptor string in the record matches the one in the wallet, " +
+			"so these two cannot disagree unless the record and the wallet are " +
+			"describing different things. Do not open a batch here.")
+		c.fix("winthistle setup")
+	}
+}
+
+func first(addrs []string) string {
+	if len(addrs) == 0 {
+		return "(nothing)"
+	}
+	return addrs[0]
 }
 
 func checkCoins(ctx context.Context, r *Report, cfg *config.Config, wallet *bitcoind.Client) {
@@ -719,21 +856,14 @@ func checkPeers(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {
 		"nowhere, so the only authoritative answer is accept_channel.")
 }
 
-func checkJournal(ctx context.Context, r *Report, cfg *config.Config, wallet *bitcoind.Client) {
-	c := r.add(Check{Name: "the run journal"})
+func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
+	wallet *bitcoind.Client, j *journal.Journal, openErr error) {
 
-	if dir := filepath.Dir(cfg.Server.Journal); dir != "" {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			c.fail("making %s: %v", dir, err)
-			return
-		}
-	}
-	j, err := journal.Open(ctx, cfg.Server.Journal)
-	if err != nil {
-		c.fail("opening %s: %v", cfg.Server.Journal, err)
+	c := r.add(Check{Name: "the run journal"})
+	if j == nil {
+		c.fail("%v", openErr)
 		return
 	}
-	defer j.Close()
 	c.say("    %s", cfg.Server.Journal)
 
 	unfinished, err := j.Unfinished(ctx)

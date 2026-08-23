@@ -1,10 +1,11 @@
 // Command winthistle is the local, guided tool for batch-opening Lightning
 // channels from cold storage.
 //
-// Five commands, and the order they are in is the order they are used:
-// print-macaroon-command bakes the credential, doctor checks the setup, run
-// opens the batch, bump accelerates one that went out too cheap, and recover
-// takes apart a run that stopped somewhere it should not have. The web UI
+// Six commands, and the order they are in is the order they are used: setup
+// builds the watch-only wallet from the cold wallet's descriptors,
+// print-macaroon-command bakes the credential, doctor checks both, run opens the
+// batch, bump accelerates one that went out too cheap, and recover takes apart a
+// run that stopped somewhere it should not have. The web UI
 // docs/design.html describes does not exist yet; these commands drive the same
 // packages it will.
 package main
@@ -20,6 +21,7 @@ import (
 	"io"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
@@ -27,6 +29,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/bump"
+	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/doctor"
 	"github.com/AusDavo/winthistle/internal/fees"
@@ -35,12 +38,15 @@ import (
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/run"
+	"github.com/AusDavo/winthistle/internal/setup"
 	"github.com/AusDavo/winthistle/internal/signers"
 )
 
 const usage = `winthistle — batch-open Lightning channels from cold storage.
 
 Commands:
+  setup                    build the watch-only wallet from the cold wallet's
+                           descriptors, and end by comparing addresses
   doctor                   check every prerequisite and print what fixes each
   run --batch FILE         open the batch: Phase 0, the armed window, Phase 2
   bump RUN-ID              build, sign and broadcast a CPFP child of a stalled
@@ -49,6 +55,7 @@ Commands:
   print-macaroon-command   print the lncli bakemacaroon line for this build
   example-config           print a winthistle.toml to start from
   example-batch            print a batch file to start from
+  example-descriptors      print the cold wallet descriptor file to start from
 
 Common flags:
   --config PATH            winthistle.toml (default: ./winthistle.toml)
@@ -75,6 +82,8 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
+	case "setup":
+		err = setupCmd(ctx, os.Args[2:])
 	case "print-macaroon-command":
 		err = printMacaroonCommand(os.Args[2:])
 	case "doctor":
@@ -89,6 +98,8 @@ func main() {
 		fmt.Print(config.Example)
 	case "example-batch":
 		fmt.Print(config.ExampleBatch)
+	case "example-descriptors":
+		fmt.Print(config.ExampleDescriptors)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 	default:
@@ -127,6 +138,114 @@ func printMacaroonCommand(args []string) error {
 		return err
 	}
 	return nil
+}
+
+// setupCmd is `winthistle setup`: the watch-only wallet, and the one question
+// the program cannot answer for itself.
+//
+// There is no --yes here and there must not be. Every other prompt in this tool
+// guards a decision the operator has already made by running the command; this
+// one is the operator *supplying evidence* — that they looked at a hardware
+// wallet and saw the same addresses — and a flag that answered it would be a
+// flag that fabricates the evidence. The command is re-runnable instead: nothing
+// is lost by walking away, because deriveaddresses has no side effect and the
+// same addresses are there tomorrow.
+func setupCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
+	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
+	descPath := fs.String("descriptors", "", "the cold wallet's descriptor file: "+
+		"both branches and the birthday. Leave it out to re-ask about the "+
+		"descriptors already in the wallet")
+	gapLimit := fs.Int("gap-limit", coldwallet.DefaultGapLimit,
+		"the top of the imported descriptor range. Core grows it on its own and "+
+			"then refuses to shrink it, so this is a floor rather than a setting")
+	sample := fs.Int("sample", coldwallet.DefaultSampleSize,
+		"how many addresses per branch to compare. Five rather than one because "+
+			"sortedmulti and multi agree at about half of all indices for a 2-of-2")
+	rescan := fs.Duration("rescan-timeout", 6*time.Hour,
+		"how long to allow importdescriptors, which blocks for the whole rescan")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() > 0 {
+		return fmt.Errorf("unexpected argument %q", fs.Arg(0))
+	}
+
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+
+	var descs *config.Descriptors
+	if *descPath != "" {
+		if descs, err = config.LoadDescriptors(*descPath); err != nil {
+			return err
+		}
+	}
+
+	// The import blocks for the whole rescan — minutes to hours on mainnet — so
+	// both clients get a timeout that covers it rather than bitcoind's two
+	// minutes. The design's other half of this is the rule that an import
+	// happens during setup and never during a batch.
+	nodeCfg := cfg.Bitcoind
+	nodeCfg.Wallet, nodeCfg.Timeout = "", *rescan
+	node, err := bitcoind.New(nodeCfg)
+	if err != nil {
+		return err
+	}
+	walletCfg := cfg.Bitcoind
+	walletCfg.Timeout = *rescan
+	wallet, err := bitcoind.New(walletCfg)
+	if err != nil {
+		return err
+	}
+
+	if dir := filepath.Dir(cfg.Server.Journal); dir != "" {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return fmt.Errorf("making %s: %w", dir, err)
+		}
+	}
+	j, err := journal.Open(ctx, cfg.Server.Journal)
+	if err != nil {
+		return fmt.Errorf("opening the run journal at %s: %w", cfg.Server.Journal, err)
+	}
+	defer j.Close()
+
+	_, err = setup.Do(ctx, setup.Deps{
+		Node: node, Wallet: wallet, Journal: j, Out: os.Stdout,
+		Ask: askComparison,
+	}, setup.Options{
+		WalletName:  cfg.Bitcoind.Wallet,
+		Descriptors: descs,
+		GapLimit:    *gapLimit,
+		SampleSize:  *sample,
+	})
+	return err
+}
+
+// askComparison is the three-way prompt behind the address check.
+//
+// Three answers rather than two, because "no" and "not yet" are different facts
+// and only one of them is a wallet that must not fund a batch. Anything that is
+// not a clear yes or no — a bare return, a typo, end of input — is "not yet",
+// which records nothing. That is the safe default in both directions: a stray
+// keypress cannot confirm a wallet nobody looked at, and it cannot condemn a
+// working one either.
+func askComparison(_ context.Context, c coldwallet.AddressCheck) (setup.Answer, error) {
+	fmt.Printf("\n%s\n", setup.Question)
+	fmt.Print("  yes / no / anything else if you have not compared them yet: ")
+
+	line, err := stdin.ReadString('\n')
+	if err != nil && !errors.Is(err, io.EOF) {
+		return setup.NotAnswered, fmt.Errorf("reading the answer: %w", err)
+	}
+	switch strings.ToLower(strings.TrimSpace(line)) {
+	case "y", "yes":
+		return setup.Matched, nil
+	case "n", "no":
+		return setup.Differed, nil
+	}
+	return setup.NotAnswered, nil
 }
 
 func doctorCmd(ctx context.Context, args []string) error {
