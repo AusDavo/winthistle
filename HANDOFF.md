@@ -3,15 +3,25 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State: the three phases exist as packages and something now composes them.**
-`winthistle run` drives Phase 0 — peer pre-flight, fee rate, anchor reserve,
-dress rehearsal — then Phase 1's armed window and its single publish, then
-Phase 2's confirmation watch and policy pass; `winthistle doctor` runs every
+**State: the three phases exist as packages, something composes them, and
+every function in them now has a caller.** `winthistle run` drives Phase 0 —
+peer pre-flight, fee rate, anchor reserve, dress rehearsal — then Phase 1's
+armed window and its single publish, then Phase 2's confirmation watch and
+policy pass; `winthistle bump` builds, verifies, signs and broadcasts the CPFP
+child of a batch that went out too cheap; `winthistle doctor` runs every
 pre-flight in order and prints the command that fixes each failure;
 `winthistle recover` is the recovery screen and the abort behind it. All of it
 is configured by `winthistle.toml` and a batch file, and all of it is exercised
 against the live regtest node. What is missing is the server, the UI, signet,
 and the mainnet cold probe.
+
+**The rule that said "there must be no other publish call site" has changed,
+deliberately, and it is now enforced rather than asserted.** There are two calls
+to `WalletKit.PublishTransaction` — the funding transaction behind the I-1 gate,
+and the CPFP child of a batch that is already public — `Method.CallSites` pins
+the count at 2, and the call-site test fails on a third. See "`winthistle bump`"
+below for why the second one is allowed to exist and what stops it carrying a
+funding transaction.
 
 `winthistle run --stop-before-publish` is the cold probe, and composing it
 forced **exactly one branch** — an `if` between `arm.Finalize` and
@@ -50,7 +60,7 @@ mainnet and the abort paths work.
 | `internal/methods` | the registry of LND RPCs this build calls; `make macaroon` prints the bake command from it, and a gRPC interceptor refuses anything it does not list |
 | `internal/reserve` | the anchor-reserve pre-flight: predicts `psbt_verify`'s verdict before a signature is asked for, and says what to do about it |
 | `internal/combine` | I-2's only real code: merge the signers' partials, finalize in-app, execute every witness, re-verify against the plan |
-| `internal/arm` | the armed window — steps 2 to 9, and the only place in the repo that can broadcast |
+| `internal/arm` | the armed window — steps 2 to 9, and one of the two places in the repo that can broadcast |
 | `internal/fees` | the batch's fee rate, from Core's `estimatesmartfee` and nowhere else — with a relay floor, a configured floor, and a refusal to guess |
 | `internal/peers` | Phase 0's peer pre-flight: the key check, the local gossip graph, and the shim probe that is the only authoritative answer — plus what that probe costs |
 | `internal/rehearsal` | Phase 0's dress rehearsal and the measurement the 5:00 abort gate compares against |
@@ -60,6 +70,7 @@ mainnet and the abort paths work.
 | `internal/signers` | how a base64 PSBT reaches a device and a partial comes back: a command, or a file handshake |
 | `internal/doctor` | every pre-flight in order, each failure with the command that fixes it. Also the credential check, which asks LND rather than calling things |
 | `internal/run` | the composition: Phase 0, the armed window, Phase 2, and the abort that any failure ends in |
+| `internal/bump` | `winthistle bump`: find the parent in Core's mempool, build the child, verify it twice, sign it from cold storage, and broadcast it. The second and last publish call site |
 | `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, aborts what it opened, and writes a `winthistle.toml` and a batch file pointing at the harness |
 
 `internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
@@ -73,8 +84,8 @@ regtest is down, so a bare `go test ./...` is honest either way. A fresh clone
 needs `make harness` first — `regtest/creds/` is gitignored, so until it exists
 every harness-backed test skips.
 
-`make test` passes `-p 1`, and that is load-bearing rather than tidy. Seven
-packages now drive the harness — `abort`, `arm`, `coldwallet`, `combine`,
+`make test` passes `-p 1`, and that is load-bearing rather than tidy. Eight
+packages now drive the harness — `abort`, `arm`, `bump`, `coldwallet`, `combine`,
 `journal`, `plan` and `reserve` — and `go test ./...` runs package binaries
 concurrently by default, which puts several test processes through the same
 alice. `internal/reserve` makes this sharper than it was: its tests deliberately
@@ -83,7 +94,9 @@ balance and fail over the reserve. Use `make test`, not a bare `go test ./...`,
 when the harness is up.
 
 `internal/arm`'s publish test is the first one that spends real regtest coins and
-leaves three *open* channels behind. Nothing can close them — `CloseChannel` is
+leaves three *open* channels behind. It is no longer the only test that
+broadcasts — `internal/bump`'s does too — but it is still the only one that
+leaves anything behind; see "`winthistle bump`" below. Nothing can close them — `CloseChannel` is
 on the macaroon never-list — so `make harness` is the only way back to a clean
 node, and running `make test` repeatedly accumulates open channels and eats the
 cold wallet's UTXOs. Both are fine for a while (8 BTC in four coins, ~0.75 BTC a
@@ -569,7 +582,9 @@ witness satisfies this script", not "the merge moved bytes around".
 
 ## The armed window, and the single publish
 
-`internal/arm` is steps 2 to 9 and the only code in this repo that can broadcast.
+`internal/arm` is steps 2 to 9 and one of two places in this repo that can
+broadcast — `internal/bump` is the other, and the count is now enforced rather
+than asserted; see "`winthistle bump`" below.
 Three things enforce I-1 there, deliberately not the same thing said three times:
 
 1. `no_publish` is set in `Open` with no parameter that changes it.
@@ -585,7 +600,9 @@ Three things enforce I-1 there, deliberately not the same thing said three times
 
 `Publisher` is a separate one-method interface rather than a fifth method on
 `Client`, because broadcasting is the only action in the sequence that cannot be
-taken back and the narrowest way to say so is a type.
+taken back and the narrowest way to say so is a type. `bump.Publisher` is
+structurally identical and deliberately a *different* type, which is what stops
+either publish path being handed the other's bytes.
 
 Two details inside `Finalize` are choices rather than defaults:
 
@@ -634,6 +651,13 @@ LND's wallet-level rebroadcaster — which is what restores the property
 registry entry said it would. `ExportAllChannelBackups` is new. The macaroon the
 tool prints is wider by three methods than it was, and every one of them has a
 production call site the type-checker can see.
+
+**`winthistle bump` widened the credential by nothing at all.** Both methods it
+needs — `PendingChannels` for the countdown and `PublishTransaction` for the
+child — were already in the registry for other reasons, so a whole new command
+came in without asking the operator for one more permission. What it did add is
+`Method.CallSites`, which pins how many production call sites a method may have
+and is set only for `PublishTransaction`.
 
 ### `SignWithMiner` is gone
 
@@ -1017,8 +1041,8 @@ callers, and the only place the whole sequence was assembled was `drive()` in
 `internal/config`, `internal/policy`, `internal/signers`, `internal/doctor` and
 `internal/run` are: four commands' worth of wiring and no new mechanism.
 
-One of that list still has no caller: `settle.BuildChild`. It is not an
-oversight — see next actions — and it is the only one.
+`settle.BuildChild` was the last of that list with no caller. `internal/bump` is
+now that caller, and nothing in this repository is written-but-uncalled any more.
 
 ### `winthistle.toml`, and the two keys nothing read
 
@@ -1188,6 +1212,233 @@ than about a leftover file.
   Core is a second thing to check when reading this repo for broadcast paths,
   which is the review CLAUDE.md's "no other publish call site" rule invites.
 
+## `winthistle bump`, and the ceiling nothing had met
+
+`internal/bump` is the CPFP child from end to end: find the parent, build the
+child, verify it, sign it from cold storage, verify what came back, broadcast it.
+`settle.BuildChild` did the arithmetic already and had no caller; what was
+missing was everything around it, and that turned out to be most of the work —
+because the change output belongs to cold storage, so a bump is a **second
+cold-wallet session** with its own transport, its own verification and its own
+journal rows.
+
+Three decisions were made before any of it was written, and the first was a
+change to a rule rather than a reading of one.
+
+### The rule about publish call sites changed, and is now enforced
+
+CLAUDE.md's rejected list said *"There must be no other publish call site."*
+**Nothing enforced it.** `TestEveryLNDCallSiteIsRegistered` groups call sites by
+method into a `map[string]*usage` and asserts non-empty in both directions; it
+never counts, so a second production caller of `WalletKit.PublishTransaction`
+passed silently and the only thing that became false was a sentence in a comment.
+The claim was made in five prose comments and checked in none.
+
+The rule now says what it actually protects — no broadcast that could carry a
+**funding** transaction outside the I-1 gate — and there are exactly two publish
+call sites:
+
+1. `arm.Publish`, the funding transaction, behind the gate.
+2. `bump.Publish`, the CPFP child of a batch that is already public.
+
+The second needs no gate and cannot be given one: by the time a child can be
+built the parent is in a mempool, every channel reached `chan_pending` before
+that happened, and the child spends the batch's change — an output no channel
+depends on. There is no "early" for it to be published in.
+
+Two things keep them apart, and neither is a convention. `arm.Publish` takes an
+`*arm.Armed` and `bump.Publish` takes a `*bump.Signed`; each has its raw
+transaction in an **unexported** field that exactly one constructor fills, after
+that constructor's own checks, so neither line can be handed the other's bytes.
+And `methods.Method.CallSites` pins the count at 2, with the call-site test
+failing on a third and naming what has to change with it. `CallSites` is zero —
+unconstrained — for the other nineteen entries, deliberately: for those, "is it
+called" is the right question, and a test that failed when a function was split
+in two would be a refactoring tripwire rather than a safety check.
+
+### A CPFP child has a relay ceiling, and it is reachable on mainnet
+
+**This is the finding.** A child published through WalletKit is refused above
+**10,000 sat/vB of its own fee rate**, and nothing in this build can raise it.
+The path, at `v0.19.3-beta`:
+
+```
+WalletKit.PublishTransaction        → w.cfg.Wallet.PublishTransaction
+BtcWallet.PublishTransaction        → b.chain.TestMempoolAccept(txs, 0)
+                                      // comment: "a max feerate of 0 means the
+                                      // default ... 0.10 BTC/kvb, or 10,000 sat/vb"
+                                    → w.wallet.PublishTransaction
+wallet.publishTransaction           → chainClient.SendRawTransaction(tx, false)
+                                      // false is allowHighFees, hard-coded
+rpcclient.SendRawTransactionAsync   → maxfeerate: defaultMaxFeeRate = 0.1 BTC/kvB
+```
+
+Core's own help agrees from the other end, and adds a limit on the limit:
+`maxfeerate` defaults to `"0.10"` BTC/kvB, *"Set to 0 to accept any fee rate"*,
+and *"Fee rates larger than 1BTC/kvB are rejected"* — so the escape is passing
+**zero**, not passing something large.
+
+**Why this bites a child and nothing else.** A child concentrates the whole
+package's lift into about 150 virtual bytes, so its own rate is roughly
+`parentVsize / childVsize` times the package target — a multiplier of about
+**47.7** on a three-channel batch. Measured: a 250 sat/vB package target on a
+7,007 vB parent needs a 150 vB child paying 1,782,243 sat, which is
+**11,882 sat/vB** and refused. That is a package target an operator could
+reasonably ask for on a busy day, and it gets *lower* as the batch gets bigger.
+The funding transaction never comes close — it is thousands of virtual bytes
+paying its own rate — which is why nothing had met this before.
+
+`bump` refuses that lift **twice before a device is asked for anything**: once
+from the change output's own scripts before Core is called, and once in the
+verifier. Discovering it after a cold-wallet signing round is exactly the failure
+this project engineers against. `ceilingDetail` names both ways out — a smaller
+lift, or `bitcoin-cli sendrawtransaction <hex> 0`, which is the same bytes by a
+route that takes an argument and gives up only LND's rebroadcaster.
+
+Worth knowing: `bitcoind.Client.TestMempoolAccept` passes no `maxfeerate`
+either, so **our own pre-flight applies the same ceiling the broadcast will**.
+That is defence in depth by accident rather than design, and it is left alone —
+Core's message there is `max-fee-exceeded`, which names neither the ceiling nor
+the way out, which is why the earlier check exists.
+
+`TestCoreEnforcesTheRelayCeilingAndZeroLiftsIt` proves the far end against the
+node rather than taking the source reading on trust: a 192 vB transaction paying
+25,938 sat/vB, refused with `max-fee-exceeded` at the default and accepted with
+`maxfeerate 0`. Nothing is broadcast — `testmempoolaccept` validates without
+relaying, so the absurd fee is never paid.
+
+### The arithmetic is about the ancestor package, not the transaction
+
+`walletcreatefundedpsbt` charges the fee that lifts the whole unconfirmed
+**ancestor package** to the rate it is given, and "the ancestor package" means
+all of it. `getmempoolentry`'s `ancestorsize` and `fees.ancestor` are documented
+as *"including this one"*, so for a batch funded from confirmed coins they equal
+the transaction's own figures — the ordinary case, and exactly why the difference
+is easy to miss. `bump.Locate` uses the ancestor figures when `ancestorcount > 1`
+and the report says it is doing so. Passing the parent's own size there would ask
+`plan.ChildFeeSat` a different question from the one Core answers, and the
+disagreement would be reported as Core misbehaving.
+
+Everything else about the parent is read rather than remembered, for the same
+reason: a transaction being bumped is unconfirmed by definition, so Core holds
+its exact size and fee and summing prevouts would be a second opinion that could
+quietly disagree with the one the fee market uses.
+
+### The child lives in its own journal tables, not in `runs`
+
+Three new tables — `bumps`, `bump_signers`, `bump_locks` — each mirroring the
+shape of its batch counterpart, keyed `(run_id, seq)`.
+
+A second row in `runs` was the alternative and it does not work. `runs` is the
+I-1 gate's state machine: `Begin` refuses a run with no channels, so a bump row
+would need fictional ones; `Unfinished` would list it; `Run.AbortTarget` would
+build a batch abort for it; and `Recover` would run `abort.Run` over it. Three
+special cases in the recovery path, which is the one path whose value comes from
+being uniform.
+
+Extra columns on `signers` and `locks` do not work either, and that one is a fact
+rather than a preference: `journal.Open` runs a single
+`CREATE TABLE IF NOT EXISTS` block with **no version table and no migration
+machinery**, so an `ALTER` would silently not reach a journal an earlier build
+wrote. New tables are the only shape that works on an operator's existing file.
+
+Two things about the bump's state machine are deliberate:
+
+- **`BeginBump` claims the change outpoint before Core is holding it.** The row
+  and the lock row are both written before `walletcreatefundedpsbt`, because
+  that call is what takes the lock — so a crash inside it leaves a lock the
+  journal admits to rather than an orphan only Core knows about. The cost is a
+  release attempt for a lock that was never taken, which `ReleaseLocks` filters
+  out because it asks Core what it actually holds first.
+- **`AbortTarget` does not refuse a child that may be public**, where
+  `Run.AbortTarget` does, and the difference is what the action costs.
+  Abandoning a pending channel whose funding transaction then confirms strands
+  its funds; releasing a coin lock takes nothing back and cannot strand
+  anything. What the operator has to be told is that it is not
+  un-broadcasting the child, and that is the report's job rather than a
+  refusal. `AbandonBump` leaves a published child's *state* alone for the same
+  reason — "abandoned" would be a claim about the network it cannot make.
+
+### It needs its own verifier, and `combine` grew one accessor
+
+`plan.Plan` refuses a plan with no channels in it, so a one-in one-out child
+cannot go through `internal/plan` — and an unverified PSBT reaching a
+cold-storage device is what `internal/plan` exists to prevent. Relaxing that
+refusal would have been the wrong repair even if it were free: four of the batch
+verifier's checks mean something different here or nothing at all. The fee
+tolerance is about the parent's own rate where a child's is about the package's,
+`ChangeFloor` is meaningless for a transaction that *is* the change being spent,
+the assisted-mode change recognition does not apply because the app named the
+address, and the exact-amount rule inverts. A verifier with four switches is
+worse than two verifiers.
+
+What is shared is shared as code rather than as a convention:
+`plan.IsSegwitSpend`, `plan.MaxNonReplaceableSequence`, `plan.SizeOf`,
+`plan.ChildVsize`, `plan.ChildFeeSat`, `plan.DustSat`, `plan.ScriptFor`,
+`plan.Params`. So the two verifiers cannot drift on the facts they both depend
+on.
+
+`bump.Verify` runs on what goes out and `bump.Recheck` on what comes back —
+`internal/combine`'s discipline, for the same reason. The second pass needed one
+change to `internal/combine`: **`Finalized.View()` is now exported.** `Recheck`
+was hardcoded to `*plan.Plan` and the plan-shaped view was unexported, and
+rebuilding that view in `internal/bump` would have been a second copy of a fiddly
+reassembly — btcd's finalizer replaces each input with
+`NewPsbtInput(nil, WitnessUtxo)` plus the final witness, discarding exactly the
+redeem script, witness script and non-witness UTXO a verifier needs. The
+derivation stays in one place; only the accessor is new.
+
+The second pass adds the one check the first cannot make: with every witness
+present the size is a measurement rather than an upper bound, so the real
+transaction may be smaller but **must not be larger**. Larger would mean the rate
+the operator approved was not the floor it was presented as, and I-4 leaves no
+second attempt on the parent. Observed on the harness: a 149 vB signed child
+against a 150 vB estimate.
+
+### The horizon is re-checked after the signing round and deliberately not enforced
+
+This is the one place in the design where a signing round races something that
+does not wait, and the answer inverts how the armed window treats a stale gate.
+
+`bump` reads `funding_expiry_blocks` before the round, prices it in wall clock at
+ten minutes a block, re-reads it after, and **publishes either way**. The reason
+is what each staleness costs. A stale reserve finding means `psbt_verify` will
+refuse, so continuing achieves nothing. A passed horizon means the channels are
+lost — the responder closed its side as `FundingCanceled`, and our node, the
+initiator, never times out — and the coins are still in an unconfirmed
+transaction that I-4 forbids replacing, so getting it confirmed is the only way
+they ever become spendable again. Withholding the publish there would spend the
+coins to save channels that are already gone.
+
+The copy has to hold both halves at once and is tested for it: saying only "the
+horizon has passed" reads as "do not bother", and saying only "build the child"
+hides that the operator is about to own channels their peers have forgotten.
+
+### What the harness runs proved, and what the fixture cannot
+
+The parent is a miner-to-cold payment at 1 sat/vB rather than a real batch — the
+same choice `internal/settle`'s CPFP test makes, and for the same reasons:
+publishing a real batch costs cold coins and leaves open channels nothing can
+close, and what a child needs from a parent is structurally simpler than a batch.
+The journal's run row is therefore written by hand. Every gate is still the real
+one, but the channels in that row are fictional, so **the funding countdown
+cannot be tested from this fixture** and the test asserts that it reports absent
+rather than pretending otherwise.
+
+Measured against a real unconfirmed parent (867 vB, 896 sat, 1.03 sat/vB): Core
+and `plan.ChildFeeSat` agree **to the satoshi** at 20, 50 and 200 sat/vB. The
+whole command then signed and broadcast a child, and Core's own ancestor
+accounting confirmed the package it produced — 1016 vB, 20,340 sat, 20.02 sat/vB
+against a 20 sat/vB target, arrived at from Core's numbers rather than ours.
+
+`TestTheWholeBumpSignsAndPublishesAChild` **does broadcast**, which makes it the
+second test in the repo that does. It has to: "the child reaches the network on
+exactly one line, and only after being merged, finalized and verified in-app" is
+not a claim a dry run can make — the same reasoning `internal/arm`'s publish test
+runs on. Unlike that one it leaves nothing behind: the child pays the cold
+wallet's own change back to the cold wallet, so the only cost is the fee, and the
+cleanup mines it away.
+
 ## Next actions, in order
 
 1. **The server and the UI.** One binary, loopback bind, a startup token, strict
@@ -1215,12 +1466,15 @@ than about a leftover file.
    `bitcoin-cli importdescriptors` line, which is a worse experience than the
    guided screen `Install` was written for. It needs the descriptors and the
    birthday, which is the one part of setup no program can supply.
-5. **`winthistle bump`.** `settle.BuildChild` is the only Phase 2 function still
-   without a caller. It is not a small command: the child is returned *unsigned*
-   because the change belongs to cold storage, so bumping a stalled batch is a
-   second signing round with its own transport, its own plan-shaped verification
-   and its own journal row. The settlement report warns about the horizon and
-   says CPFP is the remedy; nothing yet builds one outside the tests.
+5. **A second lift on the same batch.** `winthistle bump` builds one child. The
+   child is built non-replaceable — a deliberate choice in `settle.buildChildAt`,
+   whose stated reason was "one verifier for both transactions is worth more than
+   the option to bump" — so accelerating further would mean a child of the child,
+   and nothing builds one. Worth flagging that the stated reason is now weaker
+   than it was: there *are* two verifiers, since a one-in one-out child cannot go
+   through `plan.Plan`. Flipping the child to replaceable would make a second
+   lift an ordinary RBF of the child, which touches no funding outpoint and is
+   safe under I-4. It was left alone rather than changed quietly.
 
 Done since the last handoff, all from the previous list:
 
@@ -1232,8 +1486,41 @@ Done since the last handoff, all from the previous list:
   fixes each, and a credential check that asks LND rather than calling things.
 - **`winthistle run` and `winthistle recover`** — the composition, the gates
   wired, and the abort that any failure ends in.
+- **`winthistle bump`** — the CPFP child, end to end, and the enforced
+  publish-call-site count that came with it.
 
 ## Watch out for
+
+- **A CPFP child has a fee-rate ceiling of 10,000 sat/vB and this build cannot
+  raise it.** btcwallet calls `SendRawTransaction(tx, false)` and rpcclient turns
+  that into `maxfeerate: 0.1` BTC/kvB; no WalletKit parameter reaches it. Because
+  a child concentrates the package's lift into ~150 vB, its own rate is roughly
+  fifty times the package target on a three-channel batch — so a ~210 sat/vB
+  package target is the practical limit, and lower on a bigger batch.
+  `bump.Verify` refuses above it before any device is asked, and names
+  `sendrawtransaction <hex> 0` as the way out. Full detail under
+  "`winthistle bump`".
+
+- **`bitcoind.Client.TestMempoolAccept` passes no `maxfeerate`**, so our own
+  pre-flight enforces that same ceiling. Do not "fix" that by passing zero: the
+  pre-flight should apply the ceiling the broadcast will, and the earlier,
+  better-worded refusal is what an operator should hit first.
+
+- **Core hides locked outputs from `listunspent`**, so a change output an
+  unfinished bump is holding looks exactly like one that has already been spent —
+  and the two call for opposite actions. `bump.Locate` consults the journal to
+  tell them apart and names the holding bump. Nothing else can.
+
+- **`getmempoolentry`'s ancestor figures include the transaction itself.** For a
+  batch funded from confirmed coins they equal its own, which is the ordinary
+  case and why the difference is easy to miss. `walletcreatefundedpsbt` charges
+  for the whole ancestor package, so the arithmetic has to use the ancestor
+  figures when `ancestorcount > 1`.
+
+- **`journal.Open` has no migrations.** One `CREATE TABLE IF NOT EXISTS` block, no
+  version table. A new column would silently not reach a journal an earlier build
+  wrote, so schema growth means new tables — which is why a bump has three of its
+  own rather than columns on `signers` and `locks`.
 
 - **The peers do not forget an aborted batch, until something mines.** See
   finding 6: `AbandonChannel` touches only our own database. If the harness
@@ -1475,6 +1762,13 @@ What the operator sees is *"remote canceled funding, possibly timed out"* —
 `chanfunding.ErrRemoteCanceled` wrapped around a peer error whose own text is only
 "funding failed due to internal error". The "possibly" is ours; the peer does not
 say it timed out.
+
+**The CPFP child gained a hazard the doc did not have**, and it went in with the
+`winthistle bump` work: the relay ceiling on a child's own fee rate, in I·4, with
+the source chain and the measurement. The hazard table's single-publish row now
+says two, counted. The out-of-scope list lost "automated fee-bumping beyond the
+manual CPFP offer" — the child is built, verified, signed and broadcast now — and
+gained "a second lift on the same batch", which is genuinely not built.
 
 What is left is not an open question but an untested claim: everything past the
 broadcast line has been proved against regtest and against nothing else. The

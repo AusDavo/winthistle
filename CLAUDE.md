@@ -73,8 +73,36 @@ viable. Replaceability is disabled at construction and is not operator-adjustabl
 - **`skip_finalize`** on batch members. Skips the step that produces the
   `chan_pending` gate I-1 depends on. Non-negotiable.
 - **`base_psbt` chaining.** An `lncli` ergonomic crutch; we build the tx ourselves.
-- **Any broadcast path outside the gate.** `testmempoolaccept` validates without
-  relaying and is the only pre-flight. There must be no other publish call site.
+- **Any broadcast path that could carry a funding transaction outside the gate.**
+  `testmempoolaccept` validates without relaying and is the only pre-flight.
+
+  The rule used to read "there must be no other publish call site", and it was
+  enforced by nothing — the claim lived in five prose comments while
+  `internal/methods`' call-site test grouped by method and checked
+  registered-versus-called in both directions without ever counting. There are
+  now **exactly two** calls to `WalletKit.PublishTransaction`, and the count is
+  enforced: `Method.CallSites` pins it at 2 and
+  `TestEveryLNDCallSiteIsRegistered` fails on a third.
+
+  1. `arm.Publish` — the funding transaction, behind the I-1 gate.
+  2. `bump.Publish` — the CPFP child of a batch that is already public. It has
+     no gate to sit behind and needs none: by the time a child can be built the
+     parent is in a mempool, every channel reached `chan_pending` before that,
+     and the child spends the batch's change, which no channel depends on.
+     There is no "early" for it to be published in.
+
+  What keeps them apart is the type system, not a convention. `arm.Publish`
+  takes an `*arm.Armed` and `bump.Publish` takes a `*bump.Signed`; each has its
+  raw transaction in an unexported field that exactly one constructor fills,
+  after that constructor's own checks. Neither line can be handed the other's
+  bytes.
+
+  Changing the count is a deliberate change to what this build promises about
+  reaching the network. Change `CallSites`, this bullet, and `docs/design.html`
+  in the same commit, or do not change it.
+
+- **Bumping the funding transaction, by any route.** I-4. `winthistle bump`
+  builds a child; nothing in this repository replaces a parent.
 - **`AbandonChannel(i_know_what_i_am_doing)`** as the default. Use
   `pending_funding_shim_only`, which refuses unless the channel is both
   shim-funded and pending. Fall back to the blunt flag only on that specific

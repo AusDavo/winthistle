@@ -50,7 +50,12 @@ type callSite struct {
 //     the code needs, and a permission granted for no reason is the thing the
 //     uri-entity approach exists to avoid;
 //   - a Use that disagrees with where the calls actually are fails, since Use is
-//     what decides whether the operator's credential carries the method at all.
+//     what decides whether the operator's credential carries the method at all;
+//   - a production call-site count that disagrees with Method.CallSites fails,
+//     for the entries that pin one. That is the check that did not exist:
+//     everything above groups by method and asks whether the set of callers is
+//     empty, so a second caller of WalletKit.PublishTransaction passed silently
+//     and the only thing that became false was a sentence in a comment.
 //
 // It needs no harness and no network beyond the module cache, so it runs in
 // `make check` and in `make test-unit`.
@@ -120,6 +125,24 @@ func TestEveryLNDCallSiteIsRegistered(t *testing.T) {
 				"LND's own permission for it.", name, strings.Join(u.positions, ", "))
 			continue
 		}
+		// The count, for the entries where the count is the property. Checked
+		// before Use, because "two callers where one was promised" is a more
+		// specific finding than "at least one caller exists" and reporting the
+		// vaguer one first would bury it.
+		if m.CallSites > 0 && len(u.production) != m.CallSites {
+			t.Errorf("%s has %d production call site(s); the registry pins it at %d.\n"+
+				"  called at: %s\n"+
+				"  This method's entry states a count because the count is the "+
+				"safety property, not a side effect of it. Adding or removing a "+
+				"broadcast line is a deliberate change to what this build promises "+
+				"about reaching the network: change CallSites in "+
+				"internal/methods/methods.go, and change the promise it is "+
+				"protecting — CLAUDE.md's rejected list and docs/design.html — in "+
+				"the same commit.",
+				name, len(u.production), m.CallSites,
+				strings.Join(u.production, ", "))
+		}
+
 		switch m.Use {
 		case methods.InApp:
 			if len(u.production) == 0 {

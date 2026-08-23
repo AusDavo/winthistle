@@ -175,6 +175,31 @@ func Finalize(m *Merged) (*Finalized, error) {
 // is as broadcastable as the raw transaction, so it is no less sensitive.
 func (f *Finalized) Base64() (string, error) { return f.packet.B64Encode() }
 
+// View renders the extracted transaction the way a verifier wants it: the signed
+// bytes, carrying each input's previous output and spend scripts, so a verifier
+// can classify the inputs and measure the size exactly rather than estimating.
+//
+// It exists because there is now more than one kind of transaction that has to
+// be re-checked after signing. Recheck below runs internal/plan's verifier over
+// exactly these bytes, and internal/bump's verifier runs over them too — the
+// CPFP child is one-in one-out and cannot go through a plan.Plan, which refuses
+// a batch with no channels in it, so it has a verifier of its own.
+//
+// The alternative was for that package to rebuild this view itself. Assembling
+// it is fiddly in a way that matters: btcd's finalizer replaces each input with
+// NewPsbtInput(nil, WitnessUtxo) plus the final witness, discarding the redeem
+// script, the witness script and any non-witness UTXO, which are precisely the
+// fields a verifier needs. A second copy of that reassembly would be a second
+// thing to be wrong about the bytes n channels depend on, so the derivation
+// stays here and only the accessor is new.
+func (f *Finalized) View() ([]byte, error) {
+	var buf bytes.Buffer
+	if err := f.view.Serialize(&buf); err != nil {
+		return nil, fmt.Errorf("serialising the transaction for the verifier: %w", err)
+	}
+	return buf.Bytes(), nil
+}
+
 // Recheck runs internal/plan's verifier over the extracted transaction.
 //
 // This is the last check before LND is handed the transaction, and it is a
@@ -190,11 +215,11 @@ func (f *Finalized) Base64() (string, error) { return f.packet.B64Encode() }
 // is the one n channels will depend on. The verifier's fee rate here is exact
 // rather than an upper bound, because every witness is present.
 func (f *Finalized) Recheck(p *plan.Plan) (*plan.Verification, error) {
-	var buf bytes.Buffer
-	if err := f.view.Serialize(&buf); err != nil {
-		return nil, fmt.Errorf("serialising the transaction for the verifier: %w", err)
+	raw, err := f.View()
+	if err != nil {
+		return nil, err
 	}
-	v, err := p.Verify(buf.Bytes())
+	v, err := p.Verify(raw)
 	if err != nil {
 		return nil, err
 	}

@@ -1,0 +1,763 @@
+// Package bump is `winthistle bump`: the CPFP child that accelerates a batch
+// which went out too cheap.
+//
+// I-4 forbids replacing the funding transaction — replacing it moves every
+// outpoint in it, and every peer holds a commitment signature against the old
+// ones — so a batch that is underpaying can only be accelerated by spending its
+// own change. internal/plan sized the change output at planning time so that
+// such a child would be affordable; internal/settle builds one; this package is
+// what turns a built child into a broadcast one, which turns out to be most of
+// the work.
+//
+// # It is a second cold-wallet session, and that is the shape of the whole thing
+//
+// The change output belongs to cold storage, so the child is returned unsigned
+// and there is no shortcut that does not amount to a hot key able to spend the
+// batch's change (I-2). So this command is not a wiring job on top of
+// settle.BuildChild: it is a second signing round, with its own transport, its
+// own verification and its own journal rows. Everything here exists because of
+// that one fact.
+//
+// # The three things it does that BuildChild does not
+//
+//  1. It finds the parent, from Core rather than from anything remembered. A
+//     transaction being bumped is by definition unconfirmed, so getmempoolentry
+//     holds its exact size and fee — and its ancestors, which is the figure the
+//     arithmetic actually needs. See Locate.
+//  2. It verifies, twice. A one-in one-out child cannot go through plan.Plan,
+//     which refuses a batch with no channels, and an unverified PSBT reaching a
+//     cold-storage device is exactly what internal/plan exists to prevent. See
+//     verify.go.
+//  3. It broadcasts, which is the second and last call to
+//     WalletKit.PublishTransaction in this build. See publish.go for why that is
+//     allowed to exist and what makes it unable to carry a funding transaction.
+//
+// # What it will not do
+//
+// Replace anything. There is no code path in this repository that bumps the
+// parent, and this package is what exists instead.
+package bump
+
+import (
+	"context"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"time"
+
+	"github.com/AusDavo/winthistle/internal/abort"
+	"github.com/AusDavo/winthistle/internal/bitcoind"
+	"github.com/AusDavo/winthistle/internal/combine"
+	"github.com/AusDavo/winthistle/internal/fees"
+	"github.com/AusDavo/winthistle/internal/journal"
+	"github.com/AusDavo/winthistle/internal/plan"
+	"github.com/AusDavo/winthistle/internal/prose"
+	"github.com/AusDavo/winthistle/internal/rehearsal"
+	"github.com/AusDavo/winthistle/internal/settle"
+	"github.com/lightningnetwork/lnd/lnrpc"
+	"google.golang.org/grpc"
+)
+
+// Client is the slice of LND this package reads.
+//
+// One method, and it changes nothing. A bump does not open a stream, does not
+// touch a channel and does not ask the node for a coin — the only thing it wants
+// from LND besides the broadcast is the countdown, and PendingChannels is where
+// LND publishes it.
+type Client interface {
+	PendingChannels(ctx context.Context, in *lnrpc.PendingChannelsRequest,
+		opts ...grpc.CallOption) (*lnrpc.PendingChannelsResponse, error)
+}
+
+// Signers is where the child's partial signatures come from.
+//
+// The same interface internal/run takes and the same rehearsal.Device it hands
+// back, so the child goes to the devices through the transport the batch used.
+// The round's name carries the bump's sequence number, which matters for the
+// file transport: a second bump minutes after the first must not pick up the
+// first one's signed file.
+type Signers interface {
+	Round(name string) []rehearsal.Device
+	Labels() []string
+}
+
+// Deps are the connections and the journal, already open.
+type Deps struct {
+	LND       Client
+	Publisher Publisher
+
+	// Node is Core with no wallet scope: the mempool entry, the fee estimate and
+	// testmempoolaccept. Wallet is the watch-only cold wallet that owns the
+	// change output.
+	Node   *bitcoind.Client
+	Wallet *bitcoind.Client
+
+	Journal *journal.Journal
+	Signers Signers
+
+	Out io.Writer
+
+	// Approve is asked once, after the child is built and verified and before it
+	// goes to the devices. Nil means do not ask, which is right for anything
+	// non-interactive: nothing after this point can lose the batch, and the
+	// operator has already decided by running the command.
+	Approve func(ctx context.Context, question string) (bool, error)
+}
+
+// Options are the bump.
+type Options struct {
+	RunID string
+
+	// TargetSatPerVB is the rate to lift the parent and child to together. Zero
+	// means ask Core, through internal/fees — never a fee API, which would be
+	// handed the size of what is being built and the moment it is being built.
+	TargetSatPerVB float64
+
+	// Fees configures that estimate when TargetSatPerVB is zero.
+	Fees fees.Request
+
+	// BuildOnly stops after the child is built and verified, without asking any
+	// device for a signature. It is the bump's dry run: the arithmetic is the
+	// part that can be wrong, and checking it costs nothing and reveals whether
+	// a cold wallet is worth bringing out.
+	BuildOnly bool
+}
+
+// Result is what the bump did, however far it got.
+type Result struct {
+	RunID string
+	Seq   int64
+
+	Located *Located
+	Child   *settle.Child
+
+	// Verified is the check on what was built; Rechecked the check on what came
+	// back from the devices.
+	Verified  *Verification
+	Rechecked *Verification
+
+	Published bool
+
+	// Released is the coin lock handed back when the bump did not finish.
+	Released *abort.Report
+}
+
+// Located is the parent, as Core and the cold wallet see it right now.
+//
+// Nothing in it is remembered from the run that produced the batch. The journal
+// says which transaction to look for; everything else is read, because the whole
+// premise of a bump is that the fee market moved and the figures the batch was
+// built against are stale.
+type Located struct {
+	RunID      string
+	ParentTxID string
+
+	// Parent carries the figures the arithmetic uses, which are the ancestor
+	// figures when the parent is not the bottom of its own package. See Locate.
+	Parent settle.Parent
+
+	// Entry is what Core said, unmodified, so the report can show its working.
+	Entry bitcoind.MempoolEntry
+
+	// Change is the batch's change output as the cold wallet holds it.
+	Change bitcoind.UTXO
+
+	// ExpiryBlocks is the smallest funding_expiry_blocks across the batch's
+	// members that LND still lists as pending, and HasExpiry whether there was
+	// one to report. This is the clock the signing round is racing.
+	ExpiryBlocks int32
+	HasExpiry    bool
+}
+
+var (
+	// ErrParentConfirmed means the batch confirmed while the operator was
+	// deciding, which is the outcome a bump was trying to buy.
+	ErrParentConfirmed = errors.New("the batch has confirmed, so there is nothing to accelerate")
+
+	// ErrParentMissing means Core has the transaction neither in its mempool nor
+	// in a block. That is a re-broadcast, not a bump.
+	ErrParentMissing = errors.New("the batch is in neither the mempool nor the chain")
+
+	// ErrChangeSpent means something already spends the batch's change output —
+	// almost always an earlier child.
+	ErrChangeSpent = errors.New("the batch's change output is already spent")
+
+	// ErrChangeAmbiguous means the cold wallet holds more than one output of the
+	// parent, so which one is the change cannot be decided.
+	ErrChangeAmbiguous = errors.New("more than one output of the batch belongs to the cold wallet")
+
+	// ErrDeclined means the operator was asked and said no.
+	ErrDeclined = errors.New("the child was not signed")
+)
+
+// Locate finds the parent and its change output.
+//
+// # The parent's figures are Core's, not ours
+//
+// A transaction being bumped is unconfirmed by definition, so Core is holding
+// its exact virtual size and its exact fee and there is no reason to re-derive
+// either. Summing prevouts would produce a second opinion that could disagree
+// with the one the fee market uses, and the disagreement would be invisible.
+//
+// # And they are the ancestor figures, which is not the obvious choice
+//
+// walletcreatefundedpsbt charges the fee that lifts the whole *unconfirmed
+// ancestor package* to the rate it is given, and "the ancestor package" means
+// every unconfirmed transaction the parent depends on as well as the parent. For
+// a batch funded from confirmed coins those are the same thing — ancestorcount
+// is 1 and the ancestor figures equal the transaction's own — which is the
+// ordinary case and exactly why the difference is easy to miss. A batch built
+// from an unconfirmed coin is not that case, and passing the parent's own size
+// there would ask plan.ChildFeeSat a different question from the one Core
+// answers, so the two would disagree and the disagreement would be reported as
+// Core misbehaving.
+//
+// Core's own wording settles it: ancestorsize and fees.ancestor are documented
+// as "including this one".
+//
+// # The change output identifies itself
+//
+// listunspent on the watch-only cold wallet, filtered to the parent's txid,
+// finds it unambiguously, and that is a property of the plan rather than a
+// heuristic. Every other output of a batch belongs to somebody else: the funding
+// outputs are the peers' 2-of-2 P2WSH, and the reserve top-up pays the node's own
+// wallet through lnrpc NewAddress rather than the Core wallet. So the change is
+// the only output of the batch cold-watch can see. More than one is refused
+// rather than guessed at.
+func Locate(ctx context.Context, d Deps, runID string) (*Located, error) {
+	run, err := d.Journal.Load(ctx, runID)
+	if err != nil {
+		return nil, err
+	}
+	switch run.State {
+	case journal.StatePublishing, journal.StatePublished:
+	default:
+		return nil, fmt.Errorf("run %s is %s, so no transaction of it is in any "+
+			"mempool: %w", runID, run.State, journal.ErrNotPublic)
+	}
+	if run.TxID == "" {
+		return nil, fmt.Errorf("run %s reached the publish call with no txid "+
+			"journalled, which should not be possible", runID)
+	}
+
+	l := &Located{RunID: runID, ParentTxID: run.TxID}
+
+	entry, inMempool, err := d.Node.MempoolEntry(ctx, run.TxID)
+	if err != nil {
+		return nil, err
+	}
+	if !inMempool {
+		confs, present, err := d.Node.Confirmations(ctx, run.TxID)
+		if err != nil {
+			return nil, err
+		}
+		if present && confs > 0 {
+			return l, fmt.Errorf("%w: %s has %d confirmation%s",
+				ErrParentConfirmed, run.TxID, confs, prose.Plural(int(confs)))
+		}
+		return l, fmt.Errorf("%w: Core has no record of %s. A child of a "+
+			"transaction nobody has would spend an output that does not exist, so "+
+			"it could never confirm. The finalized batch is in this run's journal "+
+			"row: re-broadcast that first, and bump it afterwards if it needs it",
+			ErrParentMissing, run.TxID)
+	}
+	l.Entry = entry
+
+	// The figures the arithmetic uses. See the doc comment.
+	vsize, fee := entry.VsizeVB, entry.FeeSat
+	if entry.HasUnconfirmedAncestors() {
+		vsize, fee = entry.AncestorVsizeVB, entry.AncestorFeeSat
+	}
+
+	change, err := locateChange(ctx, d, runID, run.TxID, entry)
+	if err != nil {
+		return l, err
+	}
+	l.Change = change
+	l.Parent = settle.Parent{
+		TxID:      run.TxID,
+		VsizeVB:   vsize,
+		FeeSat:    fee,
+		Change:    plan.Outpoint{TxID: change.TxID, Vout: change.Vout},
+		ChangeSat: satsOf(change.Amount),
+	}
+
+	l.ExpiryBlocks, l.HasExpiry, err = nearestExpiry(ctx, d.LND, run.TxID)
+	if err != nil {
+		// Not fatal. The countdown is what the report warns about, not something
+		// the arithmetic needs, and a bump on a node that will not answer this
+		// question is still a bump worth making.
+		fmt.Fprintf(d.Out, "could not read the funding horizon from LND: %v\n", err)
+	}
+	return l, nil
+}
+
+// locateChange picks the batch's change output out of the cold wallet.
+func locateChange(ctx context.Context, d Deps, runID, parentTxID string,
+	entry bitcoind.MempoolEntry) (bitcoind.UTXO, error) {
+
+	utxos, err := d.Wallet.ListUnspent(ctx, 0, math.MaxInt32)
+	if err != nil {
+		return bitcoind.UTXO{}, fmt.Errorf("listing the cold wallet's outputs: %w", err)
+	}
+	var found []bitcoind.UTXO
+	for _, u := range utxos {
+		if u.TxID == parentTxID {
+			found = append(found, u)
+		}
+	}
+	switch len(found) {
+	case 1:
+		return found[0], nil
+	case 0:
+		if entry.DescendantCount > 1 {
+			return bitcoind.UTXO{}, fmt.Errorf("%w: Core lists %d transaction(s) "+
+				"already spending outputs of %s (%v), and the cold wallet no longer "+
+				"holds its change.\nThat is almost certainly an earlier child. A "+
+				"second lift would have to be a child of *that* transaction, and "+
+				"this build does not make one: the child it builds is "+
+				"non-replaceable, so there is nothing to replace and nothing to "+
+				"chain onto. `winthistle recover` lists what the journal knows about "+
+				"this run's children",
+				ErrChangeSpent, entry.DescendantCount-1, parentTxID, entry.SpentBy)
+		}
+		// Core filters locked outputs out of listunspent, so an unfinished bump
+		// of this run looks exactly like a spent change output from here. Saying
+		// which is which is the difference between one command and an afternoon:
+		// the journal knows, and it is the only thing that does.
+		if held, err := heldByAnotherBump(ctx, d, runID); err == nil && held != "" {
+			return bitcoind.UTXO{}, fmt.Errorf("the cold wallet reports no unspent "+
+				"output of %s, and %s. Core leaves locked outputs out of listunspent, "+
+				"so a coin this run is already holding is indistinguishable from a "+
+				"spent one from here — the journal is what tells them apart.\n"+
+				"Give up on that bump first, which releases the lock: "+
+				"`winthistle bump %s --abandon`", parentTxID, held, runID)
+		}
+		return bitcoind.UTXO{}, fmt.Errorf("the cold wallet holds no unspent output "+
+			"of %s. Every other output of a batch belongs to somebody else — the "+
+			"funding outputs are the peers' scripts and the reserve top-up pays "+
+			"LND's own wallet — so the change is the only one this wallet should "+
+			"see. Check that this is the wallet that funded the batch", parentTxID)
+	default:
+		ops := make([]string, 0, len(found))
+		for _, u := range found {
+			ops = append(ops, fmt.Sprintf("%s:%d (%s)", u.TxID, u.Vout,
+				prose.Sats(satsOf(u.Amount))))
+		}
+		return bitcoind.UTXO{}, fmt.Errorf("%w: %v. A batch has exactly one output "+
+			"this wallet owns, and which of these is the CPFP lever cannot be "+
+			"guessed", ErrChangeAmbiguous, ops)
+	}
+}
+
+// heldByAnotherBump names an unfinished bump of this run that is still holding a
+// coin lock, or "" if there is none.
+func heldByAnotherBump(ctx context.Context, d Deps, runID string) (string, error) {
+	bumps, err := d.Journal.Bumps(ctx, runID)
+	if err != nil {
+		return "", err
+	}
+	for _, b := range bumps {
+		if b.Finished() {
+			continue
+		}
+		for _, l := range b.Locks {
+			if !l.Released {
+				return fmt.Sprintf("bump %d of this run is %s and still holds a lock "+
+					"on %s", b.Seq, b.State, l.Outpoint), nil
+			}
+		}
+	}
+	return "", nil
+}
+
+// nearestExpiry is the smallest funding_expiry_blocks across the batch's members
+// still pending: how many blocks remain before the first peer gives up.
+//
+// LND computes it as waitBlocksForFundingConf + broadcastHeight - currentHeight
+// and its own proto says a negative value means the responder has very likely
+// cancelled. It is the only clock in this whole command, and it belongs to the
+// peers rather than to us: our node is the initiator and never times out.
+func nearestExpiry(ctx context.Context, cli Client, parentTxID string) (int32, bool, error) {
+	if cli == nil {
+		return 0, false, nil
+	}
+	resp, err := cli.PendingChannels(ctx, &lnrpc.PendingChannelsRequest{})
+	if err != nil {
+		return 0, false, fmt.Errorf("listing this node's pending channels: %w", err)
+	}
+	var (
+		nearest int32
+		found   bool
+	)
+	for _, p := range resp.GetPendingOpenChannels() {
+		cp := p.GetChannel().GetChannelPoint()
+		if len(cp) < 64 || cp[:64] != parentTxID {
+			continue
+		}
+		if n := p.GetFundingExpiryBlocks(); !found || n < nearest {
+			nearest, found = n, true
+		}
+	}
+	return nearest, found, nil
+}
+
+// Do is the whole command: find the parent, build the child, verify it, sign it,
+// verify what came back, and broadcast.
+//
+// # Where it gives up, and where it does not
+//
+// Any failure before the publish releases the coin lock the build took and
+// leaves the batch exactly as it was. That is the whole of a bump's teardown —
+// there is no shim to cancel and no channel to abandon, because a child talks to
+// no peer and creates nothing.
+//
+// The one place it deliberately does *not* refuse is the funding horizon. If the
+// peers' countdown runs out while the devices are signing, the child is still
+// worth broadcasting: what expired is the peers' patience, not the child's
+// validity, and under I-4 confirming the parent remains the only way the change
+// ever becomes spendable again. Withholding the publish there would cost the
+// coins to save channels that are already lost. See reportRace.
+func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
+	if o.RunID == "" {
+		return nil, errors.New("a bump needs the id of the run whose batch it is " +
+			"accelerating: the journal is what says which transaction that is")
+	}
+	if d.Out == nil {
+		return nil, errors.New("a bump has to be able to show its arithmetic")
+	}
+	res := &Result{RunID: o.RunID}
+
+	section(d.Out, "The batch being accelerated")
+	located, err := Locate(ctx, d, o.RunID)
+	res.Located = located
+	if err != nil {
+		return res, err
+	}
+	fmt.Fprint(d.Out, located.Report())
+
+	target := o.TargetSatPerVB
+	if target <= 0 {
+		section(d.Out, "The target rate")
+		rate, err := fees.Estimate(ctx, d.Node, o.Fees)
+		if err != nil {
+			return res, fmt.Errorf("choosing a target rate: %w\n"+
+				"Name one with --target instead. A bump is the one place where "+
+				"guessing is worse than asking, because I-4 means the batch gets no "+
+				"second attempt", err)
+		}
+		fmt.Fprint(d.Out, rate.Report())
+		target = rate.SatPerVB
+	}
+	if target <= located.Parent.Rate() {
+		return res, fmt.Errorf("%w: it pays %.2f sat/vB and the target is %.2f",
+			settle.ErrNoChildNeeded, located.Parent.Rate(), target)
+	}
+
+	// The ceiling, checked against the arithmetic before anything is built. It
+	// is worth doing here as well as in Verify: this is the cheapest possible
+	// moment to find out, and the alternative is an operator who has already
+	// fetched two hardware devices.
+	if err := checkCeiling(ctx, d, located, target); err != nil {
+		return res, err
+	}
+
+	seq, err := d.Journal.BeginBump(ctx, o.RunID, journal.BumpPlan{
+		ParentTxID:     located.Parent.TxID,
+		ParentVsizeVB:  located.Parent.VsizeVB,
+		ParentFeeSat:   located.Parent.FeeSat,
+		Change:         located.Change.Outpoint(),
+		ChangeSat:      located.Parent.ChangeSat,
+		TargetSatPerVB: target,
+	})
+	if err != nil {
+		return res, fmt.Errorf("journalling the bump: %w", err)
+	}
+	res.Seq = seq
+
+	child, exp, err := buildAndVerify(ctx, d, o, res, located, target)
+	if err != nil {
+		res.Released = giveUp(ctx, d, o.RunID, seq)
+		return res, err
+	}
+
+	if o.BuildOnly {
+		fmt.Fprint(d.Out, buildOnly(child))
+		res.Released = giveUp(ctx, d, o.RunID, seq)
+		return res, nil
+	}
+
+	if d.Approve != nil {
+		ok, err := d.Approve(ctx, fmt.Sprintf(
+			"Sign this child and broadcast it, lifting the batch to %.2f sat/vB?",
+			target))
+		if err != nil || !ok {
+			res.Released = giveUp(ctx, d, o.RunID, seq)
+			if err != nil {
+				return res, err
+			}
+			return res, ErrDeclined
+		}
+	}
+
+	signed, err := Sign(ctx, d, o.RunID, seq, child, exp, res)
+	if err != nil {
+		res.Released = giveUp(ctx, d, o.RunID, seq)
+		return res, err
+	}
+
+	// The horizon, re-read after the round and reported rather than enforced.
+	fmt.Fprint(d.Out, reportRace(ctx, d, located))
+
+	if err := Publish(ctx, d.Publisher, d.Journal, signed); err != nil {
+		// No teardown. MarkBumpPublishing landed before the RPC, so these bytes
+		// may be in a mempool, and releasing the coin lock now would say the
+		// change is free to spend when it may already be spent.
+		return res, err
+	}
+	res.Published = true
+	fmt.Fprint(d.Out, published(signed, located))
+	return res, nil
+}
+
+// buildAndVerify asks Core for the child and checks what it produced.
+func buildAndVerify(ctx context.Context, d Deps, o Options, res *Result,
+	l *Located, target float64) (*settle.Child, Expectation, error) {
+
+	section(d.Out, "The child")
+	child, err := settle.BuildChild(ctx, settle.ChildRequest{
+		Wallet:         d.Wallet,
+		Parent:         l.Parent,
+		TargetSatPerVB: target,
+	})
+	if err != nil {
+		return nil, Expectation{}, err
+	}
+	res.Child = child
+
+	if err := d.Journal.RecordBumpChild(ctx, o.RunID, res.Seq, child.TxID,
+		child.FeeSat, child.Inputs); err != nil {
+		return nil, Expectation{}, fmt.Errorf("journalling the child: %w", err)
+	}
+
+	chain, err := chainName(ctx, d)
+	if err != nil {
+		return nil, Expectation{}, err
+	}
+	exp := Expectation{
+		Chain:          chain,
+		Parent:         l.Parent,
+		TargetSatPerVB: target,
+		PaysTo:         child.PaysTo,
+		FeeSat:         child.FeeSat,
+	}
+
+	v, err := Verify(child.Raw, exp)
+	res.Verified = v
+	if err != nil {
+		return nil, exp, fmt.Errorf("verifying the child Core built: %w", err)
+	}
+	fmt.Fprint(d.Out, child.Report(l.Parent, target))
+	fmt.Fprint(d.Out, v.Report("what was built"))
+	if !v.OK() {
+		return nil, exp, errors.New("the child does not match the arithmetic it was " +
+			"built from, so it is not going to any device")
+	}
+	return child, exp, nil
+}
+
+// Sign is the second cold-wallet session: the round, the merge, the finalize,
+// and the verification of what came back.
+//
+// It produces the only *Signed there is, which is what makes Publish reachable —
+// see publish.go. The merge is internal/combine's, unchanged: I-2 applies to the
+// child no less than to the batch, so the devices return partials and the last
+// signature is applied here.
+func Sign(ctx context.Context, d Deps, runID string, seq int64, child *settle.Child,
+	exp Expectation, res *Result) (*Signed, error) {
+
+	if d.Signers == nil {
+		return nil, errors.New("no signers: the change output belongs to cold " +
+			"storage, so there is nothing that can spend it. Add a [[signer]] block " +
+			"per device")
+	}
+
+	section(d.Out, "The signing round")
+	fmt.Fprint(d.Out, prose.Para("This is a second cold-wallet session, and it is "+
+		"the whole cost of a bump. The batch's change output is a cold-wallet "+
+		"output like any other, so accelerating the batch needs every signer in "+
+		"turn, returning a partial. There is no shortcut that does not amount to a "+
+		"hot key able to spend the batch's change (I-2)."))
+
+	devices := d.Signers.Round(fmt.Sprintf("bump-%d", seq))
+	for _, dev := range devices {
+		if err := d.Journal.RecordBumpSigner(ctx, runID, seq, dev.Label,
+			journal.SignerAwaiting); err != nil {
+			return nil, fmt.Errorf("journalling signer %s: %w", dev.Label, err)
+		}
+	}
+
+	started := time.Now()
+	parts := make([]combine.Part, 0, len(devices))
+	for _, dev := range devices {
+		part, err := dev.Sign(ctx, child.PSBT)
+		if err != nil {
+			if jerr := d.Journal.RecordBumpSigner(ctx, runID, seq, dev.Label,
+				journal.SignerDeclined); jerr != nil {
+				return nil, fmt.Errorf("%s did not sign (%v), and journalling that "+
+					"failed too: %w", dev.Label, err, jerr)
+			}
+			return nil, fmt.Errorf("%s did not sign the child: %w", dev.Label, err)
+		}
+		if err := d.Journal.RecordBumpSigner(ctx, runID, seq, dev.Label,
+			journal.SignerPartial); err != nil {
+			return nil, fmt.Errorf("journalling signer %s: %w", dev.Label, err)
+		}
+		parts = append(parts, part)
+		fmt.Fprintf(d.Out, "%s signed (%s elapsed)\n", dev.Label,
+			time.Since(started).Round(time.Second))
+	}
+
+	merged, err := combine.Merge(child.Raw, parts)
+	if err != nil {
+		return nil, fmt.Errorf("merging the partials: %w", err)
+	}
+	final, err := combine.Finalize(merged)
+	if err != nil {
+		return nil, fmt.Errorf("finalizing the child in-app: %w", err)
+	}
+
+	// The second verification, on the bytes rather than on the packet. The child
+	// that came back is not the artifact that will be broadcast until it has been
+	// extracted, and only the extracted form can be checked with every witness
+	// present.
+	view, err := final.View()
+	if err != nil {
+		return nil, err
+	}
+	recheck, err := Recheck(view, exp, child.VsizeVB)
+	res.Rechecked = recheck
+	if err != nil {
+		return nil, fmt.Errorf("verifying the signed child: %w", err)
+	}
+	fmt.Fprint(d.Out, recheck.Report("what came back"))
+	if !recheck.OK() {
+		return nil, errors.New("the signed child does not match what was verified " +
+			"before it went out")
+	}
+	if final.TxID != child.TxID {
+		return nil, fmt.Errorf("the child's txid moved from %s to %s while it was "+
+			"being signed. Only signatures were added, so this should not be "+
+			"possible — do not broadcast it", child.TxID, final.TxID)
+	}
+
+	// The only pre-flight there is, and specifically not a broadcast.
+	ok, why, _, err := d.Node.TestMempoolAccept(ctx, hex.EncodeToString(final.RawTx))
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, fmt.Errorf("testmempoolaccept would refuse this child: %s\n"+
+			"It validates without relaying, so nothing went out. The batch is "+
+			"untouched", why)
+	}
+	fmt.Fprintf(d.Out, "\ntestmempoolaccept: allowed. %s in fees, %d vB, %.0f sat/vB "+
+		"for the child; %.2f sat/vB for the pair.\n", prose.Sats(final.FeeSat),
+		final.Vsize, float64(final.FeeSat)/float64(final.Vsize), recheck.PackageRate)
+
+	if err := d.Journal.RecordBumpRawTx(ctx, runID, seq, final.TxID,
+		hex.EncodeToString(final.RawTx)); err != nil {
+		return nil, fmt.Errorf("journalling the finalized child: %w", err)
+	}
+
+	return &Signed{
+		RunID:       runID,
+		Seq:         seq,
+		TxID:        final.TxID,
+		VsizeVB:     final.Vsize,
+		FeeSat:      final.FeeSat,
+		PackageRate: recheck.PackageRate,
+		Signers:     final.Signers,
+		rawTx:       final.RawTx,
+	}, nil
+}
+
+// checkCeiling refuses a lift the node could not broadcast, before a device is
+// asked for anything.
+//
+// The child's size is not known until Core has built it, so this uses
+// plan.ChildVsize over the change output's own scripts — the same estimate
+// internal/plan used when it decided this change output was big enough, and the
+// same one internal/settle falls back to when Core refuses outright. Two
+// estimates arrived at the same way are comparable; that is the only reason it
+// is worth doing here rather than waiting for Verify.
+func checkCeiling(ctx context.Context, d Deps, l *Located, target float64) error {
+	script, err := hex.DecodeString(l.Change.ScriptPubKey)
+	if err != nil {
+		return nil // Verify will still catch it; a guess here is not worth an error.
+	}
+	witness, err := hex.DecodeString(l.Change.WitnessScript)
+	if err != nil {
+		return nil
+	}
+	childVsize, err := plan.ChildVsize(script, witness)
+	if err != nil || childVsize <= 0 {
+		return nil
+	}
+	fee := plan.ChildFeeSat(l.Parent.VsizeVB, l.Parent.FeeSat, target, childVsize)
+	rate := float64(fee) / float64(childVsize)
+	if rate <= MaxChildFeeRateSatPerVB {
+		return nil
+	}
+	return fmt.Errorf("this lift needs a child paying about %.0f sat/vB of its "+
+		"own, above the %d sat/vB ceiling this node will broadcast.\n"+
+		"A %d vB child has to carry the whole package's lift: %s to move %d vB of "+
+		"parent from %.2f to %.2f sat/vB.\n%s",
+		rate, MaxChildFeeRateSatPerVB, childVsize, prose.Sats(fee),
+		l.Parent.VsizeVB, l.Parent.Rate(), target, ceilingDetail(rate))
+}
+
+// giveUp releases the coin lock the build took, and says what it freed.
+//
+// The whole of a bump's teardown. Nothing was broadcast, no peer was spoken to,
+// and no channel exists — so the only thing that outlives a failed bump is a
+// cold wallet quietly declining to spend its own change.
+func giveUp(ctx context.Context, d Deps, runID string, seq int64) *abort.Report {
+	// A fresh context: the lock has to come off even when the run was cancelled,
+	// and a cancelled context cannot make the RPC.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+	defer cancel()
+
+	rep, err := d.Journal.AbandonBump(ctx, d.Wallet, runID, seq)
+	fmt.Fprint(d.Out, gaveUp(rep, err))
+	return rep
+}
+
+// chainName asks Core which chain it is on, so the verifier decodes addresses
+// against the right parameters.
+func chainName(ctx context.Context, d Deps) (string, error) {
+	info, err := d.Node.GetBlockchainInfo(ctx)
+	if err != nil {
+		return "", fmt.Errorf("asking Core which chain it is on: %w", err)
+	}
+	if _, err := plan.Params(info.Chain); err != nil {
+		return "", fmt.Errorf("Core says it is on %q: %w", info.Chain, err)
+	}
+	return info.Chain, nil
+}
+
+func satsOf(btc float64) int64 { return int64(math.Round(btc * 1e8)) }
+
+func section(w io.Writer, title string) {
+	fmt.Fprintf(w, "\n%s\n%s\n\n", title, underline(len(title)))
+}
+
+func underline(n int) string {
+	b := make([]byte, n)
+	for i := range b {
+		b[i] = '-'
+	}
+	return string(b)
+}

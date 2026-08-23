@@ -16,6 +16,12 @@ const (
 	ErrWalletAlreadyLoaded = -35 // RPC_WALLET_ALREADY_LOADED
 	ErrWalletError         = -4  // RPC_WALLET_ERROR — also "already exists"
 	ErrMethodNotFound      = -32601
+
+	// ErrInvalidAddressOrKey is what getmempoolentry returns for a transaction
+	// Core does not have: "Transaction not in mempool". It is the ordinary
+	// answer rather than a fault — the transaction confirmed, or it never went
+	// out — so MempoolEntry turns it into a bool.
+	ErrInvalidAddressOrKey = -5 // RPC_INVALID_ADDRESS_OR_KEY
 )
 
 // IsRPCError reports whether err is a Core JSON-RPC error with the given code.

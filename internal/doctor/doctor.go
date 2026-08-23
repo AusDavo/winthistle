@@ -749,6 +749,24 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config, wallet *bi
 			}
 		}
 	}
+
+	// A CPFP child's lock has an owner too, and its owner is not in the list
+	// above: the run a child accelerates is published, and a published run is
+	// not unfinished. Without this every bump in progress makes the batch's
+	// change output read as an orphan — which is the one diagnosis on this
+	// screen that tells an operator to unlock a coin something is using.
+	bumps, err := j.UnfinishedBumps(ctx)
+	if err != nil {
+		c.fail("reading the journal's CPFP children: %v", err)
+		return
+	}
+	for _, b := range bumps {
+		for _, l := range b.Locks {
+			if !l.Released {
+				claimed[l.Outpoint] = fmt.Sprintf("%s bump %d", b.RunID, b.Seq)
+			}
+		}
+	}
 	if len(unfinished) > 0 {
 		c.fail("%d run%s stopped somewhere %s should not have:", len(unfinished),
 			prose.Plural(len(unfinished)), prose.IsAre(len(unfinished)))
@@ -758,6 +776,23 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config, wallet *bi
 		c.fix("winthistle recover")
 	} else {
 		c.say("no unfinished runs")
+	}
+
+	// A warning rather than a failure. An unfinished child costs a coin lock and
+	// nothing else — there is no peer holding a reservation and no channel in a
+	// half-open state — so it is a thing to tidy up rather than a thing that
+	// stops the next batch. The exception says itself: one that may be public.
+	if len(bumps) > 0 {
+		c.warn("%d CPFP child%s unfinished:", len(bumps),
+			pluralES(len(bumps)))
+		for _, b := range bumps {
+			note := ""
+			if b.MayBePublic() {
+				note = " — may already be in a mempool, so do not assume it is not"
+			}
+			c.say("    %s bump %d — %s%s", b.RunID, b.Seq, b.State, note)
+		}
+		c.fix("winthistle bump <run-id> --abandon")
 	}
 
 	if wallet == nil {
@@ -794,6 +829,15 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config, wallet *bi
 			"frees nothing. The locks are memory-only: a Core restart clears them " +
 			"all at once.")
 	}
+}
+
+// pluralES is prose.Plural for a word that takes -es. "child" takes neither, so
+// this one carries the "ren" it needs.
+func pluralES(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "ren"
 }
 
 func lockJSON(ops []bitcoind.Outpoint) string {

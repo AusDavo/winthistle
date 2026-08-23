@@ -23,6 +23,16 @@
 //
 // Only (3) catches a new call site before it ships, which is why it is the one
 // wired into `make check`.
+//
+// # Counting, for the one method where the count is the point
+//
+// (3) asks whether a method is called, not how often, and for nineteen of the
+// twenty entries here that is the right question. For
+// WalletKit.PublishTransaction it is not: the design's claim is that the
+// network is reached on a known, small number of lines, each of them typed so
+// it can only carry one kind of transaction. That is a claim about a count, and
+// a count is checked by counting. Method.CallSites is where the number lives
+// and the call-site test is what enforces it.
 package methods
 
 import (
@@ -79,6 +89,21 @@ type Method struct {
 	// Why is the call site, in one line. It is the thing a reviewer checks
 	// the entry against.
 	Why string
+
+	// CallSites is the exact number of production call sites this method is
+	// allowed to have, when the count itself is the property being protected.
+	// Zero means unconstrained, which is the right default: most methods are
+	// called from wherever they are needed, and a test that failed when a
+	// function was split in two would be a refactoring tripwire rather than a
+	// safety check.
+	//
+	// It is not the default for PublishTransaction. "The transaction reaches
+	// the network on exactly these lines" is a claim about how many lines there
+	// are, and until this field existed it was made in five prose comments and
+	// checked nowhere — a second caller passed TestEveryLNDCallSiteIsRegistered
+	// silently, because that test groups by method and asserts non-empty in both
+	// directions without ever counting.
+	CallSites int
 }
 
 // URI is the permission actually baked: the "uri" entity, whose action is a
@@ -328,11 +353,18 @@ var registry = []Method{
 			"default account, witness outputs, zero confirmations.",
 	},
 	{
-		Name: "/walletrpc.WalletKit/PublishTransaction",
-		Use:  InApp,
-		Ops:  []Op{{"onchain", "write"}},
-		Why: "arm.Publish: step 9, the single publish call, gated on n of n " +
-			"chan_pending. Deliberately not on the never-list — see forbidden.",
+		Name:      "/walletrpc.WalletKit/PublishTransaction",
+		Use:       InApp,
+		Ops:       []Op{{"onchain", "write"}},
+		CallSites: 2,
+		Why: "arm.Publish: step 9, the funding transaction's single publish, gated " +
+			"on n of n chan_pending. And bump.Publish: the CPFP child of a batch " +
+			"that is already public, which has no I-1 gate to sit behind because " +
+			"the parent is already in a mempool and the child cannot strand " +
+			"anybody. Two call sites and no more — CallSites is what enforces that. " +
+			"Each takes a distinct type whose raw transaction is unexported and " +
+			"filled by exactly one constructor, so neither line can be handed the " +
+			"other's bytes. Deliberately not on the never-list — see forbidden.",
 	},
 	{
 		Name: "/walletrpc.WalletKit/ReleaseOutput",
@@ -400,6 +432,12 @@ func validate() error {
 			return fmt.Errorf("method %s records no LND permission", m.Name)
 		case m.Why == "":
 			return fmt.Errorf("method %s says nothing about where it is called", m.Name)
+		case m.CallSites < 0:
+			return fmt.Errorf("method %s declares %d call sites", m.Name, m.CallSites)
+		case m.CallSites > 0 && m.Use != InApp:
+			return fmt.Errorf("method %s is %s but pins its production call-site "+
+				"count at %d. An InHarness method is required to have none, so the "+
+				"two rules would contradict each other", m.Name, m.Use, m.CallSites)
 		case seen[m.Name]:
 			return fmt.Errorf("method %s is listed twice", m.Name)
 		case isForbidden(m.Name):

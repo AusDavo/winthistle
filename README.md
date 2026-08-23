@@ -7,8 +7,8 @@ web interface.
 > ### Status: works on regtest, never run on mainnet. Do not use.
 >
 > There is a working command line — `winthistle doctor`, `winthistle run`,
-> `winthistle recover` — and the web interface described in the design does not
-> exist yet. The central safety property below was verified by reading LND's
+> `winthistle bump`, `winthistle recover` — and the web interface described in
+> the design does not exist yet. The central safety property below was verified by reading LND's
 > source and **has since been observed on regtest at *n* = 3**: three channels
 > armed from one transaction, with an empty mempool checked after every
 > finalize, including the last. It has never been run against mainnet. Nothing
@@ -55,6 +55,13 @@ winthistle run --batch batch.toml --stop-before-publish
 The last line is the cold probe: the whole production sequence, with the one
 call that broadcasts withheld and the batch taken apart afterwards. It is not a
 test mode and not a separate code path — see the design's commissioning section.
+
+If a batch goes out and then sits in the mempool, `winthistle bump <run-id>`
+builds a CPFP child from its change output, verifies it against the parent,
+takes it to the signers and broadcasts it. Never a replacement: replacing the
+funding transaction moves every outpoint in it and destroys every channel in the
+batch. The child spends cold-storage change, so a bump costs a second
+cold-wallet session — there is no version of this that does not.
 
 ## Documentation
 

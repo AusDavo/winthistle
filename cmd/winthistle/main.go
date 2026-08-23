@@ -1,11 +1,12 @@
 // Command winthistle is the local, guided tool for batch-opening Lightning
 // channels from cold storage.
 //
-// Four commands, and the order they are in is the order they are used:
+// Five commands, and the order they are in is the order they are used:
 // print-macaroon-command bakes the credential, doctor checks the setup, run
-// opens the batch, recover takes apart a run that stopped somewhere it should
-// not have. The web UI docs/design.html describes does not exist yet; these
-// commands drive the same packages it will.
+// opens the batch, bump accelerates one that went out too cheap, and recover
+// takes apart a run that stopped somewhere it should not have. The web UI
+// docs/design.html describes does not exist yet; these commands drive the same
+// packages it will.
 package main
 
 import (
@@ -25,8 +26,10 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/bitcoind"
+	"github.com/AusDavo/winthistle/internal/bump"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/doctor"
+	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/methods"
@@ -40,6 +43,8 @@ const usage = `winthistle — batch-open Lightning channels from cold storage.
 Commands:
   doctor                   check every prerequisite and print what fixes each
   run --batch FILE         open the batch: Phase 0, the armed window, Phase 2
+  bump RUN-ID              build, sign and broadcast a CPFP child of a stalled
+                           batch. Never a replacement — see I-4
   recover [RUN-ID]         list runs that stopped, or take one apart
   print-macaroon-command   print the lncli bakemacaroon line for this build
   example-config           print a winthistle.toml to start from
@@ -76,6 +81,8 @@ func main() {
 		err = doctorCmd(ctx, os.Args[2:])
 	case "run":
 		err = runCmd(ctx, os.Args[2:])
+	case "bump":
+		err = bumpCmd(ctx, os.Args[2:])
 	case "recover":
 		err = recoverCmd(ctx, os.Args[2:])
 	case "example-config":
@@ -221,6 +228,79 @@ func runCmd(ctx context.Context, args []string) error {
 	return err
 }
 
+// bumpCmd is `winthistle bump`: the CPFP child of a batch that went out too
+// cheap.
+//
+// It takes a run id rather than a txid, and that is the interface rather than a
+// convenience. The journal is what says a transaction was actually published,
+// what its change output was, and whether an earlier child of it is already
+// holding a coin lock — and a bump built without any of that would be a
+// transaction with no record of why it exists.
+func bumpCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("bump", flag.ContinueOnError)
+	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
+	target := fs.Float64("target", 0, "the sat/vB to lift the batch and its child "+
+		"to together — not the child's own rate. Zero asks Core, through the same "+
+		"estimator the batch used")
+	buildOnly := fs.Bool("build-only", false, "build and verify the child, and ask "+
+		"no device for anything. The arithmetic is the part that can be wrong")
+	abandon := fs.Bool("abandon", false, "give up on this run's unfinished child "+
+		"and release the coin lock it is holding on the batch's change output")
+	psbtDir := fs.String("psbt-dir", "", "where to write PSBTs for signers that "+
+		"have no command (default: alongside the journal)")
+	yes := fs.Bool("yes", false, "do not ask before the signing round")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if fs.NArg() != 1 {
+		return errors.New("bump needs the id of the run whose batch it is " +
+			"accelerating: `winthistle recover` lists them")
+	}
+	runID := fs.Arg(0)
+
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	d, closeAll, err := connect(ctx, cfg, *psbtDir)
+	if err != nil {
+		return err
+	}
+	defer closeAll()
+
+	deps := bump.Deps{
+		LND:       d.LND.Lightning,
+		Publisher: d.LND.WalletKit,
+		Node:      d.Node,
+		Wallet:    d.Wallet,
+		Journal:   d.Journal,
+		Signers:   d.Signers,
+		Out:       os.Stdout,
+	}
+	if !*yes {
+		deps.Approve = approve
+	}
+
+	if *abandon {
+		return bump.Give(ctx, deps, runID)
+	}
+
+	res, err := bump.Do(ctx, deps, bump.Options{
+		RunID:          runID,
+		TargetSatPerVB: *target,
+		BuildOnly:      *buildOnly,
+		Fees: fees.Request{
+			TargetBlocks:  cfg.Fees.TargetBlocks,
+			Mode:          cfg.Fees.Mode,
+			FloorSatPerVB: cfg.Fees.FloorSatPerVB,
+		},
+	})
+	if res != nil && res.Seq > 0 {
+		fmt.Printf("\nrun %s, bump %d\n", res.RunID, res.Seq)
+	}
+	return err
+}
+
 func recoverCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("recover", flag.ContinueOnError)
 	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
@@ -249,7 +329,11 @@ func recoverCmd(ctx context.Context, args []string) error {
 		if len(runs) > 0 {
 			fmt.Printf("\nTake one apart with: winthistle recover %s\n", runs[0].ID)
 		}
-		return nil
+		// The children too. They are not runs and they are not aborted the same
+		// way, but they are the other thing in this journal that can be left
+		// half-done, and a screen that listed one and not the other would be
+		// telling somebody their node is clean when a coin of theirs is locked.
+		return bump.List(ctx, j, os.Stdout)
 	}
 
 	d, closeAll, err := connect(ctx, cfg, "")
@@ -329,6 +413,16 @@ func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
 func confirmBlunt(_ context.Context, req abort.BluntRequest) (bool, error) {
 	fmt.Print(prose.BluntConfirmation(req))
 	return ask("Abandon it with i_know_what_i_am_doing?")
+}
+
+// approve is the ordinary yes/no in front of a signing round.
+//
+// Not the same kind of prompt as confirmBlunt, and it does not pretend to be:
+// nothing after this point can lose the batch. What it is protecting is the
+// operator's evening — a bump is a second cold-wallet session, and the screen
+// above it is the arithmetic they are agreeing to pay.
+func approve(_ context.Context, question string) (bool, error) {
+	return ask(question)
 }
 
 // stdin is read through one buffered reader for the life of the process. A
