@@ -5,12 +5,23 @@ transaction, funded from single-sig or multisig cold storage. LND only.
 
 Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 
-**Status: implemented, and exercised against live regtest.** Every function has a
-non-test caller: `winthistle setup`, `run`, `bump`, `doctor` and `recover` all
-work against the cluster in `regtest/`. Still missing are the server, the UI,
-signet, and the mainnet cold probe. So the safety model below is verified against
-LND source *and* against a running node — but never yet against mainnet, which is
-what the cold probe is for.
+**Status: implemented, and exercised against live regtest.** `winthistle setup`,
+`run`, `bump`, `doctor` and `recover` all work against the cluster in `regtest/`.
+`winthistle serve` is one slice deep: `internal/server` carries the security
+shape `docs/design.html` asks for — loopback bind, a startup token, strict
+`Origin` and `Host` checks, no CORS — and serves one read-only screen, and
+nothing it serves can arm, publish or abort. Still missing are the rest of the
+UI, signet, and the mainnet cold probe. So the safety model below is verified
+against LND source *and* against a running node — but never yet against mainnet,
+which is what the cold probe is for.
+
+The three decisions that had to be made before any web handler are made and each
+carries a guard rather than a promise; `HANDOFF.md`'s "The server, and the three
+decisions with guards on them" is where they live. The one that touches this file
+is decision 1: **a web handler is exactly where a third
+`WalletKit.PublishTransaction` call site appears**, so `internal/server` may not
+import `internal/arm` or `internal/bump`, and a test in that package enforces it
+alongside the pinned count below.
 
 ---
 

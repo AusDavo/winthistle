@@ -1,13 +1,18 @@
 // Command winthistle is the local, guided tool for batch-opening Lightning
 // channels from cold storage.
 //
-// Six commands, and the order they are in is the order they are used: setup
+// Seven commands, and the order they are in is the order they are used: setup
 // builds the watch-only wallet from the cold wallet's descriptors,
-// print-macaroon-command bakes the credential, doctor checks both, run opens the
-// batch, bump accelerates one that went out too cheap, and recover takes apart a
-// run that stopped somewhere it should not have. The web UI
-// docs/design.html describes does not exist yet; these commands drive the same
-// packages it will.
+// print-macaroon-command bakes the credential, doctor checks both, serve puts
+// the local web UI on a loopback socket, run opens the batch, bump accelerates
+// one that went out too cheap, and recover takes apart a run that stopped
+// somewhere it should not have.
+//
+// serve is the newest and the least finished: it carries the security shape
+// docs/design.html asks for — loopback bind, a token printed at startup, strict
+// Origin and Host checks, no CORS — and one read-only screen, doctor's. Nothing
+// it serves can arm, publish or abort. The commands below drive the same
+// packages the rest of the UI will.
 package main
 
 import (
@@ -38,6 +43,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/run"
+	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
 	"github.com/AusDavo/winthistle/internal/signers"
 )
@@ -48,6 +54,8 @@ Commands:
   setup                    build the watch-only wallet from the cold wallet's
                            descriptors, and end by comparing addresses
   doctor                   check every prerequisite and print what fixes each
+  serve                    serve the local web UI on [server] bind, and print
+                           the URL with the startup token in it
   run --batch FILE         open the batch: Phase 0, the armed window, Phase 2
   bump RUN-ID              build, sign and broadcast a CPFP child of a stalled
                            batch. Never a replacement — see I-4
@@ -60,8 +68,9 @@ Commands:
 Common flags:
   --config PATH            winthistle.toml (default: ./winthistle.toml)
 
-The web UI is not built yet. What exists is the whole sequence: the peer
-pre-flight, the fee source, the dress rehearsal and the reserve check for
+The web UI serves one screen so far — doctor's — and nothing in it can arm,
+publish or abort. What exists on the command line is the whole sequence: the
+peer pre-flight, the fee source, the dress rehearsal and the reserve check for
 Phase 0; the armed window and its single publish for Phase 1; the confirmation
 watch, the policy pass and the CPFP child for Phase 2; and the abort and
 recovery paths under all of it. See HANDOFF.md.
@@ -88,6 +97,8 @@ func main() {
 		err = printMacaroonCommand(os.Args[2:])
 	case "doctor":
 		err = doctorCmd(ctx, os.Args[2:])
+	case "serve":
+		err = serveCmd(ctx, os.Args[2:])
 	case "run":
 		err = runCmd(ctx, os.Args[2:])
 	case "bump":
@@ -277,6 +288,45 @@ func doctorCmd(ctx context.Context, args []string) error {
 		return errors.New(report.Summary())
 	}
 	return nil
+}
+
+// serveCmd starts the local web UI.
+//
+// Ctrl-C here shuts the socket down and returns. That is not the same thing as
+// Ctrl-C during a run, which cancels the run's context and unwinds it through
+// the abort path — and the difference is deliberate rather than an oversight:
+// nothing in this UI can start a run yet, and when it can, a run will be
+// cancelled by the clock or by an explicit abort rather than by a socket
+// closing. internal/server's package comment and HANDOFF.md both say why, at
+// length, because it is the most dangerous asymmetry in the change.
+func serveCmd(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
+	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
+	batchPath := fs.String("batch", "", "a batch file, so the doctor screen's "+
+		"peer and anchor-reserve checks are about the batch you mean to open")
+	allowConnect := fs.Bool("connect", false, "let the doctor screen's peer "+
+		"check connect to peers that are not connected already")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	cfg, err := loadConfig(*cfgPath)
+	if err != nil {
+		return err
+	}
+	opts := server.Options{Doctor: doctor.Options{Connect: *allowConnect}}
+	if *batchPath != "" {
+		opts.Doctor.Batch, err = config.LoadBatch(*batchPath)
+		if err != nil {
+			return err
+		}
+	}
+
+	s, err := server.New(cfg, opts)
+	if err != nil {
+		return err
+	}
+	return s.Serve(ctx, os.Stdout)
 }
 
 func runCmd(ctx context.Context, args []string) error {
