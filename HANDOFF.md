@@ -3,8 +3,9 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State: the three phases exist as packages, something composes them, and
-every function in them now has a caller.** `winthistle run` drives Phase 0 —
+**State: the three phases exist as packages, something composes them, and every
+function in *them* now has a caller — the setup path is the one part of the build
+that is still written and uncalled.** `winthistle run` drives Phase 0 —
 peer pre-flight, fee rate, anchor reserve, dress rehearsal — then Phase 1's
 armed window and its single publish, then Phase 2's confirmation watch and
 policy pass; `winthistle bump` builds, verifies, signs and broadcasts the CPFP
@@ -1041,8 +1042,13 @@ callers, and the only place the whole sequence was assembled was `drive()` in
 `internal/config`, `internal/policy`, `internal/signers`, `internal/doctor` and
 `internal/run` are: four commands' worth of wiring and no new mechanism.
 
-`settle.BuildChild` was the last of that list with no caller. `internal/bump` is
-now that caller, and nothing in this repository is written-but-uncalled any more.
+`settle.BuildChild` was the last of *that* list with no caller, and
+`internal/bump` is now that caller.
+
+**One package is still written and uncalled, and it is not this list:**
+`internal/coldwallet`'s setup path. `Install`, `Confirm` and `RunPreflight` have
+test callers only — `winthistle setup` is what would call them, and it does not
+exist. See next actions.
 
 ### `winthistle.toml`, and the two keys nothing read
 
@@ -1581,8 +1587,9 @@ claiming they never existed.
    `bitcoin-cli importdescriptors` line, which is a worse experience than the
    guided screen `Install` was written for. It needs the descriptors and the
    birthday, which is the one part of setup no program can supply.
-5. **Nothing, at this level.** The list above is what is left; `winthistle bump`
-   and the second lift are both built. See "The second lift" below.
+5. **Nothing new at this level.** `winthistle bump` and the second lift are both
+   built — see "The second lift" below. What is left is items 1 to 4, and item 4
+   is the only remaining written-but-uncalled code in the repository.
 
 Done since the last handoff, all from the previous list:
 
