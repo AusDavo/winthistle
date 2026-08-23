@@ -108,6 +108,19 @@ func (m Method) Short() string {
 type Capability struct {
 	Method string
 	Does   string
+
+	// Ops is what LND's own permission map demands for this method, read out of
+	// MainRPCServerPermissions and walletkit_server.go's macPermissions at
+	// v0.19.3-beta.
+	//
+	// Unlike Method.Ops these are load-bearing: `winthistle doctor` asks LND
+	// whether the configured credential holds them, through
+	// CheckMacaroonPermissions, and reports a credential that can do any of
+	// these as a failure. That is the never-list checked against the actual
+	// file rather than against this build's intentions — an operator running
+	// with admin.macaroon has every one of them, and nothing else in the tool
+	// would have said so.
+	Ops []Op
 }
 
 // forbidden is the never-list. The design promises the operator that the baked
@@ -130,16 +143,26 @@ type Capability struct {
 // publish to the app, and WalletKit is the route that also puts the transaction
 // in LND's wallet-level rebroadcaster.
 var forbidden = []Capability{
-	{"/lnrpc.Lightning/SendCoins", "send coins on-chain"},
-	{"/lnrpc.Lightning/SendMany", "send coins on-chain"},
-	{"/lnrpc.Lightning/SendPaymentSync", "send a payment"},
-	{"/lnrpc.Lightning/SendToRouteSync", "send a payment"},
-	{"/lnrpc.Lightning/CloseChannel", "close a channel"},
-	{"/lnrpc.Lightning/SignMessage", "sign a message"},
-	{"/lnrpc.Lightning/BakeMacaroon", "bake itself a wider credential"},
-	{"/walletrpc.WalletKit/SendOutputs", "send coins on-chain"},
-	{"/walletrpc.WalletKit/SignPsbt", "sign a transaction"},
-	{"/walletrpc.WalletKit/FundPsbt", "spend the node's own coins"},
+	{"/lnrpc.Lightning/SendCoins", "send coins on-chain",
+		[]Op{{"onchain", "write"}}},
+	{"/lnrpc.Lightning/SendMany", "send coins on-chain",
+		[]Op{{"onchain", "write"}}},
+	{"/lnrpc.Lightning/SendPaymentSync", "send a payment",
+		[]Op{{"offchain", "write"}}},
+	{"/lnrpc.Lightning/SendToRouteSync", "send a payment",
+		[]Op{{"offchain", "write"}}},
+	{"/lnrpc.Lightning/CloseChannel", "close a channel",
+		[]Op{{"onchain", "write"}, {"offchain", "write"}}},
+	{"/lnrpc.Lightning/SignMessage", "sign a message",
+		[]Op{{"message", "write"}}},
+	{"/lnrpc.Lightning/BakeMacaroon", "bake itself a wider credential",
+		[]Op{{"macaroon", "generate"}}},
+	{"/walletrpc.WalletKit/SendOutputs", "send coins on-chain",
+		[]Op{{"onchain", "write"}}},
+	{"/walletrpc.WalletKit/SignPsbt", "sign a transaction",
+		[]Op{{"onchain", "write"}}},
+	{"/walletrpc.WalletKit/FundPsbt", "spend the node's own coins",
+		[]Op{{"onchain", "write"}}},
 }
 
 // Forbidden returns the never-list.
@@ -170,6 +193,18 @@ var registry = []Method{
 		Use:  InApp,
 		Ops:  []Op{{"offchain", "write"}},
 		Why:  "abort.AbandonPending: remove a pending channel from LND.",
+	},
+	{
+		Name: "/lnrpc.Lightning/CheckMacaroonPermissions",
+		Use:  InApp,
+		Ops:  []Op{{"macaroon", "read"}},
+		Why: "doctor.Run: ask LND whether the configured credential authorises each " +
+			"method this build calls, and whether it authorises anything on the " +
+			"never-list. It answers about the macaroon in the request rather than " +
+			"about the caller's, and it invokes no handler — CheckMacAuth checks " +
+			"the ops and then the uri:<full_method> form, and returns. The " +
+			"alternative was calling the methods themselves with junk arguments, " +
+			"which for AbandonChannel or PublishTransaction is not a diagnostic.",
 	},
 	{
 		Name: "/lnrpc.Lightning/ConnectPeer",

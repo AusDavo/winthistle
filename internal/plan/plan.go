@@ -48,6 +48,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -104,6 +105,24 @@ type Channel struct {
 	// never opens.
 	Address   string
 	AmountSat int64
+
+	// Private is whether the channel will be unannounced. Not a constraint on
+	// the transaction — an announced and an unannounced channel produce the same
+	// output — but it changes two things the operator is reviewing here: an
+	// unannounced channel is invisible to LND's anchor reserve, and it will not
+	// route for anybody, which makes its forwarding policy moot.
+	Private bool
+
+	// Policy is what this channel will charge to route once Phase 2 has applied
+	// it, and nil means it will be left at LND's own defaults.
+	//
+	// It is in the plan because it is part of the same decision: the operator
+	// reviewing where the money goes is the last person who can change what it
+	// will earn, and after this document is approved the policy is applied by a
+	// loop with no human in it. The verifier says nothing about it — a
+	// transaction carries no forwarding policy — so Document renders it and
+	// Verify ignores it.
+	Policy *policy.Policy
 }
 
 // TopUp is the reserve top-up: an output paying the node's own wallet, so that
@@ -307,6 +326,16 @@ func (p *Plan) Outputs() ([]Named, error) {
 		if ch.AmountSat <= 0 {
 			return nil, fmt.Errorf("%s: a funding amount of %d is not an amount",
 				label, ch.AmountSat)
+		}
+		// A policy LND will refuse is refused here, where it costs nothing.
+		// The alternative is Phase 2 discovering it after the transaction is
+		// public: UpdateChannelPolicy reports an invalid parameter inside a
+		// successful response, polling cannot make it valid, and the channel
+		// routes at 1 ppm until somebody notices.
+		if ch.Policy != nil {
+			if err := ch.Policy.Validate(); err != nil {
+				return nil, fmt.Errorf("%s: %w", label, err)
+			}
 		}
 		if err := add(Named{Kind: Funding, Label: label, Script: script,
 			Address: ch.Address, AmountSat: ch.AmountSat, Exact: true}); err != nil {

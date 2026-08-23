@@ -62,6 +62,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
+	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -104,6 +105,16 @@ type Channel struct {
 	// LND's anchor-reserve check twice over. internal/reserve is what knows that;
 	// this field is what tells it.
 	Private bool
+
+	// Policy is what this channel will route at once Phase 2 has applied it.
+	//
+	// Chosen in Phase 0 and carried through the armed window untouched: nothing
+	// here reads it, and it is here so that the plan the operator approves shows
+	// the forwarding policy beside the amount. A nil policy is a channel left at
+	// LND's defaults — 1000 msat base and 1 ppm — which the plan document says
+	// out loud rather than leaving blank, because that is the fee-drain hazard
+	// and not an absence of information.
+	Policy *policy.Policy
 }
 
 // Stream is one open funding stream, held at the point where LND has named the
@@ -112,6 +123,10 @@ type Stream struct {
 	PendingChanID lnd.PendingChanID
 	Peer          string
 	Private       bool
+
+	// Policy is the forwarding policy Phase 0 chose for this channel, carried
+	// from the Channel that opened the stream so the plan can show it.
+	Policy *policy.Policy
 
 	// FundingAddress and FundingAmount are LND's own psbt_fund answer, and both
 	// are exact. LND compares its expected output with psbt.TxOutsEqual, which
@@ -265,6 +280,8 @@ func (s *Streams) Plan(b Blueprint) (*plan.Plan, error) {
 			PendingChanID: st.PendingChanID.String(),
 			Address:       st.FundingAddress,
 			AmountSat:     st.FundingAmount,
+			Private:       st.Private,
+			Policy:        st.Policy,
 		})
 	}
 	// Resolving the outputs is the plan's own validation, and doing it here means
@@ -391,6 +408,7 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 		PendingChanID:  id,
 		Peer:           c.Peer,
 		Private:        c.Private,
+		Policy:         c.Policy,
 		FundingAddress: fund.GetFundingAddress(),
 		FundingAmount:  fund.GetFundingAmount(),
 		cancel:         cancel,

@@ -355,3 +355,86 @@ func (e *Env) PeerNamed(t *testing.T, pubkey string) string {
 	t.Fatalf("no harness peer has pubkey %s", pubkey)
 	return ""
 }
+
+// ConfigFile writes a winthistle.toml pointing at this harness and returns its
+// path.
+//
+// The macaroon it names is a *copy* of alice's admin.macaroon, under a
+// different name — config.Load refuses a path ending in admin.macaroon
+// outright, and rightly, but a test that needs a working credential has no
+// narrow one to hand unless lncli is reachable. So the file is deliberately
+// too wide, and `winthistle doctor` is expected to say so: that refusal is one
+// of the things worth testing.
+func (e *Env) ConfigFile(t *testing.T, dir string) string {
+	t.Helper()
+
+	mac, err := os.ReadFile(filepath.Join(e.Root, "regtest", "creds", "alice",
+		"admin.macaroon"))
+	if err != nil {
+		t.Fatalf("reading alice's macaroon: %v", err)
+	}
+	macPath := filepath.Join(dir, "winthistle.macaroon")
+	if err := os.WriteFile(macPath, mac, 0o600); err != nil {
+		t.Fatalf("writing %s: %v", macPath, err)
+	}
+
+	body := fmt.Sprintf(`[lnd]
+address  = %q
+tls_cert = %q
+macaroon = %q
+
+[bitcoind]
+address = %q
+user    = %q
+pass    = %q
+wallet  = %q
+
+[server]
+bind    = "127.0.0.1:7420"
+journal = %q
+
+[limits]
+abort_after_signing_seconds = 300
+require_confirmed_inputs    = true
+
+[fees]
+floor_sat_per_vb = 1.0
+
+[[signer]]
+label = %q
+
+[[signer]]
+label = %q
+`,
+		aliceAddr, filepath.Join(e.Root, "regtest", "creds", "alice", "tls.cert"),
+		macPath, coreAddr, e.rpcUser, e.rpcPass, ColdWallet,
+		filepath.Join(dir, "runs.db"), Cold1, Cold2)
+
+	path := filepath.Join(dir, "winthistle.toml")
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}
+
+// BatchFile writes a batch file naming these peers at this size.
+//
+// The policy is deliberately not LND's default — see internal/policy — so that
+// "applied" is distinguishable from "never touched" anywhere this batch is
+// driven to settlement.
+func BatchFile(t *testing.T, dir string, peers []string, amountSat int64) string {
+	t.Helper()
+
+	var b strings.Builder
+	b.WriteString("[policy]\nbase_fee_msat = 0\nfee_rate_ppm = 250\n" +
+		"time_lock_delta = 144\n")
+	for _, p := range peers {
+		fmt.Fprintf(&b, "\n[[channel]]\npeer       = %q\namount_sat = %d\n", p, amountSat)
+	}
+
+	path := filepath.Join(dir, "batch.toml")
+	if err := os.WriteFile(path, []byte(b.String()), 0o600); err != nil {
+		t.Fatalf("writing %s: %v", path, err)
+	}
+	return path
+}

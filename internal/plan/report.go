@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
@@ -30,6 +31,7 @@ func (p *Plan) Document() string {
 	// The address goes on its own line. A bech32 P2WSH address is 62 characters
 	// and a taproot one 62 too, so anything sharing a line with one overruns the
 	// pane — and this is copy the operator reads character by character.
+	funding := 0
 	for _, n := range named {
 		if n.Kind == ChangeOut {
 			continue
@@ -40,7 +42,15 @@ func (p *Plan) Document() string {
 		}
 		b.WriteString("  " + label + "\n")
 		b.WriteString("      " + n.Address + "\n")
-		b.WriteString("      " + prose.Sats(n.AmountSat) + "\n\n")
+		b.WriteString("      " + prose.Sats(n.AmountSat) + "\n")
+		// Outputs sorts by kind and is stable, so the funding outputs arrive in
+		// channel order — which is what lets the policy sit beside the amount it
+		// belongs to rather than in a table somewhere else.
+		if n.Kind == Funding && funding < len(p.Channels) {
+			b.WriteString(policyLines(p.Channels[funding]))
+			funding++
+		}
+		b.WriteString("\n")
 	}
 
 	b.WriteString(prose.Table([]prose.Row{
@@ -111,6 +121,41 @@ func (p *Plan) Document() string {
 		for _, e := range p.Inputs.Excluded {
 			b.WriteString(prose.Wrap(e, "      ", "        "))
 		}
+	}
+	return b.String()
+}
+
+// policyLines is the forwarding policy shown beside a channel's amount.
+//
+// It is here rather than in a table of its own because it is the same decision:
+// the operator is looking at what this channel costs, and this is what it will
+// earn. After this document is approved nobody is asked again — Phase 2 applies
+// the policy in a loop with no human in it.
+func policyLines(ch Channel) string {
+	var b strings.Builder
+	switch {
+	case ch.Private && ch.Policy == nil:
+		b.WriteString("      unannounced, so it routes for nobody and its " +
+			"policy is moot\n")
+	case ch.Private:
+		b.WriteString("      unannounced — " + ch.Policy.Summary() + "\n")
+		b.WriteString(prose.Wrap("An unannounced channel is not in the graph, so "+
+			"nobody will route through it and this policy only applies to whatever "+
+			"the peer sends directly.", "      ", "      "))
+	case ch.Policy == nil:
+		b.WriteString(prose.Wrap(fmt.Sprintf(
+			"No forwarding policy chosen, so this channel will route at LND's "+
+				"defaults — %d msat base and %d ppm, CLTV delta %d — from the moment "+
+				"it goes active, and stay there. On a channel this size that is close "+
+				"to free routing for whoever notices first.",
+			policy.DefaultBaseFeeMsat, policy.DefaultFeeRatePPM,
+			policy.DefaultTimeLockDelta), "      ", "      "))
+	case ch.Policy.IsLNDDefault():
+		b.WriteString("      policy " + ch.Policy.Summary() + "\n")
+		b.WriteString(prose.Wrap("That is exactly what LND would have used anyway, "+
+			"so the policy pass has nothing to win here.", "      ", "      "))
+	default:
+		b.WriteString("      policy " + ch.Policy.Summary() + "\n")
 	}
 	return b.String()
 }

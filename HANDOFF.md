@@ -3,13 +3,21 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State: all three phases exist as packages, and every one of them is exercised
-against the live regtest node.** Phase 0 — peer pre-flight, fee rate, anchor
-reserve, dress rehearsal — Phase 1's armed window and its single publish, and
-Phase 2's confirmation watch, policy pass and CPFP child. The abort paths, the
-run journal, the generated macaroon, the watch-only Core wallet and the
-batch-plan verifier all still hold. What is missing is the server, the UI,
-`winthistle doctor`, signet, and the mainnet cold probe.
+**State: the three phases exist as packages and something now composes them.**
+`winthistle run` drives Phase 0 — peer pre-flight, fee rate, anchor reserve,
+dress rehearsal — then Phase 1's armed window and its single publish, then
+Phase 2's confirmation watch and policy pass; `winthistle doctor` runs every
+pre-flight in order and prints the command that fixes each failure;
+`winthistle recover` is the recovery screen and the abort behind it. All of it
+is configured by `winthistle.toml` and a batch file, and all of it is exercised
+against the live regtest node. What is missing is the server, the UI, signet,
+and the mainnet cold probe.
+
+`winthistle run --stop-before-publish` is the cold probe, and composing it
+forced **exactly one branch** — an `if` between `arm.Finalize` and
+`arm.Publish`. That was the thing worth watching: the design's claim is that the
+probe is the real run with the final call withheld rather than a second path to
+the same place, and it survived. See "The composition layer" below.
 
 All four of `docs/design.html`'s open questions are now answered. The two that
 were still open both sat past the broadcast line, and both are closed by Phase 2:
@@ -47,7 +55,12 @@ mainnet and the abort paths work.
 | `internal/peers` | Phase 0's peer pre-flight: the key check, the local gossip graph, and the shim probe that is the only authoritative answer — plus what that probe costs |
 | `internal/rehearsal` | Phase 0's dress rehearsal and the measurement the 5:00 abort gate compares against |
 | `internal/settle` | Phase 2: the confirmation watch, `UpdateChannelPolicy` polled unconditionally, LND's funding horizon, and the CPFP child |
-| `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, and aborts what it opened |
+| `internal/policy` | one channel's forwarding policy: chosen in Phase 0, shown in the plan document, applied by Phase 2. Its own package because those are three packages, and `internal/settle` already imports `internal/plan` |
+| `internal/config` | `winthistle.toml` and the batch file, read by a strict reader that refuses every key it does not know — and refuses `allow_rbf` even when spelled correctly |
+| `internal/signers` | how a base64 PSBT reaches a device and a partial comes back: a command, or a file handshake |
+| `internal/doctor` | every pre-flight in order, each failure with the command that fixes it. Also the credential check, which asks LND rather than calling things |
+| `internal/run` | the composition: Phase 0, the armed window, Phase 2, and the abort that any failure ends in |
+| `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, aborts what it opened, and writes a `winthistle.toml` and a batch file pointing at the harness |
 
 `internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
 had the only copy of the wrapper and the satoshi formatter. Nothing about the
@@ -994,43 +1007,231 @@ The copy is tested for what it must say and for the pane it must fit in.
 beside a label does not fit 78 columns, so txids and addresses now get their own
 line at a small indent throughout.
 
+## The composition layer
+
+Every package existed and nothing called them. `prose.RecoveryList`,
+`journal.Unfinished`, `rehearsal.Gate`, `peers.ReadyToArm`, `fees.Estimate`,
+`settle.Settle` and `reserve.Finding.StillApplies` all had zero non-test
+callers, and the only place the whole sequence was assembled was `drive()` in
+`internal/arm/arm_regtest_test.go` — a fixture, which cannot ship. That is what
+`internal/config`, `internal/policy`, `internal/signers`, `internal/doctor` and
+`internal/run` are: four commands' worth of wiring and no new mechanism.
+
+One of that list still has no caller: `settle.BuildChild`. It is not an
+oversight — see next actions — and it is the only one.
+
+### `winthistle.toml`, and the two keys nothing read
+
+`internal/config` reads the design's block, with a reader that is deliberately
+not a TOML parser. Strictness is the feature: **every unknown section and every
+unknown key is an error naming its line.** The file is read once, at the start
+of an evening that may end with a cold wallet on the table, and the failure
+worth engineering against is not the malformed file — that one announces itself
+— but the well-formed file with `abort_after_signing_seconds` misspelled,
+running to completion on a default nobody chose.
+
+Two keys were named by code and read from nowhere, and both are now read:
+
+- `limits.abort_after_signing_seconds` defaults to
+  `rehearsal.DefaultAbortAfterSigning` rather than to 300 written a second time,
+  and `winthistle run` passes it to `rehearsal.Run` as the gate.
+- the fee floor is `[fees] floor_sat_per_vb`, which the design's block did not
+  have at all. **It has no default and it must not get one.** Zero means the
+  operator set none, which is legal and is exactly the state that makes a node
+  with no estimate an error rather than a guess. `doctor` warns when it is unset
+  even on a node that has an estimate today.
+
+**`allow_rbf` is refused, including when it is set to `false`.** It was in the
+design's own config block, so an operator will paste it. Honouring it would be a
+lie; ignoring it silently is worse, because somebody who writes `allow_rbf =
+true` and watches the run proceed will reasonably conclude it was honoured. So
+the reader refuses the line, says why, and the design doc no longer offers it.
+
+The bind check is the other thing enforced here: a wildcard bind is refused
+because `0.0.0.0` is not an interface anybody chose, while an explicit
+non-loopback address is accepted with a warning — that is the design's "unless a
+config key explicitly names the interface", read literally.
+
+### The per-peer policy table
+
+`settle.Policy` had no chooser; the tests hand-built one. It is now
+`policy.Policy`, in a package of its own, because three packages need it and two
+of them cannot import each other — `internal/settle` already imports
+`internal/plan` for the CPFP arithmetic. `settle.Policy` is an alias, so nothing
+in Phase 2 changed.
+
+The batch file is where it is chosen: a `[policy]` block every `[[channel]]`
+inherits and may override key by key. The plan document renders it **beside the
+amount**, which is the point: a channel's capacity and what it will charge to
+route are one decision, and after that document is approved nobody is asked
+again. A channel with no policy is not neutral — it is 1000 msat and 1 ppm — so
+the document says that in full sentences rather than leaving a blank.
+
+`plan.Outputs` now validates every policy, which is where a bad one has to be
+caught. Phase 2 is too late: `UpdateChannelPolicy` reports an invalid CLTV delta
+*inside a successful response*, the transaction is public by then, and the
+channel routes at 1 ppm until a human notices.
+
+### `winthistle doctor`, and how the credential is checked
+
+Ten checks, in order, each failure carrying the command that fixes it: the
+config file, LND, the macaroon, Core, the cold wallet, the coins, the anchor
+reserve, the fee rate, the peers (with `--batch`), and the journal — including
+Core's coin locks that no run in the journal claims, which is what a crash
+between `walletcreatefundedpsbt` and the journal write leaves behind.
+
+The credential check is the part with a finding in it.
+
+**`lnrpc.CheckMacaroonPermissions` answers the question without calling
+anything.** The obvious way to find out whether a macaroon authorises a method
+is to invoke it, and for most of this build's list that is a bad idea: the
+macaroon interceptor runs before the handler, so a *refused* method costs
+nothing, but an *allowed* one runs, and `AbandonChannel`, `FundingStateStep`,
+`OpenChannel` and `PublishTransaction` are not things to try with junk arguments
+to see what happens. `CheckMacaroonPermissions` takes the macaroon to examine in
+the request rather than using the caller's, and `macaroons.Service.CheckMacAuth`
+then runs exactly the check the interceptor would — the coarse ops first, then
+the `uri:<full_method>` form this tool's credential actually carries. No handler
+is reached. It earns one registry entry, `macaroon:read`, whose only method is
+that read-only self-check.
+
+That also checks the half nothing else could: **the never-list, against the
+file**. The registry promises the credential cannot send coins, close a channel,
+sign a message or widen itself, and that is a promise about the operator's
+macaroon rather than about this build's intentions — an operator pointing the
+tool at `admin.macaroon` has broken every part of it while everything still
+works. `Capability` now carries the LND ops each forbidden method needs, and
+`doctor` asks about all ten. The harness test asserts exactly this: the harness
+credential is a copy of `admin.macaroon`, so `doctor` is *expected* to fail, and
+it fails naming "send coins on-chain", "close a channel" and "bake itself a
+wider credential".
+
+**The two refusals that look alike.** Both carry bakery's plain "permission
+denied" text and they mean opposite things:
+
+- `codes.InvalidArgument` from `CheckMacaroonPermissions` is the *answer*: the
+  macaroon being examined does not authorise that method.
+- an untyped error with the same text is LND's interceptor refusing *our* call.
+  `bakery.ErrPermissionDenied` is an `errgo` error with no gRPC status attached,
+  so it arrives as `codes.Unknown`. It means the configured credential is too
+  narrow to run the check at all — which is itself the diagnosis: it was baked
+  before this build existed.
+
+Matching on the code alone confuses them and matching on the text alone does
+too. `doctor.tooNarrow` matches both, and `TestTheTwoRefusalsThatLookAlike` pins
+it.
+
+### `winthistle run`, and the one branch
+
+`run.Do` is `drive()` with the gates actually wired: `rehearsal.Gate` and
+`peers.ReadyToArm` before `arm.Open`, `reserve.Finding.StillApplies` once the
+streams are open, and the journal at the publish call. `--probe` is opt-in and
+then waits out `Probe.HoldsUntil` before arming, because a successful probe is
+step 2 with the answer thrown away and the peer holds that reservation for about
+eleven minutes.
+
+**`--stop-before-publish` forced exactly one branch**, and it is worth being
+precise because the cold probe's whole value rests on it. Everything through
+`arm.Finalize` — the streams, the plan, the build, our verifier, *n*
+`psbt_verify`, the signing round, the merge, `testmempoolaccept`, *n*
+`psbt_finalize`, *n* `chan_pending`, the backup export — is unconditional, and
+the flag is read once, in one `if`, between `arm.Finalize` and `arm.Publish`.
+It is read nowhere else. The type system carries the rest: `Publish` takes an
+`*arm.Armed` whose raw transaction is in an unexported field only `Finalize`
+fills, so there is no second way to reach step 9 to be tempted by.
+
+What differs *after* the branch is a fact rather than a path: nothing was
+published, so the run ends through the abort path — which is the other half of
+what the probe proves, and the reason the build order was inverted.
+
+**Any failure inside the armed window ends the same way.** Nothing has been
+broadcast, so the answer is always cancel the shims, abandon what reached
+pending, release the locks — and `run` takes it rather than printing a
+suggestion, through `journal.Recover`, which is the same call `winthistle
+recover` makes and which refuses outright to abort a run that reached the
+publish call. `arm.Open`'s partial failure is journalled *before* the error is
+returned, because a stream that opened has a pending channel id that is the only
+handle able to release it.
+
+`winthistle recover` with no argument is `journal.Unfinished` plus
+`prose.RecoveryList`; with a run id it is `prose.Recovery`, then
+`journal.Recover` with `prose.BluntConfirmation` as the prompt. That copy has
+now been shown to something: it is what the regtest tests authorise through, and
+it is what an operator sees on every abort, because LND's safe flag rejects
+every channel this app opens.
+
+### Signers, and the transport seam
+
+`run.Deps.Signers` is an interface with one useful method, `Round(name)`,
+returning `[]rehearsal.Device` — the same `rehearsal.Signer` the dress rehearsal
+measures, which is what makes the measurement a prediction about the real round
+rather than about a different code path. `internal/signers` implements two
+transports: a command from `winthistle.toml` reading a base64 PSBT on stdin, and
+a file handshake that writes a file, prints what to do with it, and waits.
+
+The round's *name* is in the file names, and stale answers are deleted before
+the question is written. That is not tidiness: the rehearsal and the batch are
+two rounds minutes apart, and a signed file left over from the first and picked
+up by the second is a signature over the decoy — which `internal/combine` would
+refuse at the worst possible moment, with a message about a moved txid rather
+than about a leftover file.
+
+### Two smaller things found while wiring it
+
+- **`ExportAllChannelBackups` is node-wide, not batch-scoped.** Obvious in
+  hindsight from the name, and it matters for what a test may assert: on the
+  harness the snapshot covers all 33 channels alice has, not the 2 in the batch.
+  Assert "at least the batch", never "exactly n".
+- **`testmempoolaccept` had three copies.** It is now
+  `bitcoind.Client.TestMempoolAccept`, called by `internal/rehearsal` and
+  `internal/run`. A second function that takes a raw transaction and talks to
+  Core is a second thing to check when reading this repo for broadcast paths,
+  which is the review CLAUDE.md's "no other publish call site" rule invites.
+
 ## Next actions, in order
 
 1. **The server and the UI.** One binary, loopback bind, a startup token, strict
    Origin and Host checks, no CORS. The transports the design asks for — base64,
    file up/down, animated QR — and the countdown. Every screen it has to render
-   now exists as text: the peer reports, the fee report, the reserve report, the
-   plan document, the rehearsal measurement, the settlement report and the
-   recovery screens. What is missing is the shell around them and the state
-   machine that decides which one is showing.
-2. **`winthistle doctor` and `winthistle.toml`.** The registry, the reserve
-   pre-flight, the coldwallet pre-flight, the coin filter and now the fee source
-   are all already the checks it has to run; what is missing is the config
-   plumbing and the one place that runs them in order. Two config keys are named
-   by code and not yet read from anywhere: `limits.abort_after_signing_seconds`
-   (`rehearsal.DefaultAbortAfterSigning`) and the fee floor
-   (`fees.Request.FloorSatPerVB`, which has no default *on purpose* — see the
-   refusal to guess).
-3. **The peer-policy table.** Phase 2 applies `settle.Policy` per peer and Phase 0
-   is where it is chosen, but nothing chooses it yet: the tests hand-build one.
-   It belongs in the plan document, beside the amounts, because it is a decision
-   the operator should review at the same moment.
-4. **Signet, for the two things regtest cannot reach.** The descriptor-import
+   exists as text and every one of them now has a caller: the peer reports, the
+   fee report, the reserve report, the plan document, the rehearsal measurement,
+   the settlement report and the recovery screens. `internal/run` is the state
+   machine in the order the UI needs it; what is missing is the shell, the
+   transports and the fact that a browser cannot block on a signing round the
+   way a terminal can.
+2. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
-   `internal/coldwallet/coldwallet_regtest_test.go`.
-5. **The mainnet cold probe.** Everything it needs now exists: steps 1 to 8 are
-   the production code path, step 9 is one call it simply does not make, and the
-   abort paths it terminates through are tested.
+   `internal/coldwallet/coldwallet_regtest_test.go`. `winthistle doctor` reports
+   the prune horizon against the birthday and has never had one to report.
+3. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
+   Everything it needs exists: steps 1 to 8 are the production code path, step 9
+   is one call inside one `if` that it does not make, and the abort path it
+   terminates through runs on every failure and is tested on both.
+4. **`winthistle setup`, or the honest absence of it.** `coldwallet.Install` —
+   create the watch-only wallet, checksum and import the descriptors, read them
+   back, derive the round-trip address check — still has no caller outside its
+   tests. `doctor` diagnoses a wallet that has not been set up and prints the
+   `bitcoin-cli importdescriptors` line, which is a worse experience than the
+   guided screen `Install` was written for. It needs the descriptors and the
+   birthday, which is the one part of setup no program can supply.
+5. **`winthistle bump`.** `settle.BuildChild` is the only Phase 2 function still
+   without a caller. It is not a small command: the child is returned *unsigned*
+   because the change belongs to cold storage, so bumping a stalled batch is a
+   second signing round with its own transport, its own plan-shaped verification
+   and its own journal row. The settlement report warns about the horizon and
+   says CPFP is the remedy; nothing yet builds one outside the tests.
 
 Done since the last handoff, all from the previous list:
 
-- **Phase 0** — `internal/peers`, `internal/fees`, `internal/rehearsal`, and the
-  reserve wiring that finally exercises the private path.
-- **Phase 2** — `internal/settle`: the policy pass, the confirmation watch, the
-  funding horizon and the CPFP child.
-- **The recovery screen's copy** — `internal/prose/recovery.go`, the debt
-  `CLAUDE.md` said to pay before the happy path.
+- **`winthistle.toml`** — `internal/config`, and the two keys that were named by
+  code and read from nowhere.
+- **The per-peer policy table** — `internal/policy`, chosen in the batch file
+  and rendered in the plan document beside the amount.
+- **`winthistle doctor`** — every pre-flight in order, with the command that
+  fixes each, and a credential check that asks LND rather than calling things.
+- **`winthistle run` and `winthistle recover`** — the composition, the gates
+  wired, and the abort that any failure ends in.
 
 ## Watch out for
 
@@ -1170,6 +1371,48 @@ Done since the last handoff, all from the previous list:
   finalizes one at a time and reads each receipt, so it never gets close — but
   this is why, and not merely tidiness.
 
+- **A macaroon refusal has two shapes and they mean opposite things.**
+  `codes.InvalidArgument` from `CheckMacaroonPermissions` is the answer about
+  the macaroon in the request; an *untyped* error carrying the same "permission
+  denied" text is the interceptor refusing the caller. Match both, as
+  `doctor.tooNarrow` does — the code alone confuses them and the text alone does
+  too.
+
+- **`ExportAllChannelBackups` is node-wide.** The snapshot covers every channel
+  the node has, not the batch's. A test may assert "at least the batch"; on the
+  harness it comes back with 33.
+
+- **`internal/run`'s regtest tests open real channels and abort them.** Two
+  channels to two peers for the cold-probe test, one stream for the failure
+  test, all cancelled or abandoned — so they add to the pending-channel pressure
+  every abort test creates. Same cure: `make -C regtest mine N=2016`.
+
+- **The composition's failure path aborts without asking.** `run.Do` tears the
+  batch down on any failure between `arm.Open` and the publish, because nothing
+  has been broadcast and the answer is always the same. It does ask before using
+  LND's blunt abandon flag — `prose.BluntConfirmation` — and that prompt is
+  asked on **every** abort of a channel that reached `chan_pending`, because
+  LND's safe flag rejects every channel this app opens.
+
+  A piped answer is accepted; end of input is not. The first live CLI probe ran
+  with stdin closed, refused its own teardown, and left two channels pending —
+  correct by the old rule ("not a terminal, so no") and useless, because the
+  operator then had to recover by hand from a run that had done everything
+  right. The rule is now about whether anybody answered rather than about what
+  kind of file stdin is: `echo y | winthistle recover <id>` works, EOF is no,
+  and the guard that actually matters is unchanged — `abort.AbandonPending`
+  asks `PendingChannels` itself and offers no confirmation at all for a channel
+  that is not pending.
+
+- **`--stop-before-publish` exits non-zero if the teardown does not finish.**
+  The probe proving the sequence and then leaving two channels pending is not a
+  success, and a probe is usually run from a terminal somebody walks away from.
+
+- **The config reader refuses unknown keys, which makes it strict about its own
+  history too.** Renaming a key is a breaking change to every operator's file,
+  and the failure is loud rather than silent. That is the intent; it is also
+  worth remembering before renaming one.
+
 ## Open questions
 
 Listed at the end of `docs/design.html`. All of them are now closed, four by the
@@ -1189,16 +1432,25 @@ policy landed and read back out of the announced graph. That is not the same as
 proving it on mainnet, and the design's answer to *that* still stands: make the
 first live batch a deliberately small one and treat it as commissioning.
 
-`docs/design.html` itself is now out of date in three places, and the doc is the
-spec so the corrections belong in it rather than only here:
+Those three corrections were made in `docs/design.html` itself — `minimum_depth`
+cannot be read, the shim probe is free only when it is refused, and the *peer*
+is the one that forgets after 2016 blocks. The doc is the spec, so they belong
+there rather than only here, and this file used to say they were still
+outstanding. They are not.
 
-- Phase 0 item 1 says to check each peer's `minimum_depth` and show "usable after
-  *k* confirmations" up front. An initiator cannot read `minimum_depth` at all.
-- The peer-validation table calls the shim probe "free and abortable". It is free
-  only when it is refused.
-- The hazard row for the funding horizon says "LND forgets the pending channel
-  after roughly 2016 blocks". The *peer* forgets; we never do, and that asymmetry
-  is the hazard.
+**Four more changes went into the doc with the composition layer**, and it has
+been republished:
+
+- the configuration block lost `allow_rbf` and gained `[fees]` and `[[signer]]`,
+  with a paragraph on why a key that changes nothing is worse than no key;
+- Phase 0 gained the step where the forwarding policy is chosen, and why it
+  belongs in the plan document beside the amounts;
+- the setup section gained how the credential is checked — by asking
+  `CheckMacaroonPermissions` rather than by calling methods — and the two
+  refusals that look alike;
+- the commissioning section names `winthistle run --stop-before-publish` and
+  says what composing it actually cost: one `if`, between `arm.Finalize` and
+  `arm.Publish`.
 
 The ten-minute clock is closed too, and the answer is not one of the two options
 the question offered. **We have no clock at all**: `pruneZombieReservations` skips

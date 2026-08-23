@@ -175,3 +175,34 @@ func (c *Client) Confirmations(ctx context.Context, txid string) (confs int64, p
 	}
 	return raw.Confirmations, true, nil
 }
+
+// TestMempoolAccept asks Core whether a raw transaction would be accepted,
+// without relaying it.
+//
+// This is the only pre-flight there is and it is specifically not a broadcast:
+// Core validates against the mempool's rules and its own policy and answers,
+// and the transaction goes nowhere. CLAUDE.md's rule that there must be exactly
+// one publish call site is why this lives here rather than being written out at
+// each of the three places that want it — a second function that takes a raw
+// transaction and talks to Core is a second thing to check when reading for
+// broadcast paths.
+func (c *Client) TestMempoolAccept(ctx context.Context, rawTxHex string) (
+	allowed bool, reason string, vsize int64, err error) {
+
+	var out []struct {
+		Allowed      bool   `json:"allowed"`
+		TxID         string `json:"txid"`
+		Vsize        int64  `json:"vsize"`
+		RejectReason string `json:"reject-reason"`
+	}
+	if err := c.Call(ctx, "testmempoolaccept",
+		[]any{[]string{rawTxHex}}, &out); err != nil {
+
+		return false, "", 0, fmt.Errorf("testmempoolaccept: %w", err)
+	}
+	if len(out) != 1 {
+		return false, "", 0, fmt.Errorf("testmempoolaccept answered about %d "+
+			"transactions", len(out))
+	}
+	return out[0].Allowed, out[0].RejectReason, out[0].Vsize, nil
+}

@@ -427,21 +427,11 @@ func freshAddress(ctx context.Context, wallet *bitcoind.Client) (string, error) 
 
 // acceptable runs testmempoolaccept, which validates without relaying.
 func acceptable(ctx context.Context, node *bitcoind.Client, rawTx []byte) (bool, string, error) {
-	var out []struct {
-		Allowed      bool   `json:"allowed"`
-		RejectReason string `json:"reject-reason"`
-	}
-	err := node.Call(ctx, "testmempoolaccept",
-		[]any{[]string{hex.EncodeToString(rawTx)}}, &out)
+	ok, reason, _, err := node.TestMempoolAccept(ctx, hex.EncodeToString(rawTx))
 	if err != nil {
-		return false, "", fmt.Errorf("offering the rehearsal transaction to "+
-			"testmempoolaccept: %w", err)
+		return false, "", fmt.Errorf("offering the rehearsal transaction to %w", err)
 	}
-	if len(out) != 1 {
-		return false, "", fmt.Errorf("testmempoolaccept answered about %d transactions",
-			len(out))
-	}
-	return out[0].Allowed, out[0].RejectReason, nil
+	return ok, reason, nil
 }
 
 func sum(v []int64) int64 {

@@ -16,6 +16,7 @@ import (
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"google.golang.org/grpc"
 
+	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/reserve"
 )
 
@@ -964,5 +965,43 @@ func TestParamsRejectsAnUnknownChain(t *testing.T) {
 		if _, err := Params(name); err != nil {
 			t.Errorf("Params(%q): %v", name, err)
 		}
+	}
+}
+
+// TestThePolicySitsBesideTheAmount.
+//
+// The forwarding policy is in the plan document because it is the same
+// decision: a channel's capacity and what it charges to route are chosen
+// together, or the second one is not chosen at all. LND opens every channel at
+// 1000 msat base and 1 ppm, and on a large channel that is close to free
+// routing for whoever notices first — so a plan that showed only the amounts
+// would have the operator approve half of it.
+func TestThePolicySitsBesideTheAmount(t *testing.T) {
+	f := newFixture(t)
+	chosen := policy.Policy{BaseFeeMsat: 0, FeeRatePPM: 250, TimeLockDelta: 144}
+	f.plan.Channels[0].Policy = &chosen
+
+	doc := f.plan.Document()
+	if !strings.Contains(doc, chosen.Summary()) {
+		t.Errorf("the plan document does not show the policy:\n%s", doc)
+	}
+	// The channel with no policy is the hazard, so it has to be louder than the
+	// one that has one, not quieter.
+	if !strings.Contains(doc, "No forwarding policy chosen") {
+		t.Errorf("a channel with no policy is not called out:\n%s", doc)
+	}
+	if !strings.Contains(doc, "close\nto free routing") &&
+		!strings.Contains(doc, "close to free routing") {
+
+		t.Errorf("the document does not say what LND's defaults cost:\n%s", doc)
+	}
+
+	// And the policy is checked here rather than in Phase 2, where
+	// UpdateChannelPolicy reports an invalid parameter inside a *successful*
+	// response and the transaction is already public.
+	bad := policy.Policy{TimeLockDelta: policy.MinTimeLockDelta - 1}
+	f.plan.Channels[0].Policy = &bad
+	if _, err := f.plan.Outputs(); err == nil {
+		t.Fatal("a plan carrying a CLTV delta LND refuses was accepted")
 	}
 }

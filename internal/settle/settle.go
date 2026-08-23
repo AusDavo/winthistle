@@ -80,6 +80,7 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"google.golang.org/grpc"
 )
@@ -100,15 +101,16 @@ const (
 	MaxFundingAmount = int64(1<<24) - 1
 
 	// LND's default forwarding policy, which is what a new channel routes at
-	// until this package replaces it.
-	DefaultBaseFeeMsat   = 1000
-	DefaultFeeRatePPM    = 1
-	DefaultTimeLockDelta = 80
+	// until this package replaces it, and the bounds UpdateChannelPolicy will
+	// accept. Re-exported from internal/policy, which owns the type: Phase 0
+	// chooses the policy, the plan document shows it, and this package applies
+	// it, so the value lives where all three can see it.
+	DefaultBaseFeeMsat   = policy.DefaultBaseFeeMsat
+	DefaultFeeRatePPM    = policy.DefaultFeeRatePPM
+	DefaultTimeLockDelta = policy.DefaultTimeLockDelta
 
-	// MinTimeLockDelta and MaxTimeLockDelta are what UpdateChannelPolicy will
-	// accept: routing.MinCLTVDelta and routing.MaxCLTVDelta.
-	MinTimeLockDelta = 18
-	MaxTimeLockDelta = 65535
+	MinTimeLockDelta = policy.MinTimeLockDelta
+	MaxTimeLockDelta = policy.MaxTimeLockDelta
 )
 
 // Client is the slice of LND settlement uses.
@@ -139,52 +141,15 @@ type Chain interface {
 }
 
 // Policy is one channel's intended forwarding policy, chosen in Phase 0.
-type Policy struct {
-	BaseFeeMsat   int64
-	FeeRatePPM    uint32
-	TimeLockDelta uint32
-
-	// MinHTLCMsat is applied only when set: LND distinguishes "not specified"
-	// from zero with its own flag, and specifying zero is a different policy
-	// from leaving the existing minimum alone.
-	MinHTLCMsat *int64
-
-	// MaxHTLCMsat of zero leaves LND's own maximum in place.
-	MaxHTLCMsat uint64
-
-	// InboundBaseFeeMsat and InboundFeeRatePPM must be zero or negative unless
-	// the node runs with --accept-positive-inbound-fees; LND refuses a positive
-	// value outright rather than clamping it.
-	InboundBaseFeeMsat int32
-	InboundFeeRatePPM  int32
-}
-
-// Validate refuses a policy LND would refuse, before a channel is waiting on it.
 //
-// Cheap and worth doing early: an out-of-range CLTV delta produces the same
-// refusal on the hundredth poll as on the first, and a settlement loop that
-// retries a permanently invalid policy forever is a channel routing at 1 ppm
-// with a green tick beside it.
-func (p Policy) Validate() error {
-	switch {
-	case p.TimeLockDelta < MinTimeLockDelta:
-		return fmt.Errorf("a CLTV delta of %d is below LND's minimum of %d",
-			p.TimeLockDelta, MinTimeLockDelta)
-	case p.TimeLockDelta > MaxTimeLockDelta:
-		return fmt.Errorf("a CLTV delta of %d is above LND's maximum of %d",
-			p.TimeLockDelta, MaxTimeLockDelta)
-	case p.BaseFeeMsat < 0:
-		return fmt.Errorf("a base fee of %d msat is not a fee", p.BaseFeeMsat)
-	case p.InboundBaseFeeMsat > 0 || p.InboundFeeRatePPM > 0:
-		return fmt.Errorf("inbound fees must be zero or negative unless the node " +
-			"runs with --accept-positive-inbound-fees, and LND refuses a positive " +
-			"value rather than clamping it")
-	}
-	return nil
-}
+// An alias rather than a definition: internal/policy owns the type so that the
+// plan document can show the policy beside the amount it belongs to. This
+// package is where it is applied, and where LND's behaviour around applying it
+// is documented — see the package comment.
+type Policy = policy.Policy
 
-// request renders the policy as LND's own.
-func (p Policy) request(cp lnd.ChannelPoint) *lnrpc.PolicyUpdateRequest {
+// request renders a policy as LND's own.
+func request(p Policy, cp lnd.ChannelPoint) *lnrpc.PolicyUpdateRequest {
 	req := &lnrpc.PolicyUpdateRequest{
 		Scope:         &lnrpc.PolicyUpdateRequest_ChanPoint{ChanPoint: cp.RPC()},
 		BaseFeeMsat:   p.BaseFeeMsat,
@@ -318,7 +283,7 @@ func ApplyPolicy(ctx context.Context, cli Client, m Member) (PolicyOutcome, erro
 		}, nil
 	}
 
-	resp, err := cli.UpdateChannelPolicy(ctx, m.Policy.request(m.Channel))
+	resp, err := cli.UpdateChannelPolicy(ctx, request(m.Policy, m.Channel))
 	if err != nil {
 		return PolicyOutcome{}, fmt.Errorf("setting the policy on the channel to %s "+
 			"(%s): %w", short(m.Peer), m.Channel, err)

@@ -4,15 +4,15 @@ Open a batch of Lightning channels in one on-chain transaction, funded directly
 from cold storage — including multisig cold storage — through a local, guided
 web interface.
 
-> ### Status: no funding flow yet. Do not use.
+> ### Status: works on regtest, never run on mainnet. Do not use.
 >
-> What exists is the parts that ship first on purpose: the abort paths, the run
-> journal, the anchor-reserve pre-flight, and the generated macaroon. There is no
-> way to open a channel with this yet. The central safety property below was
-> verified by reading LND's source and **has since been observed on regtest at
-> *n* = 3** — three channels armed from one transaction, an empty mempool checked
-> after every finalize — but never on mainnet. Nothing here should be pointed at
-> a node holding funds you care about.
+> There is a working command line — `winthistle doctor`, `winthistle run`,
+> `winthistle recover` — and the web interface described in the design does not
+> exist yet. The central safety property below was verified by reading LND's
+> source and **has since been observed on regtest at *n* = 3**: three channels
+> armed from one transaction, with an empty mempool checked after every
+> finalize, including the last. It has never been run against mainnet. Nothing
+> here should be pointed at a node holding funds you care about.
 
 ## What it replaces
 
@@ -41,6 +41,20 @@ we hold the only copy of it until the gate opens.
 LND's "DO NOT PUBLISH … OR THE FUNDS CAN BE LOST" warning is about *ordering*,
 not authorship. The "all but the last" idiom exists because `lncli` has no way
 to broadcast afterwards; an orchestrator is not bound by that.
+
+## Trying it
+
+```sh
+winthistle example-config > winthistle.toml   # then edit it
+winthistle print-macaroon-command | sh        # bake the narrow credential
+winthistle doctor                             # every prerequisite, with fixes
+winthistle example-batch > batch.toml         # then edit it: peers, amounts, policy
+winthistle run --batch batch.toml --stop-before-publish
+```
+
+The last line is the cold probe: the whole production sequence, with the one
+call that broadcasts withheld and the batch taken apart afterwards. It is not a
+test mode and not a separate code path — see the design's commissioning section.
 
 ## Documentation
 
