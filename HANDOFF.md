@@ -1810,12 +1810,58 @@ claiming they never existed.
 1. **The server and the UI.** One binary, loopback bind, a startup token, strict
    Origin and Host checks, no CORS. The transports the design asks for — base64,
    file up/down, animated QR — and the countdown. Every screen it has to render
-   exists as text and every one of them now has a caller: the peer reports, the
-   fee report, the reserve report, the plan document, the rehearsal measurement,
-   the settlement report and the recovery screens. `internal/run` is the state
-   machine in the order the UI needs it; what is missing is the shell, the
-   transports and the fact that a browser cannot block on a signing round the
-   way a terminal can.
+   exists as text and every one of them now has a caller: the setup screens and
+   the round-trip address check, the peer reports, the fee report, the reserve
+   report, the plan document, the rehearsal measurement, the settlement report
+   and the recovery screens. `internal/run` is the state machine in the order the
+   UI needs it. There is no HTTP anywhere in this repository yet — the only
+   `net/http` is bitcoind's JSON-RPC client — and `[server] bind` already exists
+   with `config.checkBind` refusing a wildcard, while the token does not.
+
+   **Three things make this harder than serving those strings, and all three
+   want deciding before any handler is written**, because each of them decides
+   the shape of everything after it.
+
+   1. *A browser cannot block on a signing round the way a terminal can.* There
+      are exactly four blocking callback seams and the CLI fills all of them from
+      stdin: `rehearsal.Signer` (a device returns a partial), `abort.Confirmation`
+      (`i_know_what_i_am_doing`), `bump.Approve`, and `setup.Ask` — the last of
+      which is three-way, because a comparison nobody made must never be
+      recorded. So: does `run.Do` stay a straight-line blocking function driven
+      by a goroutine, with the HTTP handlers feeding those callbacks over
+      channels, or does it become an explicit state machine the handlers step?
+      The first keeps the CLI and the UI on one code path and preserves the
+      property this file is careful about — `--stop-before-publish` is one `if`
+      between `arm.Finalize` and `arm.Publish` and the flag is read nowhere else.
+      The second is the shape a web application wants, and it would put a second
+      route through the armed window. Whichever it is, write down what stops it
+      becoming a second way to reach step 9. The registry's pinned count of 2 for
+      `WalletKit.PublishTransaction` is the mechanical half of that answer and a
+      web handler is exactly where a third call site appears.
+
+   2. *The armed window has a clock and a browser tab does not.* Ctrl-C cancels
+      the context and `run` unwinds through the abort path — cancel the shims,
+      abandon what reached pending, release Core's locks — and that is tested. A
+      tab closing is not a signal. Decide what happens to a batch when the
+      operator's browser goes away mid-window, and whether that answer is the
+      same as Ctrl-C's. **If it is not the same, that difference is the most
+      dangerous thing in the change and it belongs in this file.**
+
+   3. *There are twelve `Report() string` renderers*, wrapped to
+      `prose.ProseWidth`, fitted to `prose.PaneWidth`, with tests that have
+      caught real overruns. Does the UI serve them verbatim in a `<pre>`, or
+      re-render each as HTML? Verbatim means the design's "guided web UI" is a
+      terminal in a browser. Re-rendering means every piece of operator-facing
+      copy has two renderings — and `CLAUDE.md` says the recovery screen's
+      wording is the highest-stakes copy in the product. Whichever it is, say
+      what stops the two drifting.
+
+   Two things already established that the UI should not re-derive: the countdown
+   is the *peers'* clock rather than ours, because `pruneZombieReservations`
+   skips PSBT reservations so our node never expires one; and `internal/signers`
+   already has two working transports — a command on stdin/stdout, and a file
+   handshake keyed on the round name so a rehearsal signature cannot be picked up
+   as the batch's. `docs/design.html`'s hosting section is the spec.
 2. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
