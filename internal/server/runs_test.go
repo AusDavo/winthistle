@@ -22,7 +22,7 @@ import (
 // and in HANDOFF.md, because it is the most dangerous part of the change.
 func TestAClosingTabDoesNotTouchTheRun(t *testing.T) {
 	s := testServer(t)
-	run := s.Runs.Add("run-1")
+	run := s.Runs.add("run-1")
 	run.Write([]byte("Phase 0\n"))
 
 	// First tab attaches.
@@ -56,8 +56,8 @@ func TestAClosingTabDoesNotTouchTheRun(t *testing.T) {
 // addressed by its journal id, is what makes the reconnect an attach.
 func TestTheTokenIsJoinablePerRunRatherThanPerTab(t *testing.T) {
 	s := testServer(t)
-	s.Runs.Add("run-a").Write([]byte("a\n"))
-	s.Runs.Add("run-b").Write([]byte("b\n"))
+	s.Runs.add("run-a").Write([]byte("a\n"))
+	s.Runs.add("run-b").Write([]byte("b\n"))
 
 	// Two different "tabs" are only two requests carrying the same token.
 	for _, id := range []string{"run-a", "run-b", "run-a"} {
@@ -82,7 +82,7 @@ func TestTheTokenIsJoinablePerRunRatherThanPerTab(t *testing.T) {
 // is the screen that gets misread.
 func TestAFinishedRunSaysSoAndKeepsItsTranscript(t *testing.T) {
 	s := testServer(t)
-	run := s.Runs.Add("run-x")
+	run := s.Runs.add("run-x")
 	run.Write([]byte("Phase 0\n"))
 	run.Finish(errors.New("peer 2 of 3 refused: capacity below its minimum"))
 
@@ -113,9 +113,9 @@ func TestARunFromAnEarlierProcessIsNotHere(t *testing.T) {
 // came back for, and one from ten minutes ago is history.
 func TestRunsAreListedNewestFirst(t *testing.T) {
 	s := testServer(t)
-	first := s.Runs.Add("first")
-	second := s.Runs.Add("second")
-	third := s.Runs.Add("third")
+	first := s.Runs.add("first")
+	second := s.Runs.add("second")
+	third := s.Runs.add("third")
 	// Add stamps time.Now(), and three calls in a row can land on the same
 	// instant on a coarse clock. Spread them so the order is the ordering rather
 	// than the map.

@@ -1,6 +1,11 @@
 package server
 
 import (
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -31,14 +36,21 @@ import (
 // against, and the peers' ten minutes, which is their clock and not ours — or
 // the operator's Ctrl-C on the process. Not the transport.
 //
-// # It has no production caller yet
+// # One run at a time
 //
-// The POST that starts a run is the next slice, along with the four callback
-// seams. Registry and Run are built now because the shape of the attach model
-// had to be decided before any handler was written, and this is the shape: the
-// attach handler reads it, and nothing writes to it yet. That is the one place
-// in this repository where written-but-uncalled code exists, and it is called
-// out here rather than left to be discovered.
+// Start refuses a second concurrent run, and the refusal belongs here rather
+// than in the handler for the same reason the rest of decision 2 does: it is a
+// property of the runs, not of the request that asked for one. There is one
+// journal, one cold wallet and one armed window, and two runs would collide in
+// the place it is most expensive to collide — the second run's dress rehearsal
+// builds a decoy over the same coins the first run is about to spend, so it
+// would either lose coin selection or take the inputs out from under a batch
+// that is already armed, with the cold wallet out and n peers waiting.
+//
+// The refusal covers this process. Two winthistles against one journal is a
+// different problem and is not solved here: SQLite serialises the writes, which
+// keeps the journal honest and does nothing at all about the coins. `winthistle
+// doctor` is what reports that state.
 type Registry struct {
 	mu   sync.Mutex
 	runs map[string]*Run
@@ -49,13 +61,51 @@ func NewRegistry() *Registry {
 	return &Registry{runs: map[string]*Run{}}
 }
 
-// Add puts a run in the registry, returning it so the caller can write to it.
-func (reg *Registry) Add(id string) *Run {
+// Start puts a run in the registry, or refuses because one is already going.
+//
+// cancel is what the explicit abort control calls, and it must cancel the
+// context the run was started with — not a request's. Nothing else in this
+// package holds it.
+func (reg *Registry) Start(id string, cancel func()) (*Run, error) {
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
+
+	for _, r := range reg.runs {
+		if _, finished, _ := r.State(); !finished {
+			return nil, fmt.Errorf("%w: run %s is still going", ErrRunInFlight, r.ID)
+		}
+	}
+	if _, taken := reg.runs[id]; taken {
+		return nil, fmt.Errorf("run %s is already in this registry", id)
+	}
+
+	r := reg.add(id)
+	r.cancel = cancel
+	return r, nil
+}
+
+// ErrRunInFlight is the second concurrent run, refused. See "One run at a time".
+var ErrRunInFlight = errors.New("one run at a time")
+
+// add is the unguarded constructor. Start is the only production route to it:
+// the guard is a property of the registry, so it lives on the way in.
+func (reg *Registry) add(id string) *Run {
 	r := &Run{ID: id, Started: time.Now()}
 	reg.runs[id] = r
 	return r
+}
+
+// Live is the run that is still going, or nil. The index needs it to decide
+// whether to offer the control that starts one.
+func (reg *Registry) Live() *Run {
+	reg.mu.Lock()
+	defer reg.mu.Unlock()
+	for _, r := range reg.runs {
+		if _, finished, _ := r.State(); !finished {
+			return r
+		}
+	}
+	return nil
 }
 
 // Get is the attach: a run id, and whatever that run has said so far.
@@ -86,8 +136,9 @@ func (reg *Registry) List() []*Run {
 // Run is one run's screen: what it has said, and whether it is still saying it.
 //
 // It is an io.Writer, which is what run.Deps.Out wants. That is the whole seam
-// between the composition and the UI for everything the run only reports; the
-// four things it has to ask are the callback seams, and they are the next slice.
+// between the composition and the UI for everything the run only *reports*; the
+// four things a run has to *ask* go through Ask, in ask.go, and are turned into
+// the concrete seam types by internal/webrun.
 type Run struct {
 	ID      string
 	Started time.Time
@@ -96,6 +147,101 @@ type Run struct {
 	said     strings.Builder
 	finished bool
 	err      error
+
+	// pending and replies are the seam: one question at a time, and the channel
+	// the answer arrives on. See ask.go.
+	pending *Question
+	replies chan Answer
+	seq     int
+
+	// cancel ends the run. It cancels the context the run was started with,
+	// which is the server's and never a request's — decision 2 — and it is
+	// called by exactly one thing: the explicit abort control.
+	cancel func()
+
+	// abortedAt is when that control was used, so the screen can say the run is
+	// unwinding rather than leave the operator pressing the button again.
+	abortedAt time.Time
+}
+
+// Abort ends the run the way Ctrl-C ends a CLI run: it cancels the context, and
+// the run unwinds through the abort path — cancel the shims, abandon what
+// reached pending, release Core's locks.
+//
+// This is the control decision 2 makes mandatory rather than optional. If a
+// closing tab does not abort, the operator needs a thing that does, and it has
+// to be a button rather than a disconnection. What it must not be offered for is
+// a run that reached the publish call; that check is not this method's, because
+// it is the journal's — see Launcher.AbortRefusal.
+func (r *Run) Abort() {
+	r.mu.Lock()
+	if r.abortedAt.IsZero() {
+		r.abortedAt = time.Now()
+	}
+	cancel := r.cancel
+	r.mu.Unlock()
+
+	if cancel != nil {
+		cancel()
+	}
+}
+
+// Aborting reports whether the abort control has been used on this run.
+func (r *Run) Aborting() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return !r.abortedAt.IsZero()
+}
+
+// NewRunID is the journal's key for a run: sortable, and unique even if two
+// start in the same second.
+//
+// Both front doors use this one function, so a run started from the browser and
+// a run started from the command line sort together in `winthistle recover`.
+func NewRunID() (string, error) {
+	var b [3]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "", fmt.Errorf("making a run id: %w", err)
+	}
+	return time.Now().UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:]), nil
+}
+
+// Launcher is what a POST to /runs hands the work to.
+//
+// An interface, and a narrow one, because internal/server may not name the
+// run's types at all: decision 1's import ban keeps internal/arm, internal/bump
+// and internal/journal out of this package, and a Launcher that took a
+// run.Options would drag internal/run — and with it a reachable *arm.Armed —
+// straight back in. internal/webrun implements this.
+type Launcher interface {
+	// Batch is what a run started from here would open, as text for the screen.
+	// Empty means there is nothing to start, and the control is not offered.
+	Batch() string
+
+	// Start drives one run to completion and blocks until it is done. The
+	// context is the server's, never a request's.
+	Start(ctx context.Context, r *Run, req StartRequest) error
+
+	// AbortRefusal says why this run must not be aborted, or nil.
+	//
+	// It exists so the answer comes from the journal rather than from a copy of
+	// the journal's rules kept here: a run that reached the publish call is
+	// refused with journal.ErrMayBePublished, which is the same refusal
+	// run.RecoverOne makes, because abandoning a pending channel whose funding
+	// transaction later confirms strands its funds with no force-close path.
+	AbortRefusal(ctx context.Context, runID string) error
+}
+
+// StartRequest is what the operator chose on the form. The batch itself is the
+// launcher's, from `winthistle serve --batch`.
+type StartRequest struct {
+	// Probe shim-probes every peer first, and then waits out the pending-channel
+	// slot that costs.
+	Probe bool
+
+	// StopBeforePublish is the cold probe: the whole production path with step 9
+	// withheld.
+	StopBeforePublish bool
 }
 
 // Write appends to the transcript. It never fails: a run must not stop because

@@ -15,22 +15,28 @@ every pre-flight in order and prints the command that fixes each failure;
 is configured by `winthistle.toml`, a batch file and a descriptor file, and all
 of it is exercised against the live regtest node.
 
-**The server has started, and it is one slice deep.** `winthistle serve` puts
-`internal/server` on a loopback socket with the security shape
-`docs/design.html` asks for — a startup token printed once, strict `Origin` and
-`Host` checks, no CORS at all — and serves one read-only screen, `doctor`'s.
-Nothing it serves can arm, publish or abort, and the three decisions HANDOFF
-asked for before any handler was written are made, each with a guard rather than
-a promise. See "The server, and the three decisions with guards on them" below.
-What is missing is the rest of the UI — the four callback seams, the transports,
-the countdown — plus signet and the mainnet cold probe.
+**The server can now open a batch.** `winthistle serve` puts `internal/server`
+on a loopback socket with the security shape `docs/design.html` asks for — a
+startup token printed once, strict `Origin` and `Host` checks, no CORS at all —
+and it serves three screens and three unsafe methods: start a run, answer the
+four questions a run asks, stop one. The three decisions HANDOFF asked for before
+any handler was written are made and each carries a guard; the four callback
+seams are wired, and each of the five things that turned out to be hard about
+them carries a guard too. See "The server, and the three decisions with guards on
+them" and "The four seams" below.
 
-**One correction to the headline above: `internal/server`'s `Registry` has no
-non-test caller yet.** It is the run-attach model, and its shape had to be
-decided before any handler was written, so it is built and only the attach
-handler reads it. The POST that starts a run is the next slice. That is the only
-written-but-uncalled code in this repository, and it is named here rather than
-left to be found.
+A browser-driven cold probe runs end to end against the harness: two signing
+rounds of two devices each, base64 out in a `Question` and back in a form post,
+through `internal/combine` and `internal/arm`'s verifier untouched, then the
+teardown's per-channel blunt confirmations, then `StateAborted` with nothing in
+the mempool. `TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine`.
+
+What is missing is the transports — file up and down, animated QR with webcam
+capture on the return leg; the browser transport is currently one field out and
+one field back — the countdown, the remaining screens, plus signet and the
+mainnet cold probe. **There is no written-but-uncalled code left.**
+`internal/server`'s `Registry` was the last of it and `POST /runs` is what calls
+it.
 
 **The rule that said "there must be no other publish call site" has changed,
 deliberately, and it is now enforced rather than asserted.** There are two calls
@@ -89,7 +95,8 @@ mainnet and the abort paths work.
 | `internal/doctor` | every pre-flight in order, each failure with the command that fixes it. Also the credential check, which asks LND rather than calling things |
 | `internal/run` | the composition: Phase 0, the armed window, Phase 2, and the abort that any failure ends in |
 | `internal/bump` | `winthistle bump`: find the parent in Core's mempool, build the child, verify it twice, sign it from cold storage, and broadcast it. The second and last publish call site |
-| `internal/server` | `winthistle serve`: the loopback socket, the startup token, the `Origin`/`Host` guard, the run-attach registry, and one read-only screen |
+| `internal/server` | `winthistle serve`: the loopback socket, the startup token, the `Origin`/`Host` guard, the run-attach registry, the four callback seams' channel, and the three unsafe methods |
+| `internal/webrun` | the browser's side of the four seams, and the goroutine that drives `run.Do` behind them |
 | `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, aborts what it opened, and writes a `winthistle.toml` and a batch file pointing at the harness |
 
 `internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
@@ -1883,14 +1890,27 @@ claiming they never existed.
 
 `internal/server` is the first `net/http` surface in this repository. The only
 other one is bitcoind's JSON-RPC client, which is a client, so nothing here had
-a precedent to follow. That is why **the security shape is the deliverable of
-this slice and the screen is only what proves the shape carries a screen.**
+a precedent to follow. That is why **the security shape was the deliverable of
+the first slice and the screen was only what proved the shape carries a screen.**
 
 `winthistle serve` binds `[server] bind`, prints one URL with a token in it, and
-serves `GET /`, `GET /doctor` and `GET /runs/{id}`. There is no route that
-changes anything, and the guard in front of all three refuses an unsafe method
-that cannot say where it came from, so the first `POST` added lands behind a
-check that already exists.
+serves seven routes:
+
+| | |
+|---|---|
+| `GET /` | the overview, the batch, the control that starts a run, and the runs this process has driven |
+| `GET /doctor` | every pre-flight, verbatim. The one handler with no clock, no signer and no state |
+| `GET /runs/{id}` | the attach: the transcript from the beginning, whatever the run is waiting on, and "stop this run" |
+| `POST /runs` | start a run. Refused while one is going |
+| `POST /runs/{id}/answer` | one answer to the one question the run is asking |
+| `GET /runs/{id}/abort` | what stopping costs, and then the button — or the refusal, for a run that reached the publish call |
+| `POST /runs/{id}/abort` | cancel the run's context, which is what Ctrl-C does |
+
+The three unsafe methods are the first in this repository, and the guard in front
+of all seven was written before there was anything to guard: it refuses an unsafe
+method that cannot say where it came from — no `Origin` and no `Sec-Fetch-Site:
+same-origin` is a refusal, not a fallthrough. What each `POST` had to decide for
+itself is in "The four seams" below.
 
 ### The security shape
 
@@ -1955,22 +1975,36 @@ two locks on it.**
    `TestEveryLNDCallSiteIsRegistered` type-checks the whole module — this
    package included — and fails on a third. A web handler is exactly where a
    third appears, which is why this is the lock that has to be mechanical.
-2. *The import ban.* `internal/server` may not import `internal/arm` or
-   `internal/bump`. `TestTheServerCannotReachAPublishCall` parses this package's
-   non-test files and fails on either, so no function here can be handed an
+2. *The import ban.* `internal/server` may not import `internal/arm`,
+   `internal/bump` or `internal/journal`.
+   `TestTheServerCannotReachAPublishCallOrWriteTheJournal` parses this package's
+   non-test files and fails on any of them, so no function here can be handed an
    `*arm.Armed` or a `*bump.Signed` — the two types whose unexported raw
    transaction is filled by exactly one constructor after that constructor's own
-   checks. A handler cannot name the arguments, so it cannot make the call by
-   accident.
+   checks — and none can name the table a setup answer is recorded in. A handler
+   cannot name the arguments, so it cannot make the call by accident.
+
+**`internal/journal` went on that list when the seams did, and it is about the
+record rather than the network.** Two things rely on it. `setup.Ask`'s three-way
+shape exists so a comparison nobody made is never written down as a verdict, and
+this is what makes "no handler can write `NotAnswered` into the `setups` table" a
+fact rather than a habit. And whether a run reached the publish call is
+`journal.Run.AbortTarget`'s answer — the same one `run.RecoverOne` refuses on — so
+the abort control has to ask for it, through `Launcher.AbortRefusal`, instead of
+holding a second copy of the rule that could drift.
 
 Note what is deliberately *not* banned, because the reasoning matters more than
-the list: banning `walletrpc` would not be sufficient on its own, since an import
-of `internal/lnd` yields an `*lnd.Client` whose `WalletKit` field can be selected
-without importing `walletrpc` at all. That hole is covered by the count. Adding
-`walletrpc` to the ban would make the import test look like a boundary it is not.
+the list. None of the three bans makes the banned code unreachable at run time and
+none is meant to: `internal/server` imports `internal/doctor`, which imports
+`internal/journal` transitively, and banning `walletrpc` would not help either
+since an import of `internal/lnd` yields an `*lnd.Client` whose `WalletKit` field
+can be selected without naming `walletrpc` at all. What a ban removes is the
+ability to *name* a type or call a function, which is what stops a handler being
+handed the argument. The reachability half is the count's job.
 
 What the server may do is start `run.Do` and answer its questions. Publishing
-stays inside the sequence that earned it.
+stays inside the sequence that earned it, and recording stays with the package
+that owns the record.
 
 ### Decision 2 · A closing browser tab does not abort — and this is the dangerous one
 
@@ -1986,17 +2020,42 @@ dangerous part of this change.** HANDOFF asked for it to be written here, so:
 
 | | what it means | what happens |
 |---|---|---|
-| `Ctrl-C` on `winthistle run` | the operator, at the machine, saying stop | the context is cancelled and the run unwinds through the abort path — cancel the shims, abandon what reached pending, release Core's locks. Tested. |
-| `Ctrl-C` on `winthistle serve` | stop serving | the socket shuts down. **No run is touched.** |
+| `Ctrl-C` on `winthistle run` | the operator, at the machine, saying stop | the context is cancelled and the run unwinds through the abort path — cancel the shims, abandon what reached pending, release Core's locks. |
+| `Ctrl-C` on `winthistle serve` | the same thing, from the other front door | the socket shuts down, **and a run in flight is cancelled and waited for**. |
+| the abort control on the run screen | the operator saying stop, about this run | identical to Ctrl-C: `Run.Abort` cancels the run's context. Refused for a run that reached the publish call. |
 | the tab closing | nothing legible at all | nothing. The run keeps going and the transcript keeps accumulating. |
+
+**The second row changed in this slice, and it is a correction rather than a
+relaxation.** It used to read "no run is touched", which was true only because
+nothing this server served could start one. Now that it can, leaving the run alone
+would be worse rather than safer: the process exits when `Serve` returns, so a run
+left running is killed between two RPCs with *n* shims open and Core holding coin
+locks — the exact state the abort path exists to avoid. So the socket closes
+first, and then `Serve` waits for the run to come apart (`UnwindGrace`, a backstop
+over `run.TeardownBudget`, which is the real bound). This is decision 2's own
+sentence, not an exception to it: what ends a run is the clock, or the operator's
+Ctrl-C on the process. A tab closing is still nothing.
 
 The failure mode this asymmetry buys is real and it is the lesser one: an
 operator who closes the tab believing they have stopped the batch has not
 stopped it, and a batch they meant to abandon proceeds to the publish. The
-mitigation is copy, not code — the overview screen says, in the pane, that
-closing the tab does not stop anything and names what does — and when the UI can
-start a run it will need an explicit abort control on the run screen, which is a
-button rather than a disconnection.
+mitigation is copy plus a control. The overview screen says, in the pane, that
+closing the tab does not stop anything and names what does; and the run screen
+carries "stop this run", which is a link to a screen that says what stopping costs
+before it offers the button — there is no JavaScript in this UI to put a dialog up
+with, and one click is the wrong price for a partially-armed batch.
+
+**The abort control is refused for a run that reached the publish call**, and it
+asks the journal rather than deciding. `journal.Run.AbortTarget` refuses
+`StatePublishing` and `StatePublished` with `ErrMayBePublished` — abandoning a
+pending channel whose funding transaction later confirms strands its funds with no
+force-close path — and `run.RecoverOne` refuses the same run for the same reason.
+The control refuses it too, at both the screen and the POST (a form kept open from
+before the publish is exactly how the second arrives), and the refusal says the
+exit is forward: let it confirm, or `winthistle bump` it. It fails closed — a
+journal that cannot be read is not a permission — with one exception,
+`ErrNoRun`, because a run that journalled nothing opened no stream and has nothing
+to take apart.
 
 The failure mode the other choice buys is worse and it is not recoverable by
 saying something: a Wi-Fi blip during the armed window tears down *n* peers'
@@ -2015,13 +2074,20 @@ attach is a view, not a subscription — a subscription is a thing a tab owns.
 `Registry`'s doc comment is where the three consequences are written down, and
 the shape is the guard: nothing in the package cancels a run's context when a
 response ends, there is no `OnDisconnect`, and no heartbeat whose absence means
-anything. What a test cannot prove is the absence of a future mistake — a
-handler that plumbs `r.Context()` into `run.Do` would pass every test in the
-package and abort a batch on a laptop lid. The distinction is drawn explicitly
-at the one place a request context legitimately *is* used: the `doctor` screen
-passes `r.Context()` to the pre-flight, and the comment there says why that is
-right for a read-only screen and must never happen to a run. A pre-flight has
-nothing to unwind; a run has peers holding reservations.
+anything. The run's context comes from `Server.base`, which is the process's, and
+`Run.cancel` is held only by the abort control.
+
+**That guard now has a mechanical half, which the last slice said it could not
+have.** The worry was exactly right: a handler that plumbed `r.Context()` into
+`run.Do` would pass every behavioural test in the package and abort a batch on a
+laptop lid. `TestOnlyTheDoctorScreenReadsTheRequestContext` parses the package,
+finds every `r.Context()` in a function that takes an `*http.Request`, and
+requires the enclosing function to be `doctor` — and fails if it finds none at
+all, so it cannot pass by the parameter being renamed. The `doctor` screen is the
+one legitimate use and the distinction is not the transport: a pre-flight has
+nothing to unwind, a run has peers holding reservations. The abort control's own
+journal read is a request-shaped read that deliberately does *not* use it, because
+a browser that gives up mid-check must not turn a refusal into a permission.
 
 ### Decision 3 · The twelve `Report() string` renderers are served verbatim
 
@@ -2047,61 +2113,263 @@ by. The same chokepoint is what stops a transcript becoming markup: a run's
 transcript carries peer pubkeys, file paths and error strings from LND and Core,
 none of which this repository chose.
 
+## The four seams, and the five things that were actually hard
+
+`run.Do` stops four times to ask a person something. Those are the seams, and
+this slice wires them to a browser: `internal/server`'s `ask.go` is the channel,
+and `internal/webrun` is where a `Question` becomes one of the four concrete seam
+types. Two of the four are reachable from `run.Do` itself — `rehearsal.Signer`
+through `Deps.Signers`, and `abort.Confirmation` through `Deps.Confirm` — and both
+are exercised end to end by the browser-driven cold probe. `setup.Ask` belongs to
+`setup.Do` and `bump.Approve` to `bump.Do`, so their adapters are built and unit
+tested here and their POSTs arrive with the setup and bump screens (item 1.6).
+That is a deliberate, named exception to "no written-but-uncalled code", and it is
+made for `setup.Ask` in particular because its guard is the one worth having
+before its screen rather than after.
+
+### Why `internal/webrun` exists at all
+
+Because `internal/server` may not name the run's types. A server that took a
+`run.Options` would import `internal/run`, and `run.Result.Armed` is an
+`*arm.Armed` — which a handler could then hold without importing `internal/arm` at
+all, since Go infers the type. That would leave decision 1's import ban intact on
+paper and hollow in fact. So the boundary is a three-method interface,
+`server.Launcher`, and `internal/webrun` is on the other side of it holding
+`internal/run`, `internal/setup`, `internal/abort` and `internal/journal`.
+
+`run.Connect` moved out of `cmd/winthistle` in the same change. Decision 1 is that
+the CLI and the UI are one code path through `run.Do`; two sets of dialling
+decisions underneath that — which timeout, which wallet scope, where the PSBT
+directory is — would have drifted. `winthistle run`'s `connect()` is now four
+lines over it, and what stays in `main.go` is the part that is genuinely a
+terminal's: stdout, and the two prompts that read stdin.
+
+### 1 · A browser can stop answering, and the bound is the gate
+
+A seam waiting on a channel must not block `run.Do` forever, and a closing tab is
+not detectable. So `Run.Ask` waits on a deadline — and the deadline is
+`limits.abort_after_signing_seconds`, the 5:00 gate `rehearsal.Gate` measures a
+signing round against, not a transport timeout invented for the occasion.
+
+**Two clocks bound this product and only one of them is ours.** The gate is: we
+set it, we measure against it, `rehearsal.Gate` refuses to arm a batch whose
+rehearsal was slower, and it is therefore a number code may enforce. The peers'
+ten minutes are not: `pruneZombieReservations` skips PSBT reservations, so our
+node never expires one and the peer's own sweeper ends it, on the peer's clock.
+
+*What stops the second becoming the first.* Three things, and the first was
+already there:
+
+- **`config.Validate` refuses a configuration whose `AbortAfterSigning` is
+  greater than or equal to `rehearsal.PeerWindow`.** So a deadline built from the
+  gate is inside the peers' window by construction. That check predates this
+  slice and is what makes the whole argument sound rather than merely tidy.
+- **`internal/server` cannot compute a deadline.** `Question.Deadline` is a
+  `time.Time`, and `Ask` refuses a question that arrives without one
+  (`ErrNoClock`) rather than waiting. The number always comes from whoever read
+  the configuration.
+- **`internal/webrun` never reads `PeerWindow`.**
+  `TestTheSeamsAreBoundedByTheGateAndNotThePeers` parses the package — parses,
+  not greps, so the prose is free to explain the thing the code may not read —
+  and also fails if nothing reads `AbortAfterSigning`.
+
+A bound from the gate can expire early relative to the peers, never late, and
+early is the safe direction: it costs one more ceremony, and nothing is published
+while a question is open.
+
+**The deadline belongs to the round, not to the device.** *m* devices each given
+the gate's worth would let a round run to *m* times the gate and out past the
+peers' window. `Signers.Round` is called once per round, so it stamps one deadline
+and every device in that round shares it; a second device asked after the budget
+is gone is told the round is over rather than handed another five minutes.
+`TestTheRoundsDeadlineIsSharedByEveryDevice`.
+
+One interaction worth knowing: the blunt-abandon confirmation is asked *during* a
+teardown, which has a budget of its own, so `webrun.deadlineFor` clamps a seam's
+deadline inside the context's. Unclamped, the context would end first and `Ask`
+would return `ctx.Err()` rather than `ErrUnanswered` — the difference between
+"finish this by hand" and "something went wrong".
+
+**Every seam's expiry is the answer a nil seam would have given.** That is the
+property that makes an abandoned browser indistinguishable from no browser:
+`setup.Ask` → `NotAnswered`; `abort.Confirmation` → `false`, which is what nil
+means (never escalate); `bump.Approve` → `false`, which releases the child's coin
+lock; `rehearsal.Signer` → an error, because `combine.Complete` wants exactly *m*
+partials and a device that declined quietly would produce a packet that does not
+finalize and a failure blamed on the wrong thing.
+
+### 2 · `NotAnswered` must never be journalled
+
+The highest-stakes of the four. `setup.Answer` has three values because "no" and
+"not yet" are different facts and only one of them is a wallet that must not fund
+a batch — and because the only verdict that exists about a cold-storage descriptor
+is a comparison a human made.
+
+Four layers, and they are layers rather than one check restated:
+
+1. **The form is three-way**, with a third button that says "I have not compared
+   them yet". Not a "cancel": the wording is the answer.
+2. **The adapter's mapping is total and it fails to `NotAnswered`.** An expired
+   question, a cancelled run, an empty form, a choice this question did not offer,
+   a stale question id — every one is "nobody compared anything".
+   `TestNotAnsweredIsWhatEverythingElseRecords` enumerates the garbage, including
+   `"true"`, `"match"` and a `yes` borrowed from a different seam.
+3. **`setup.Do` returns before `RecordSetup` on `NotAnswered`**, and is the only
+   writer of that table.
+4. **`internal/server` cannot import `internal/journal`**, so no handler can name
+   `journal.Setup` or call `RecordSetup` at all.
+
+There is a general rule underneath layer 2, and it is written on
+`server.Question.Choices`: **`Choices` are the buttons, not a filter.** A
+submission naming something else reaches the seam verbatim, because a server that
+silently rewrote an answer would be a second place a verdict is decided. The
+obligation that follows is on every adapter — match the affirmative explicitly,
+never the negative. `== yes` is safe for any string a form could carry; `!= no`
+reads a typo as consent. All four are written the first way and
+`TestApprovalMatchesTheAffirmativeOnly` is the check.
+
+### 3 · `abort.Confirmation` is a func per channel, and it stays one
+
+"A func rather than a bool so it cannot be set once and forgotten: the caller is
+asked per channel, at the moment of the rejection." A handler that turned it into
+a set-once checkbox would authorise the second channel with the answer given about
+the first.
+
+So: every call is its own `Question` with its own id, carrying that channel's
+outpoint and LND's verbatim rejection, and there is no stored permission anywhere
+in `internal/server` or `internal/webrun`. `Run.Reply` checks the posted question
+id against the pending one and refuses a mismatch with `ErrStaleQuestion` — the
+back button, a second tab and a double submit are all the same shape as reusing an
+answer. `TestEachChannelIsItsOwnConfirmation` proves a "yes" about one channel
+buys nothing for the next, and `TestAStaleAnswerIsRefusedRatherThanApplied` proves
+it through the handler.
+
+What that does *not* give up is worth restating: `abort.AbandonPending` asks
+`PendingChannels` itself and refuses a channel that is not pending, offering no
+confirmation at all, because there is nothing a human could usefully authorise
+about removing a live channel.
+
+### 4 · The first unsafe method, and what refuses a second run
+
+`POST /runs` is the first request in this repository that changes something. The
+guard already refused an unsafe method that cannot say where it came from — no
+`Origin` and no `Sec-Fetch-Site: same-site` is a refusal, not a fallthrough — so
+that half was done before there was anything to check.
+
+What is new is **`Registry.Start` refuses a second concurrent run**, and the
+refusal is in the registry rather than the handler because it is a property of the
+runs. One journal, one cold wallet, one armed window. The journal is not the
+expensive collision — SQLite serialises the writes — **the coins are**: the second
+run's dress rehearsal builds a decoy over the same inputs the first run is about
+to spend, so it would either lose coin selection or take the inputs out from under
+a batch that is already armed, with the cold wallet out and *n* peers waiting. The
+overview screen also stops offering the control while a run is live, because a
+control that is offered and then refused teaches an operator to press it twice.
+
+Two winthistles against one journal is a different problem and is **not** solved
+here. SQLite keeps the journal honest and does nothing at all about the coins.
+`winthistle doctor` is what reports that state.
+
+### 5 · The run's context is not the request's
+
+`startRun` derives it from `Server.base`, which `Serve` sets to the process's
+context, and the only thing that cancels it is `Run.Abort`. `Server.baseCtx` falls
+back to `context.Background()` when `Serve` was never called, which is the case in
+a test driving `Handler()` directly.
+
+`TestTheRunsContextIsNotTheRequests` cancels the request's context — which is what
+a closed tab, a reload, a lid and a blip all look like from inside a handler — and
+requires the run's to be untouched.
+`TestOnlyTheDoctorScreenReadsTheRequestContext` is the mechanical half. See
+decision 2.
+
+### One pre-existing bug this slice had to fix
+
+**The abort path did not survive the cancellation that triggered it.**
+`run.recoverRun` was passed the run's own `ctx`, so on Ctrl-C every call in the
+teardown failed immediately: the journal read is `database/sql`, the shim cancels
+and the abandons are gRPC, and Core's lock release is JSON-RPC. An abort triggered
+by Ctrl-C would have reported `context canceled` and taken nothing apart. No test
+caught it because no test cancelled a run mid-flight — the abort path was only ever
+exercised via a *failure*, which leaves a live context.
+
+It now runs on `context.WithoutCancel` with a deadline of its own,
+`run.TeardownBudget`, the way `releaseFence` already did. The budget is one
+signing gate's worth (5:00) and the unit is deliberate: the slow part of a
+teardown is not the RPCs, it is the blunt-abandon confirmation, which asks a human
+once per channel. The web abort control depends on this fix entirely — it is the
+same cancellation from the other front door.
+
 ### What this slice does not do
 
-No callback seams, nothing that touches the armed window, and no way to start a
-run. No transports — base64, file up and down, animated QR are all still to
-come — and no countdown. `doctor` was chosen as the one screen because it has no
-clock, no signer and no state, and the only thing it creates is the journal
-file, because a journal that does not exist yet is not a fault.
+No transports beyond the minimum — the browser signer is one read-only field out
+and one field back, and the file up/down and the animated QR with webcam capture
+go *around* that same `Question` rather than beside it. No countdown. No setup or
+bump screen, so two of the four adapters have no POST yet. A browser-driven run
+uses the browser for every device: the `[[signer]]` blocks supply the labels and
+the count, not a command, and a signer with a working `hwi` command cannot yet be
+mixed in — that is transport selection, and it belongs with item 1.4.
 
-Exercised against the live harness: `winthistle serve` reading a real
-`winthistle.toml`, the token exchanged for a cookie over a real socket, `421` for
-a rebinding `Host`, `403` for a cross-origin fetch and for a missing token, and
+Exercised against the live harness: the browser-driven cold probe above; `421` for
+a rebinding `Host`, `403` for a cross-origin fetch and for a missing token; and
 `GET /doctor` returning the ten-check report in about 250 ms.
-`TestTheDoctorScreenIsServedEndToEnd` is the harness-backed version of that.
-**Not yet verified in an actual browser** — this machine has none installed — so
-the cookie-then-redirect flow and the CSP are proven by `curl` and by the headers
-rather than by a render.
+**Still not verified in an actual browser** — this machine has none installed — so
+the cookie-then-redirect flow, the CSP and every form on these screens are proven
+by `curl`, by the headers and by `httptest` rather than by a render. That is now a
+bigger gap than it was: a read-only page that renders wrong is a nuisance, and a
+form that renders wrong is a signing round nobody can answer.
 
 ## Next actions, in order
 
-1. **The rest of the UI.** The security shape and one read-only screen exist —
-   see "The server, and the three decisions with guards on them" above — and the
-   three decisions that had to be made before any handler are made, each with a
-   guard: the publish count plus an import ban, `Registry`'s shape, and
-   `screen()` as the oracle. What is left, in the order it unblocks itself:
+1. **The rest of the UI.** The security shape, the three decisions with their
+   guards, the four callback seams and the abort control all exist — see "The
+   server, and the three decisions with guards on them" and "The four seams"
+   above. Items 1.1 and 1.2 are done. What is left, in the order it unblocks
+   itself:
 
-   1. **The four callback seams.** `rehearsal.Signer`, `abort.Confirmation`,
-      `bump.Approve` and `setup.Ask` — the last three-way, because a comparison
-      nobody made must never be recorded. Decision 1 says how: `run.Do` runs in
-      a goroutine and the handlers feed the seams over channels. The `POST` that
-      starts a run comes with them, and it is the thing that gives
-      `server.Registry` its first non-test caller.
-   2. **An explicit abort control on the run screen.** Required by decision 2
-      rather than optional: if a closed tab does not abort, the operator needs a
-      button that does, and it is the one place the UI reaches
-      `abort.Confirmation`.
-   3. **The transports.** Base64 in and out, file download and upload, and
-      animated QR — BBQr and `ur:crypto-psbt` — with webcam capture on the
-      return leg. `docs/design.html` calls this the one place a browser UI is
-      genuinely better than a terminal. `internal/signers` already has two
-      working transports (a command on stdin/stdout, and a file handshake keyed
-      on the round name so a rehearsal signature cannot be picked up as the
-      batch's), and the browser is a third rather than a replacement.
-   4. **The countdown.** It is the *peers'* clock, not ours:
+   1. ~~The four callback seams~~ — done, with the `POST` that starts a run.
+   2. ~~An explicit abort control on the run screen~~ — done, as a link to a
+      screen that says what stopping costs, refused for a run that reached the
+      publish call.
+   3. **Render it in a browser.** Promoted to the top of this list, because it
+      was a nuisance while the UI was read-only and it is now the thing between
+      here and a usable product. A `<pre>` that renders wrong is ugly; a form
+      that renders wrong is a signing round nobody can answer. What has never
+      been executed by a browser engine: the token-in-query → cookie → `303`
+      exchange, the CSP against pages that now carry forms, multiple submit
+      buttons sharing `name="choice"` (standard HTML, no JavaScript, and
+      untested by a renderer), the read-only `<textarea>` an operator has to
+      select-all out of, and how a several-kilobyte base64 PSBT behaves in a
+      `pre-wrap` column. `npx @playwright/mcp install-browser
+      chrome-for-testing` is the cheapest way in; this machine has no browser.
+   4. **The transports.** File download and upload, and animated QR — BBQr and
+      `ur:crypto-psbt` — with webcam capture on the return leg.
+      `docs/design.html` calls this the one place a browser UI is genuinely
+      better than a terminal. They go *around* the existing `server.Question`
+      rather than beside it: `Payload` and `Reply` are already the seam, and what
+      is missing is more ways to move the same two strings. `internal/signers`
+      has two working transports (a command on stdin/stdout, and a file
+      handshake keyed on the round name so a rehearsal signature cannot be
+      picked up as the batch's) and the browser is a third rather than a
+      replacement — **and mixing them is part of this item**, because a
+      browser-driven run currently uses the browser for every device even when a
+      `[[signer]]` block names a working command.
+   5. **The countdown.** It is the *peers'* clock, not ours:
       `pruneZombieReservations` skips PSBT reservations, so our node never
-      expires one. Do not re-derive that.
-   5. **The remaining screens.** All twelve renderers exist and all have
-      callers — the setup screens and the round-trip address check, the peer
-      reports, the fee report, the reserve report, the plan document, the
-      rehearsal measurement, the settlement report and the recovery screens.
-      Verbatim in a `<pre>` is v1 for every one of them, and `internal/run` is
-      the state machine in the order the UI needs it.
+      expires one. Do not re-derive that. Note what already exists to hang it
+      on: `arm.Streams.Opened` is when the last stream came up, and
+      `server.Question.Deadline` is the *gate*, which is a different clock and
+      must not be relabelled as this one.
+   6. **The remaining screens, and the two seams still waiting for a POST.** The
+      setup screen would give `setup.Ask` its route and the bump screen would
+      give `bump.Approve` its own; both adapters are built and unit tested and
+      neither has a caller, which is the one place written-but-uncalled code is
+      back. Then the peer reports, the fee report, the reserve report, the plan
+      document, the settlement report and the recovery screens. Verbatim in a
+      `<pre>` is v1 for every one of them.
 
-   Two things to check before the first browser-driven armed window: the
-   startup-token cookie is not port-scoped (see "Watch out for"), and none of
-   this has been rendered in an actual browser yet.
+   Still true before the first browser-driven armed window on anything that
+   matters: the startup-token cookie is not port-scoped (see "Watch out for").
 2. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
@@ -2113,18 +2381,49 @@ rather than by a render.
    terminates through runs on every failure and is tested on both.
 4. **Nothing new at this level.** What remains is items 1 to 3, and all three
    need something this machine does not have: a browser, a signet node, or
-   mainnet coins. `server.Registry` is the one piece of written-but-uncalled code
-   in the repository and item 1.1 is what calls it.
+   mainnet coins. The browser is the cheapest of the three to get and the one
+   that now blocks the most — see item 1.3.
 
 Done since the last handoff, all from the previous list:
 
-- **The server's first slice** — `internal/server`, `winthistle serve`, the
-  startup token, the `Origin`/`Host` guard, the run-attach registry, and
-  `doctor`'s screen end to end. This was item 1, and the part of it that had to
-  be settled before any handler was written is settled: three decisions, three
-  guards. Not the rest of item 1.
+- **The four callback seams and the `POST` that starts a run** — items 1.1 and
+  1.2. `internal/server`'s `ask.go` and `control.go`, `internal/webrun`, the
+  abort control, and a browser-driven cold probe against the harness. Five things
+  turned out to be the difficulty and each carries a guard; see "The four seams".
+- **`run.Connect`**, so the CLI and the UI dial the same way, and the
+  `internal/journal` ban on `internal/server`.
+- **A pre-existing bug in the abort path**: `recoverRun` ran on the context whose
+  cancellation had just triggered it, so Ctrl-C during a run would have reported
+  `context canceled` and taken nothing apart. It now runs on
+  `context.WithoutCancel` with `run.TeardownBudget`. The web abort control
+  depended on this entirely.
+- **The server's first slice**, before that — `winthistle serve`, the startup
+  token, the `Origin`/`Host` guard, the run-attach registry, and `doctor`'s
+  screen end to end.
 
 ## Watch out for
+
+- **`Ctrl-C` on `winthistle serve` now cancels a run in flight, and it used to
+  say it did not.** That row of decision 2's table changed in the seams slice and
+  the reasoning is with it: a run left alive while the process exits is killed
+  between two RPCs with *n* shims open. A tab closing is still nothing at all.
+  Whatever else changes, do not let a *transport* event end a run.
+
+- **Nothing here has ever been rendered by a browser engine.** Two forms, a
+  read-only `<textarea>` an operator has to copy a PSBT out of, multiple submit
+  buttons sharing `name="choice"`, a CSP of `default-src 'none'`, and a
+  cookie-then-`303` exchange — all proven by `curl`, headers and `httptest`. This
+  was a nuisance while the UI was read-only. It is now the gap between here and a
+  usable product, which is why it was promoted to the top of the next-actions
+  list.
+
+- **The seams' bound is the 5:00 gate and never the peers' ten minutes.** The
+  gate is ours and enforceable; the peers' clock is theirs, because
+  `pruneZombieReservations` skips PSBT reservations. `config.Validate` already
+  refuses a gate greater than or equal to `rehearsal.PeerWindow`, which is what
+  makes a gate-derived deadline inside the peers' window by construction. If a
+  seam ever needs a longer wait, the answer is not to reach for `PeerWindow` —
+  `internal/webrun` is tested for not reading it.
 
 - **The startup-token cookie is not port-scoped, and cookies never are.** Any
   other server on 127.0.0.1 that the operator's browser visits is sent this

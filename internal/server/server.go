@@ -10,8 +10,14 @@
 // operator visits can attempt DNS rebinding against it.
 //
 // This is the first net/http surface in this repository. The only other one is
-// bitcoind's JSON-RPC client, which is a client. So the security shape below is
-// the deliverable, and the screen is what proves the shape carries a screen.
+// bitcoind's JSON-RPC client, which is a client, so the security shape below had
+// no precedent to follow and is the part that had to be right first.
+//
+// It now serves the three screens and the three unsafe methods that let an
+// operator open a batch from a browser: start a run, answer the four questions a
+// run asks, and stop one. What it cannot do is publish — see the guard on
+// decision 1 — and what it does not do yet is the transports, the countdown and
+// the remaining screens.
 //
 // # The three decisions, and the guard each one needs
 //
@@ -25,18 +31,30 @@
 // It is driven by a goroutine, and the HTTP handlers feed its four callback
 // seams — rehearsal.Signer, abort.Confirmation, bump.Approve, setup.Ask — over
 // channels. One code path for the CLI and the UI, and --stop-before-publish
-// stays one `if` between arm.Finalize and arm.Publish, read nowhere else.
+// stays one `if` between arm.Finalize and arm.Publish, read nowhere else. The
+// channel is ask.go; the adapters that turn a Question into one of the four seam
+// types are in internal/webrun, because each of them owns a verdict this package
+// must not invent.
 //
 // The guard: **a handler must not be able to reach a publish call.** The
 // registry pins WalletKit.PublishTransaction at two production call sites and
 // internal/methods' call-site test fails on a third — that test type-checks the
 // whole module, so it already covers this package, and a web handler is exactly
 // where a third call site appears. That is the mechanical half. The other half
-// is that this package cannot import internal/arm or internal/bump at all:
-// TestTheServerCannotReachAPublishCall enforces it, so a handler cannot be
-// handed an *arm.Armed or a *bump.Signed even by accident. What the server may
-// do is start run.Do and answer its questions. Publishing stays inside the
-// sequence that earned it.
+// is that this package cannot import internal/arm, internal/bump or
+// internal/journal at all: TestTheServerCannotReachAPublishCallOrWriteTheJournal
+// enforces it, so a handler cannot be handed an *arm.Armed or a *bump.Signed
+// even by accident, and cannot name the table a setup answer is recorded in.
+// What the server may do is start run.Do and answer its questions. Publishing
+// stays inside the sequence that earned it, and recording stays with the package
+// that owns the record.
+//
+// The journal ban carries two consequences worth stating where they are relied
+// on. setup.Ask's third answer exists so a comparison nobody made is never
+// written down as a verdict, and no handler here can write that row. And whether
+// a run reached the publish call is journal.Run.AbortTarget's answer, so the
+// abort control asks — Launcher.AbortRefusal — rather than holding a second copy
+// of the rule run.RecoverOne refuses on.
 //
 // ## 2. A closing browser tab does not abort
 //
@@ -54,6 +72,17 @@
 // re-attach rather than a resume. This asymmetry with Ctrl-C — which does cancel
 // the context and does unwind through the abort path — is the most dangerous
 // part of the change, and it is written down in HANDOFF.md, not only here.
+//
+// It has a second, mechanical half now that a handler can start a run:
+// TestOnlyTheDoctorScreenReadsTheRequestContext parses this package and requires
+// every r.Context() to be in the doctor screen. That is the one place a request
+// context legitimately is used, and the distinction is not the transport — a
+// pre-flight has nothing to unwind and a run has peers holding reservations. A
+// run's context comes from Server.base, which is the process's.
+//
+// And because a closing tab does not abort, something else has to: the abort
+// control on the run screen is required by this decision rather than optional.
+// See control.go.
 //
 // ## 3. The twelve Report() renderers are served verbatim
 //
@@ -114,6 +143,14 @@ type Options struct {
 	// Doctor is the pre-flight's options, so the peer and reserve checks on the
 	// doctor screen can be about the batch the operator means to open.
 	Doctor DoctorOptions
+
+	// Launcher is what a POST to /runs hands the work to. Nil means this server
+	// cannot start a run — every screen still serves, and the control is not
+	// offered rather than offered and then refused.
+	//
+	// An interface because internal/server may not name the run's types: see
+	// Launcher, and decision 1's import ban.
+	Launcher Launcher
 }
 
 // Server is the UI. One per process.
@@ -139,7 +176,28 @@ type Server struct {
 	// a browser that reloads a slow page is how that happens.
 	doctorMu sync.Mutex
 
+	// baseCtx is the context a run is started from, set by Serve. It is emphati-
+	// cally not a request's: decision 2 says a response ending means nothing, so
+	// a run's lifetime hangs off the process rather than off a connection. Ctrl-C
+	// on `winthistle serve` cancels it, which shuts the socket down and — see the
+	// asymmetry table in HANDOFF.md — is a different thing from Ctrl-C on
+	// `winthistle run`.
+	baseMu  sync.Mutex
+	baseCtx context.Context
+
 	mux *http.ServeMux
+}
+
+// base is the context every run and every journal read behind a control is
+// started from. Background when Serve has not been called, which is the case in
+// a test that drives Handler directly.
+func (s *Server) base() context.Context {
+	s.baseMu.Lock()
+	defer s.baseMu.Unlock()
+	if s.baseCtx == nil {
+		return context.Background()
+	}
+	return s.baseCtx
 }
 
 // New builds the server and its token.
@@ -188,6 +246,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.index)
 	s.mux.HandleFunc("GET /doctor", s.doctor)
 	s.mux.HandleFunc("GET /runs/{id}", s.attach)
+
+	// The unsafe methods. See control.go: the guard in front of them already
+	// refuses one that cannot say where it came from, and neither of the two
+	// locks on the publish call is a convention.
+	s.mux.HandleFunc("POST /runs", s.startRun)
+	s.mux.HandleFunc("POST /runs/{id}/answer", s.answer)
+	s.mux.HandleFunc("GET /runs/{id}/abort", s.abortScreen)
+	s.mux.HandleFunc("POST /runs/{id}/abort", s.abortRun)
 }
 
 // Handler is the whole server behind the guard, for a test or an embedding.
@@ -213,14 +279,34 @@ func (s *Server) StartupURL() string {
 // Serve listens and serves until the context is cancelled.
 //
 // The listener is opened before anything is printed, so a port already in use is
-// an error rather than a URL that does not answer. Ctrl-C shuts down the socket
-// and returns; it does not touch the runs — see decision 2, and note that a
-// CLI run's Ctrl-C is a different thing, cancelling that run's context.
+// an error rather than a URL that does not answer.
+//
+// # Ctrl-C here now ends a run, and that is a change
+//
+// It used to be true that Ctrl-C on `winthistle serve` touched no run, because
+// nothing this server served could start one. Now that it can, the run's context
+// is this one — so Ctrl-C shuts the socket down *and* unwinds the run through
+// the abort path, exactly as Ctrl-C on `winthistle run` does. That is decision
+// 2's own sentence rather than an exception to it: what ends a run is the clock,
+// or the operator's Ctrl-C on the process. A tab closing is still nothing.
+//
+// The alternative — leave the run alone — reads safer and is not. This process
+// exits when Serve returns, and a run left running would be killed between two
+// RPCs with n shims open and Core holding coin locks, which is the one state the
+// abort path exists to avoid. So the socket closes first, and then this waits
+// for the run to finish coming apart.
 func (s *Server) Serve(ctx context.Context, out io.Writer) error {
 	ln, err := net.Listen("tcp", s.cfg.Server.Bind)
 	if err != nil {
 		return fmt.Errorf("binding %s: %w", s.cfg.Server.Bind, err)
 	}
+
+	// Before the first request can arrive, so no handler ever sees the
+	// Background fallback in production. A run started from here outlives the
+	// response that started it — decision 2 — and ends with this process.
+	s.baseMu.Lock()
+	s.baseCtx = ctx
+	s.baseMu.Unlock()
 
 	fmt.Fprintf(out, "winthistle is serving on %s\n\n  %s\n\n",
 		s.cfg.Server.Bind, s.StartupURL())
@@ -250,6 +336,57 @@ func (s *Server) Serve(ctx context.Context, out io.Writer) error {
 		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdown)
+		s.waitForRuns(out)
 		return nil
 	}
+}
+
+// UnwindGrace is how long Serve waits for a cancelled run to finish coming
+// apart before it gives up and says what is left.
+//
+// A backstop rather than the bound. The real bound is internal/run's own
+// teardown budget — it makes the abort calls on a context that survives the
+// cancellation that triggered them, with a deadline of its own — and this is
+// comfortably longer, so Ctrl-C does not abandon a teardown that is still inside
+// its own budget. It is not the same constant because this package may not
+// import internal/run: decision 1's ban is what keeps a handler from being able
+// to name an *arm.Armed, and a shared constant is not worth a hole in it.
+const UnwindGrace = 10 * time.Minute
+
+// waitForRuns holds the process open while a cancelled run unwinds.
+//
+// Polled rather than signalled: the thing being waited for is a goroutine
+// calling Run.Finish, and a channel to wait on would be a second way to know a
+// run is over — see Registry, where "finished" has one definition.
+func (s *Server) waitForRuns(out io.Writer) {
+	live := s.Runs.Live()
+	if live == nil {
+		return
+	}
+	fmt.Fprintf(out, "\n%s", unwinding(live.ID))
+
+	deadline := time.Now().Add(UnwindGrace)
+	for time.Now().Before(deadline) {
+		if s.Runs.Live() == nil {
+			fmt.Fprintf(out, "run %s is unwound.\n", live.ID)
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	fmt.Fprint(out, stillUnwinding(live.ID))
+}
+
+func unwinding(id string) string {
+	return fmt.Sprintf("Run %s is going, so this is taking it apart before it "+
+		"exits: cancelling the shims, abandoning what reached pending, releasing "+
+		"Core's coin locks. Waiting up to %s.\n\n", id, UnwindGrace)
+}
+
+func stillUnwinding(id string) string {
+	return fmt.Sprintf("Run %s has not finished coming apart after %s, and this "+
+		"is exiting anyway rather than holding the terminal indefinitely. Nothing "+
+		"was published — that is what the armed window is defined by — but shims "+
+		"or coin locks may be left. `winthistle recover %s` is safe to run as "+
+		"many times as it takes, and `winthistle doctor` lists the locks.\n",
+		id, UnwindGrace, id)
 }

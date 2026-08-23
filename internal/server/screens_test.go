@@ -86,7 +86,7 @@ func TestTheChokepointEscapes(t *testing.T) {
 // the half a unit test of screen() alone cannot show.
 func TestTheRunScreenGoesThroughTheChokepoint(t *testing.T) {
 	s := testServer(t)
-	run := s.Runs.Add("2026-08-23T19-04-00")
+	run := s.Runs.add("2026-08-23T19-04-00")
 	transcript := "Peer 1 of 3 <alice> refused: capacity 5 000 000 sat & the " +
 		"minimum is 20 000 000\n"
 	if _, err := run.Write([]byte(transcript)); err != nil {
@@ -113,7 +113,7 @@ func TestTheRunScreenGoesThroughTheChokepoint(t *testing.T) {
 // and text.
 func TestNoScreenFetchesAnything(t *testing.T) {
 	s := testServer(t)
-	s.Runs.Add("a-run")
+	s.Runs.add("a-run")
 
 	for _, path := range []string{"/", "/runs/a-run", "/runs/no-such-run"} {
 		body := serveIt(s, get(t, s, path)).Body.String()

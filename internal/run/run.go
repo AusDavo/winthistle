@@ -163,6 +163,22 @@ type Options struct {
 // resumed by running the settlement again.
 const DefaultSettleFor = 30 * time.Minute
 
+// TeardownBudget is how long the abort path gets after the run has stopped.
+//
+// It is one signing gate's worth, and that is the unit deliberately: the slow
+// part of a teardown is not the RPCs — n shim cancels, n abandons and one batch
+// of coin-lock releases, all against a node on the same machine — it is the
+// blunt-abandon confirmation, which asks a human once per channel. Five minutes
+// is what this product already calls "as long as an operator at the machine gets
+// to do a thing".
+//
+// Running out of it costs nothing that cannot be picked up: `winthistle recover`
+// is safe to run as many times as it takes and everything under it is
+// idempotent. The seams clamp their own deadlines inside this one, so a
+// confirmation nobody answers declines rather than erroring — see
+// webrun.deadlineFor.
+const TeardownBudget = 5 * time.Minute
+
 // Result is what the run did, however far it got.
 type Result struct {
 	RunID string
@@ -656,7 +672,26 @@ func members(armed *arm.Armed, p *prepared, o Options) []settle.Member {
 }
 
 // recoverRun tears down whatever the run left behind, through the journal.
+//
+// # The teardown outlives the cancellation that caused it
+//
+// The commonest reason to be here is that the run's context was cancelled —
+// Ctrl-C in the terminal, or the web UI's abort control, which is the same
+// cancellation from the other front door. On a cancelled context every call
+// below fails at once: the journal read is a database/sql query, the shim
+// cancels and the abandons are gRPC, and Core's lock release is JSON-RPC. So an
+// abort triggered by Ctrl-C would have reported "context canceled" and taken
+// nothing apart, which is the exact opposite of what the deferred teardown is
+// for.
+//
+// A fresh context, then, bounded rather than unbounded: releaseFence already
+// does this for the same reason, and the bound is here because a teardown that
+// hangs holds a terminal the operator has already tried to get out of. What is
+// deliberately *not* inherited is cancellation; the deadline is ours.
 func recoverRun(ctx context.Context, d Deps, o Options, res *Result) error {
+	ctx, done := context.WithTimeout(context.WithoutCancel(ctx), TeardownBudget)
+	defer done()
+
 	run, err := d.Journal.Load(ctx, o.RunID)
 	if errors.Is(err, journal.ErrNoRun) {
 		// Nothing was journalled, which means arm.Open never returned a stream.

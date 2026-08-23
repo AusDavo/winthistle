@@ -68,9 +68,15 @@ nav a[aria-current] { font-weight: 600; text-decoration: none; }
 pre { margin: 0; white-space: pre-wrap; overflow-wrap: break-word;
   max-width: %dch; }
 ul { padding-left: 1.25rem; max-width: %dch; }
+form { margin: 1.5rem 0 0; max-width: %dch; }
+label { display: inline-block; }
+textarea { display: block; width: 100%%; box-sizing: border-box; font: inherit;
+  white-space: pre-wrap; overflow-wrap: break-word; margin: .25rem 0 1rem; }
+button { font: inherit; padding: .4rem .9rem; margin: 0 .5rem .5rem 0; }
+h2 { font: inherit; font-weight: 600; margin: 2rem 0 .5rem; }
 </style>
 </head><body>
-<nav>`, html.EscapeString(title), prose.PaneWidth, prose.PaneWidth)
+<nav>`, html.EscapeString(title), prose.PaneWidth, prose.PaneWidth, prose.PaneWidth)
 
 	for _, l := range nav {
 		current := ""
@@ -96,6 +102,11 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(screen("overview", "/", overview(s.cfg.Path)))
 
+	// What a run started from here would open, and the control that starts it.
+	// Both are absent rather than disabled when there is no batch: a control
+	// that is offered and then refused teaches an operator to press it twice.
+	b.WriteString(s.startSection())
+
 	// The run list is the only place a link is generated from state, and it is
 	// what decision 2 buys: a tab that comes back finds the run it left, because
 	// the run is in the registry rather than in the connection it lost.
@@ -103,10 +114,10 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	b.WriteString("\n<h2>Runs</h2>\n")
 	if len(runs) == 0 {
 		b.WriteString("<pre>" + html.EscapeString(prose.Para(
-			"Nothing is running. Starting a run from here is the next slice; "+
-				"until then `winthistle run --batch FILE` is how a batch is "+
-				"opened, and this page is where it will be attached to.")) +
-			"</pre>\n")
+			"Nothing has run in this process yet. A run started from the command "+
+				"line with `winthistle run --batch FILE` is not in this list either "+
+				"— the registry is per process, and `winthistle recover` is what "+
+				"reads the journal that outlives one.")) + "</pre>\n")
 	} else {
 		b.WriteString("<ul>\n")
 		for _, run := range runs {
@@ -125,6 +136,32 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 		b.WriteString("</ul>\n")
 	}
 	serve(w, b.String())
+}
+
+// startSection is the batch and the control that opens it.
+//
+// The batch summary is the launcher's text rather than this package's: the
+// launcher is the thing holding the batch file, and a second renderer of the
+// same amounts is a second thing to keep in step with the plan document.
+func (s *Server) startSection() string {
+	var b strings.Builder
+	b.WriteString("\n<h2>The batch</h2>\n")
+
+	if s.opts.Launcher == nil || s.opts.Launcher.Batch() == "" {
+		return b.String() + "<pre>" + html.EscapeString(noBatch()) + "</pre>\n"
+	}
+	b.WriteString("<pre>" + html.EscapeString(s.opts.Launcher.Batch()) + "</pre>\n")
+
+	if live := s.Runs.Live(); live != nil {
+		b.WriteString("<pre>" + html.EscapeString(prose.Para(fmt.Sprintf(
+			"Run %s is going, so there is nothing to start. One at a time: there "+
+				"is one journal, one cold wallet and one armed window, and a second "+
+				"run's dress rehearsal would build a decoy over the coins this one "+
+				"is about to spend.", live.ID))) + "</pre>\n")
+		return b.String()
+	}
+	b.WriteString(startForm())
+	return b.String()
 }
 
 func overview(cfgPath string) string {
@@ -149,17 +186,17 @@ func overview(cfgPath string) string {
 	return b.String()
 }
 
-// doctor is the one screen this slice serves end to end.
+// doctor is the read-only screen, and the only handler in this package that has
+// no clock, no signer and no state: it reads, it renders, and the one thing it
+// creates is the journal file, because a journal that does not exist yet is not a
+// fault. Nothing here can arm, publish or abort.
 //
-// Chosen because it has no clock, no signer and no state: it reads, it renders,
-// and the one thing it creates is the journal file, because a journal that does
-// not exist yet is not a fault. Nothing here can arm, publish or abort.
-//
+// It is also the one place a request context is used, and the only one.
 // r.Context() is passed to the pre-flight, so a browser that gives up stops the
-// checks. That is right for a read-only screen and it is exactly what must never
-// happen to a run — see Registry. The difference is not the transport, it is
-// that a pre-flight has nothing to unwind and a run has peers holding
-// reservations.
+// checks — right for a read-only screen and exactly what must never happen to a
+// run. The difference is not the transport: a pre-flight has nothing to unwind
+// and a run has peers holding reservations against outpoints.
+// TestOnlyTheDoctorScreenReadsTheRequestContext is what keeps it here.
 func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 	// One pre-flight at a time. Two would open the run journal twice and report
 	// the same failure in two places, and a reloaded slow page is how that
@@ -176,6 +213,12 @@ func (s *Server) doctor(w http.ResponseWriter, r *http.Request) {
 // Every time, rather than from a cursor: an attach that resumed where some
 // earlier connection stopped would be a subscription, and a subscription is a
 // thing a tab owns. This is a view.
+//
+// Deliberately no auto-refresh. A <meta http-equiv="refresh"> would work — the
+// CSP forbids fetching, not reloading — and it would be wrong here, because the
+// thing the operator is most often doing on this screen is pasting a signed PSBT
+// into a textarea, and a page that reloads under them loses it. Reloading is the
+// operator's, and the copy says so.
 func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run := s.Runs.Get(id)
@@ -190,17 +233,53 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	}
 
 	transcript, finished, err := run.State()
-	var b strings.Builder
-	fmt.Fprintf(&b, "run %s\n\nStarted %s.\n", run.ID, run.Started.Format(time.RFC3339))
+	pending := run.Pending()
+
+	var text strings.Builder
+	fmt.Fprintf(&text, "run %s\n\nStarted %s.\n", run.ID,
+		run.Started.Format(time.RFC3339))
 	switch {
 	case finished && err != nil:
-		b.WriteString("\n" + prose.Para("It stopped: "+err.Error()))
+		text.WriteString("\n" + prose.Para("It stopped: "+err.Error()))
 	case finished:
-		b.WriteString("\n" + prose.Para("It finished."))
+		text.WriteString("\n" + prose.Para("It finished."))
+	case run.Aborting():
+		text.WriteString("\n" + prose.Para("It has been asked to stop and is "+
+			"unwinding: cancelling the shims, abandoning what reached pending, "+
+			"releasing Core's coin locks. Reload to see how far it has got."))
+	case pending != nil:
+		text.WriteString("\n" + prose.Para(fmt.Sprintf("It is waiting on you. "+
+			"Answer below, before %s — that is the %s signing gate, not a timeout "+
+			"of this page's, and letting it pass costs one more signing round "+
+			"rather than anything that was at risk.",
+			pending.Deadline.Format(time.TimeOnly),
+			pending.Deadline.Sub(pending.Asked).Round(time.Second))))
 	default:
-		b.WriteString("\n" + prose.Para("It is still going. Reload to see more; "+
+		text.WriteString("\n" + prose.Para("It is still going. Reload to see more; "+
 			"closing this tab does not stop it."))
 	}
-	b.WriteString("\n" + transcript)
-	serve(w, screen("run "+run.ID, "", b.String()))
+
+	// The transcript, then the question. Newest last, the way a terminal reads:
+	// what the run is waiting on is the last thing it said.
+	text.WriteString("\n" + transcript)
+	if pending != nil {
+		text.WriteString("\n" + pending.Prompt)
+	}
+
+	// One <pre> for everything that is copy — the transcript and the question
+	// both go through screen(), which is what keeps decision 3's oracle over
+	// strings this repository did not choose — and then the controls.
+	var b strings.Builder
+	b.WriteString(screen("run "+run.ID, "", text.String()))
+	if pending != nil {
+		b.WriteString(questionForm(run.ID, pending))
+	}
+	if !finished {
+		// The abort control decision 2 makes mandatory: if a closed tab does not
+		// stop a run, something has to, and it is a link to a screen that says
+		// what stopping costs rather than a button that does it on one click.
+		fmt.Fprintf(&b, "<p><a href=\"/runs/%s/abort\">stop this run</a></p>\n",
+			html.EscapeString(run.ID))
+	}
+	serve(w, b.String())
 }

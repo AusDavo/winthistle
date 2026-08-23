@@ -1,8 +1,12 @@
 // Package signers is how a base64 PSBT gets to a cold-storage device and how
 // the partial signature gets back.
 //
-// Two transports, because the design's third — the browser's file up/down and
-// animated QR — belongs to the UI that does not exist yet:
+// Two transports here, and a third that is not here: the browser's, which lives
+// in internal/webrun because it is answered over the HTTP seam rather than by a
+// process on this machine. It is currently one field out and one field back — the
+// file up/down and the animated QR the design asks for are still to come — and it
+// shares this package's rehearsal.Signer type for the reason given below. What
+// stays here is everything that does not need a person watching a page:
 //
 //   - a command, which the operator names in winthistle.toml. It reads a base64
 //     PSBT on stdin and writes one on stdout. That is enough for the simulated

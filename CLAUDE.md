@@ -7,13 +7,13 @@ Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 
 **Status: implemented, and exercised against live regtest.** `winthistle setup`,
 `run`, `bump`, `doctor` and `recover` all work against the cluster in `regtest/`.
-`winthistle serve` is one slice deep: `internal/server` carries the security
-shape `docs/design.html` asks for — loopback bind, a startup token, strict
-`Origin` and `Host` checks, no CORS — and serves one read-only screen, and
-nothing it serves can arm, publish or abort. Still missing are the rest of the
-UI, signet, and the mainnet cold probe. So the safety model below is verified
-against LND source *and* against a running node — but never yet against mainnet,
-which is what the cold probe is for.
+`winthistle serve` carries the security shape `docs/design.html` asks for —
+loopback bind, a startup token, strict `Origin` and `Host` checks, no CORS — and
+can now open a batch: it starts a run, answers the four questions a run asks, and
+stops one. Still missing are the transports (file up/down, animated QR), the
+countdown, the remaining screens, signet, and the mainnet cold probe. So the
+safety model below is verified against LND source *and* against a running node —
+but never yet against mainnet, which is what the cold probe is for.
 
 The three decisions that had to be made before any web handler are made and each
 carries a guard rather than a promise; `HANDOFF.md`'s "The server, and the three
@@ -22,6 +22,17 @@ is decision 1: **a web handler is exactly where a third
 `WalletKit.PublishTransaction` call site appears**, so `internal/server` may not
 import `internal/arm` or `internal/bump`, and a test in that package enforces it
 alongside the pinned count below.
+
+That ban has a third package on it now — `internal/journal` — and it is about the
+record rather than the network. It went on with the four callback seams, because
+one of them is `setup.Ask`, whose three-way shape exists so that **a comparison
+nobody made is never recorded as a verdict**. `NotAnswered` must not reach the
+`setups` table, and the enforcement is layered: `internal/webrun`'s adapter maps
+every non-answer to `NotAnswered`, `setup.Do` returns before `RecordSetup` on
+`NotAnswered` and is the only writer of that table, and no handler can name
+`journal.Setup` at all. The same ban is what makes the abort control honest —
+whether a run reached the publish call is `journal.Run.AbortTarget`'s answer, so
+the server asks for it rather than keeping a second copy of the rule.
 
 ---
 

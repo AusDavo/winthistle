@@ -8,18 +8,18 @@
 // one that went out too cheap, and recover takes apart a run that stopped
 // somewhere it should not have.
 //
-// serve is the newest and the least finished: it carries the security shape
+// serve is the newest and the least finished. It carries the security shape
 // docs/design.html asks for — loopback bind, a token printed at startup, strict
-// Origin and Host checks, no CORS — and one read-only screen, doctor's. Nothing
-// it serves can arm, publish or abort. The commands below drive the same
-// packages the rest of the UI will.
+// Origin and Host checks, no CORS — and it can now start a run, answer the four
+// questions a run asks, and stop one. What it cannot do is publish: the two
+// locks on that are the pinned call-site count and internal/server's import ban,
+// neither of them a convention. The transports, the countdown and the remaining
+// screens are still to come.
 package main
 
 import (
 	"bufio"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -39,13 +39,12 @@ import (
 	"github.com/AusDavo/winthistle/internal/doctor"
 	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
-	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/run"
 	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
-	"github.com/AusDavo/winthistle/internal/signers"
+	"github.com/AusDavo/winthistle/internal/webrun"
 )
 
 const usage = `winthistle — batch-open Lightning channels from cold storage.
@@ -292,13 +291,13 @@ func doctorCmd(ctx context.Context, args []string) error {
 
 // serveCmd starts the local web UI.
 //
-// Ctrl-C here shuts the socket down and returns. That is not the same thing as
-// Ctrl-C during a run, which cancels the run's context and unwinds it through
-// the abort path — and the difference is deliberate rather than an oversight:
-// nothing in this UI can start a run yet, and when it can, a run will be
-// cancelled by the clock or by an explicit abort rather than by a socket
-// closing. internal/server's package comment and HANDOFF.md both say why, at
-// length, because it is the most dangerous asymmetry in the change.
+// Ctrl-C here shuts the socket down and, if a run is going, cancels it and waits
+// for it to come apart. That used to say "no run is touched", which was true
+// only because nothing this UI served could start one; now that it can, the
+// honest reading of decision 2 is its own sentence — what ends a run is the
+// clock, or the operator's Ctrl-C on the process. A tab closing is still
+// nothing, and that is the asymmetry worth knowing about. internal/server's
+// package comment and HANDOFF.md both say why at length.
 func serveCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
@@ -321,6 +320,13 @@ func serveCmd(ctx context.Context, args []string) error {
 			return err
 		}
 	}
+
+	// The launcher is what a POST to /runs hands the work to. It is built even
+	// without a batch — a launcher with none reports so, and the control is
+	// absent rather than offered and then refused — and it dials nothing until a
+	// run actually starts, because `winthistle serve` has to work on a machine
+	// where LND is down. That is the state the doctor screen is read in.
+	opts.Launcher = webrun.New(cfg, opts.Doctor.Batch)
 
 	s, err := server.New(cfg, opts)
 	if err != nil {
@@ -369,7 +375,7 @@ func runCmd(ctx context.Context, args []string) error {
 	defer closeAll()
 
 	if !*yes {
-		fmt.Printf("%s\n", batchSummary(batch))
+		fmt.Printf("\n%s", webrun.Summary(batch))
 		ok, err := ask("Open this batch?")
 		if err != nil {
 			return err
@@ -381,7 +387,7 @@ func runCmd(ctx context.Context, args []string) error {
 
 	id := *runID
 	if id == "" {
-		id, err = newRunID()
+		id, err = server.NewRunID()
 		if err != nil {
 			return err
 		}
@@ -515,54 +521,28 @@ func recoverCmd(ctx context.Context, args []string) error {
 	return err
 }
 
-// connect opens everything a run or a recovery needs.
+// connect is the terminal's front door onto run.Connect.
+//
+// The dialling itself moved to internal/run when the web UI grew a second front
+// door: decision 1 is that the CLI and the browser are one code path through
+// run.Do, and two sets of dialling decisions underneath that would drift. What
+// stays here is the part that is genuinely a terminal's — stdout, and the two
+// prompts that read stdin.
 func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
 	run.Deps, func(), error) {
 
-	var d run.Deps
+	d, closeAll, err := run.Connect(ctx, cfg)
+	if err != nil {
+		return d, nil, err
+	}
 	d.Out = os.Stdout
 	d.Confirm = confirmBlunt
 
-	cli, err := lnd.Dial(ctx, cfg.LND)
-	if err != nil {
-		return d, nil, fmt.Errorf("connecting to LND at %s: %w\nTry: winthistle doctor",
-			cfg.LND.Address, err)
-	}
-	d.LND = cli
-
-	nodeCfg := cfg.Bitcoind
-	nodeCfg.Wallet = ""
-	if d.Node, err = bitcoind.New(nodeCfg); err != nil {
-		cli.Close()
+	if d.Signers, err = run.ConfiguredSigners(cfg, psbtDir, os.Stdout); err != nil {
+		closeAll()
 		return d, nil, err
 	}
-	if d.Wallet, err = bitcoind.New(cfg.Bitcoind); err != nil {
-		cli.Close()
-		return d, nil, err
-	}
-
-	j, err := journal.Open(ctx, cfg.Server.Journal)
-	if err != nil {
-		cli.Close()
-		return d, nil, fmt.Errorf("opening the run journal at %s: %w",
-			cfg.Server.Journal, err)
-	}
-	d.Journal = j
-
-	if psbtDir == "" {
-		psbtDir = strings.TrimSuffix(cfg.Server.Journal, ".db") + "-psbt"
-	}
-	if len(cfg.Signers) > 0 {
-		if d.Signers, err = signers.New(cfg.Signers, signers.Options{
-			Dir: psbtDir, Out: os.Stdout,
-		}); err != nil {
-			cli.Close()
-			j.Close()
-			return d, nil, err
-		}
-	}
-
-	return d, func() { cli.Close(); j.Close() }, nil
+	return d, closeAll, nil
 }
 
 // confirmBlunt is the only prompt in the product where a human authorises
@@ -624,29 +604,4 @@ func loadConfig(path string) (*config.Config, error) {
 			path, path)
 	}
 	return cfg, err
-}
-
-func batchSummary(b *config.Batch) string {
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "\n%d channel%s, %s in total\n", len(b.Channels),
-		prose.Plural(len(b.Channels)), prose.Sats(b.TotalSat()))
-	for _, ch := range b.Channels {
-		kind := ""
-		if ch.Private {
-			kind = "  (unannounced)"
-		}
-		fmt.Fprintf(&sb, "  %14s  %s%s\n", prose.Sats(ch.AmountSat), ch.Peer, kind)
-		fmt.Fprintf(&sb, "                  %s\n", ch.Policy.Summary())
-	}
-	return sb.String()
-}
-
-// newRunID is the journal's key: sortable, and unique even if two runs start in
-// the same second.
-func newRunID() (string, error) {
-	var b [3]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		return "", err
-	}
-	return time.Now().UTC().Format("20060102-150405") + "-" + hex.EncodeToString(b[:]), nil
 }
