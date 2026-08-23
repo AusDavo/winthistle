@@ -172,6 +172,15 @@ var registry = []Method{
 		Why:  "abort.AbandonPending: remove a pending channel from LND.",
 	},
 	{
+		Name: "/lnrpc.Lightning/ConnectPeer",
+		Use:  InApp,
+		Ops:  []Op{{"peers", "write"}},
+		Why: "peers.Check: Phase 0's peer pre-flight connects to each peer before " +
+			"anything else is asked of it. perm is false — a permanent connection " +
+			"is a lasting change to the node made by a pre-flight, and Phase 0 has " +
+			"to leave nothing behind.",
+	},
+	{
 		Name: "/lnrpc.Lightning/ExportAllChannelBackups",
 		Use:  InApp,
 		Ops:  []Op{{"offchain", "read"}},
@@ -194,16 +203,32 @@ var registry = []Method{
 		Why:  "lnd.Dial's probe: proves address, certificate and macaroon work together.",
 	},
 	{
+		Name: "/lnrpc.Lightning/GetNodeInfo",
+		Use:  InApp,
+		Ops:  []Op{{"info", "read"}},
+		Why: "peers.Check: the peer's alias, addresses and existing channel " +
+			"capacities, out of LND's own local gossip graph. Never a Lightning " +
+			"explorer — CLAUDE.md forbids one, and the graph is already on the node.",
+	},
+	{
 		Name: "/lnrpc.Lightning/ListChannels",
-		Use:  InHarness,
+		Use:  InApp,
 		Ops:  []Op{{"offchain", "read"}},
-		Why:  "regtestenv.HasOpenChannel, waiting for a fixture channel to confirm.",
+		Why: "settle.Tick: whether each member of a published batch is open yet, " +
+			"and whether its peer is online. Also regtestenv.HasOpenChannel. It was " +
+			"InHarness until Phase 2 existed, because a channel leaving " +
+			"pending_open_channels is the authoritative signal that the peer " +
+			"considers it confirmed to its own minimum_depth — which LND exposes " +
+			"nowhere else.",
 	},
 	{
 		Name: "/lnrpc.Lightning/ListPeers",
-		Use:  InHarness,
+		Use:  InApp,
 		Ops:  []Op{{"peers", "read"}},
-		Why:  "regtestenv.Peers, choosing fixture peers. The app takes its peers from the plan.",
+		Why: "peers.Check: which peers LND is already connected to, asked once for " +
+			"the whole batch and asked before connecting, so \"already connected\" " +
+			"is a fact about the node as the operator found it. Also " +
+			"regtestenv.Peers, choosing fixture peers.",
 	},
 	{
 		Name: "/lnrpc.Lightning/NewAddress",
@@ -236,6 +261,16 @@ var registry = []Method{
 		Ops:  []Op{{"offchain", "read"}},
 		Why: "abort.AbandonPending's own pending check — the protection it re-establishes " +
 			"before falling back to i_know_what_i_am_doing.",
+	},
+	{
+		Name: "/lnrpc.Lightning/UpdateChannelPolicy",
+		Use:  InApp,
+		Ops:  []Op{{"offchain", "write"}},
+		Why: "settle.ApplyPolicy: Phase 2 closes the fee-policy race, applying the " +
+			"per-peer policy chosen in Phase 0 the moment each channel goes open. " +
+			"Its failures arrive inside a successful response — failed_updates — " +
+			"rather than as an error, which is why that call has a function of its " +
+			"own.",
 	},
 	{
 		Name: "/walletrpc.WalletKit/LeaseOutput",

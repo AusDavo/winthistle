@@ -21,6 +21,7 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
 // Harness addresses, fixed by regtest/docker-compose.yml's port mappings.
@@ -198,10 +199,18 @@ func ensureWalletLoaded(ctx context.Context, node *bitcoind.Client, name string)
 	return err
 }
 
-// Mine advances the chain by n blocks, paying the miner wallet.
+// Mine advances the chain by n blocks, paying the miner wallet, and waits for
+// alice to catch up.
+//
+// The waiting is not tidiness. LND refuses to open a channel while its wallet is
+// behind — "channels cannot be created before the wallet is fully synced",
+// checked in handleFundingOpen and at the initiator too — so a test that mines
+// and then immediately opens a stream fails for a reason that has nothing to do
+// with what it was testing. One block is usually enough to trigger it; 2016 is
+// certainly enough.
 func (e *Env) Mine(t *testing.T, n int) {
 	t.Helper()
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
 	var addr string
@@ -210,6 +219,35 @@ func (e *Env) Mine(t *testing.T, n int) {
 	}
 	if err := e.Node.Call(ctx, "generatetoaddress", []any{n, addr}, nil); err != nil {
 		t.Fatalf("generatetoaddress %d: %v", n, err)
+	}
+
+	var height int64
+	if err := e.Node.Call(ctx, "getblockcount", nil, &height); err != nil {
+		t.Fatalf("getblockcount: %v", err)
+	}
+	e.AwaitSynced(t, height)
+}
+
+// AwaitSynced blocks until alice's wallet has reached that height.
+func (e *Env) AwaitSynced(t *testing.T, height int64) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	deadline := time.Now().Add(4 * time.Minute)
+	for {
+		info, err := e.Alice.Lightning.GetInfo(ctx, &lnrpc.GetInfoRequest{})
+		if err != nil {
+			t.Fatalf("GetInfo while waiting for alice to reach height %d: %v", height, err)
+		}
+		if int64(info.GetBlockHeight()) >= height && info.GetSyncedToChain() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("alice is at height %d and the chain is at %d after four "+
+				"minutes", info.GetBlockHeight(), height)
+		}
+		time.Sleep(250 * time.Millisecond)
 	}
 }
 
@@ -246,4 +284,74 @@ func (e *Env) TryInMempool(txid string) (bool, error) {
 		return false, nil
 	}
 	return false, err
+}
+
+// peerPorts are the gRPC ports docker-compose.yml maps for the three peers.
+var peerPorts = map[string]string{
+	"bob":   "127.0.0.1:10010",
+	"carol": "127.0.0.1:10011",
+	"dave":  "127.0.0.1:10012",
+}
+
+// PeerNode dials one of alice's peers directly.
+//
+// Only the settlement tests need this, and they need it for one thing that
+// cannot be observed from alice at all: LND's funding horizon is enforced by the
+// *responder*, not the initiator. waitForFundingWithTimeout starts waitForTimeout
+// only when !ch.IsInitiator, so after 2016 blocks the peer closes its side as
+// FundingCanceled while our node waits forever. Proving that means asking the
+// peer.
+//
+// It uses the peer's own admin.macaroon, like alice's, and rides the same method
+// guard — so a test that asked a peer something the registry does not list would
+// fail here rather than quietly widening what this build calls.
+func (e *Env) PeerNode(t *testing.T, name string) *lnd.Client {
+	t.Helper()
+
+	addr, ok := peerPorts[name]
+	if !ok {
+		t.Fatalf("no such harness peer: %q", name)
+	}
+	certPath := filepath.Join(e.Root, "regtest", "creds", name, "tls.cert")
+	macPath := filepath.Join(e.Root, "regtest", "creds", name, "admin.macaroon")
+	for _, p := range []string{certPath, macPath} {
+		if _, err := os.Stat(p); err != nil {
+			t.Skipf("credentials for %s missing (%s) — run: make -C regtest reset", name, p)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	cli, err := lnd.Dial(ctx, lnd.Config{
+		Address: addr, TLSCert: certPath, Macaroon: macPath,
+	})
+	if err != nil {
+		t.Skipf("%s at %s not answering: %v — run: make -C regtest reset", name, addr, err)
+	}
+	t.Cleanup(func() { cli.Close() })
+	return cli
+}
+
+// PeerNamed returns the harness name of the peer holding that pubkey.
+//
+// The tests choose peers by pubkey, because that is what the app deals in, and
+// PeerNode needs a container name. Asking each node who it is is the only way to
+// map between them that survives `make harness` regenerating every key.
+func (e *Env) PeerNamed(t *testing.T, pubkey string) string {
+	t.Helper()
+	for name := range peerPorts {
+		cli := e.PeerNode(t, name)
+		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		info, err := cli.Lightning.GetInfo(ctx, &lnrpc.GetInfoRequest{})
+		cancel()
+		if err != nil {
+			t.Fatalf("asking %s who it is: %v", name, err)
+		}
+		if info.GetIdentityPubkey() == pubkey {
+			return name
+		}
+	}
+	t.Fatalf("no harness peer has pubkey %s", pubkey)
+	return ""
 }

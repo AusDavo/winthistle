@@ -51,6 +51,7 @@ package reserve
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math"
 
@@ -299,4 +300,31 @@ func leasedBalance(ctx context.Context, cli Client) (int64, error) {
 		total += int64(l.GetValue())
 	}
 	return total, nil
+}
+
+// ErrBatchChanged means the batch that opened is not the batch this finding was
+// made about.
+var ErrBatchChanged = errors.New("the reserve was checked for a different batch")
+
+// StillApplies reports whether this finding describes the batch b.
+//
+// The pre-flight runs in Phase 0, before any funding stream exists, against the
+// channel list the operator approved. By the time the streams are open that list
+// could have changed — a peer dropped, a channel flipped to private, a batch
+// re-planned — and a finding is about a particular count of announced channels
+// and nothing else. Two figures in it move with that count: AtVerify is
+// meaningless if Public was zero and is not now, and AfterBatch is simply the
+// wrong number for a different n.
+//
+// This costs no RPC. It is the cheapest possible check that the answer on the
+// screen is an answer about the batch on the screen, and the armed window is
+// where a stale one would first do damage.
+func (f Finding) StillApplies(b Batch) error {
+	if f.Batch == b {
+		return nil
+	}
+	return fmt.Errorf("%w: checked %d announced and %d private, opening %d and %d. "+
+		"Re-run the pre-flight — AtVerify and AfterBatch are both figures about a "+
+		"particular count of announced channels",
+		ErrBatchChanged, f.Batch.Public, f.Batch.Private, b.Public, b.Private)
 }

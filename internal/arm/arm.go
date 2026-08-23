@@ -62,6 +62,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
+	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"google.golang.org/grpc"
@@ -161,6 +162,12 @@ func (s *Streams) NewChannels() []journal.NewChannel {
 
 // PublicCount is how many members of the batch are announced, which is the
 // figure RequiredReserve should be asked about.
+//
+// Not len(s.All). enforceNewReservedValue returns before it counts anything for
+// an unannounced channel, and CurrentNumAnchorChans skips private channels when
+// counting, so a private member is invisible to LND's reserve check twice over.
+// Passing n for a mixed batch overstates the requirement and would have the
+// operator top the node up for a check that is not going to run.
 func (s *Streams) PublicCount() int {
 	n := 0
 	for _, st := range s.All {
@@ -169,6 +176,36 @@ func (s *Streams) PublicCount() int {
 		}
 	}
 	return n
+}
+
+// Batch is the reserve pre-flight's view of the streams that actually opened.
+//
+// The pre-flight runs in Phase 0, against the planned channel list and before
+// any stream exists — see BatchOf. This is the same count taken again once LND
+// has the streams, so that the two can be compared: a Phase 0 finding is about a
+// particular batch, and a batch that changed shape between the check and the arm
+// has a finding that no longer describes it.
+func (s *Streams) Batch() reserve.Batch {
+	public := s.PublicCount()
+	return reserve.Batch{Public: public, Private: len(s.All) - public}
+}
+
+// BatchOf is the reserve pre-flight's view of a batch that has not opened yet.
+//
+// This is what Phase 0 passes to reserve.Check: the announced and unannounced
+// counts, taken from the plan rather than from n. It is deliberately the same
+// arithmetic Streams.Batch does, so that comparing the two compares the batch
+// rather than two different ways of counting it.
+func BatchOf(chans []Channel) reserve.Batch {
+	var b reserve.Batch
+	for _, c := range chans {
+		if c.Private {
+			b.Private++
+			continue
+		}
+		b.Public++
+	}
+	return b
 }
 
 // Close hangs up every stream without cancelling its shim.

@@ -18,7 +18,20 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/lightningnetwork/lnd/lnrpc"
+	"google.golang.org/grpc"
 )
+
+// ShimCanceller is the slice of LND a shim cancel needs: one method.
+//
+// Narrow rather than lnrpc.LightningClient, because cancelling a shim is
+// something the peer pre-flight has to do too — internal/peers probes with
+// arm.Client and must be able to take its own probe down — and a client that
+// can open a stream should not have to be a client that can abandon a channel.
+// lnrpc.LightningClient satisfies it, so abort.Run is unchanged.
+type ShimCanceller interface {
+	FundingStateStep(ctx context.Context, in *lnrpc.FundingTransitionMsg,
+		opts ...grpc.CallOption) (*lnrpc.FundingStateStepResp, error)
+}
 
 // ErrNoShim reports that LND holds no funding intent for that pending channel
 // id — it was never registered, or a previous cancel already took it.
@@ -39,7 +52,7 @@ var ErrNoShim = errors.New("lnd holds no funding intent for that pending channel
 // the same transaction. Nothing has been broadcast, so nothing is lost.
 //
 // It returns ErrNoShim if there was no intent to cancel.
-func CancelShim(ctx context.Context, cli lnrpc.LightningClient, id lnd.PendingChanID) error {
+func CancelShim(ctx context.Context, cli ShimCanceller, id lnd.PendingChanID) error {
 	_, err := cli.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
 		Trigger: &lnrpc.FundingTransitionMsg_ShimCancel{
 			ShimCancel: &lnrpc.FundingShimCancel{

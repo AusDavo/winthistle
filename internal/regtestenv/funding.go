@@ -351,6 +351,30 @@ func (e *Env) Finalize(t *testing.T, s *Stream, rawTxHex string) lnd.ChannelPoin
 // channel with no force-close path left.
 func (e *Env) OpenAndConfirmPlainChannel(t *testing.T, peerPubkey string, amountSat int64) lnd.ChannelPoint {
 	t.Helper()
+	cp := e.OpenPlainChannel(t, peerPubkey, amountSat)
+	e.Mine(t, 6)
+
+	deadline := time.Now().Add(90 * time.Second)
+	for {
+		if e.HasOpenChannel(t, cp) {
+			return cp
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s did not confirm within 90s", cp)
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
+
+// OpenPlainChannel is OpenAndConfirmPlainChannel without the mining.
+//
+// Split out for the settlement tests, which have to advance the chain one block
+// at a time: the depth at which a channel first appears open is the peer's own
+// minimum_depth read from above, and mining six blocks at once throws that
+// reading away. LND exposes minimum_depth over no RPC, so this is the only place
+// it can be learned.
+func (e *Env) OpenPlainChannel(t *testing.T, peerPubkey string, amountSat int64) lnd.ChannelPoint {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
 	defer cancel()
 
@@ -372,19 +396,7 @@ func (e *Env) OpenAndConfirmPlainChannel(t *testing.T, peerPubkey string, amount
 	if err != nil {
 		t.Fatalf("reading the funding outpoint: %v", err)
 	}
-
-	e.Mine(t, 6)
-
-	deadline := time.Now().Add(90 * time.Second)
-	for {
-		if e.HasOpenChannel(t, cp) {
-			return cp
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s did not confirm within 90s", cp)
-		}
-		time.Sleep(500 * time.Millisecond)
-	}
+	return cp
 }
 
 // HasOpenChannel reports whether the channel is in alice's set of open channels.

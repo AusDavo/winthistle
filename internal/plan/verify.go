@@ -529,7 +529,7 @@ func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
 	// both attach it for an output of their own wallet, and without it a
 	// multisig child cannot be sized.
 	witnessScript := packet.Outputs[change.Index].WitnessScript
-	child, err := childVsize(change.Script, witnessScript)
+	child, err := ChildVsize(change.Script, witnessScript)
 	if err != nil {
 		note := fmt.Sprintf("whether the change output could fund a CPFP child: %s", err)
 		if p.Change.MinimumSat > 0 {

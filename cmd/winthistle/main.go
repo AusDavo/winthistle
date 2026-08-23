@@ -1,6 +1,6 @@
 // Command winthistle is the local, guided UI for batch-opening Lightning
-// channels. Only the abort paths and the pre-flights exist so far — see
-// HANDOFF.md for build order.
+// channels. The sequence and both untimed ends of it exist as packages; the
+// server and the UI do not — see HANDOFF.md for build order.
 package main
 
 import (
@@ -16,8 +16,11 @@ const usage = `winthistle — batch-open Lightning channels from cold storage.
 Commands:
   print-macaroon-command   print the lncli bakemacaroon line for this build
 
-This build has no funding flow yet: the abort paths, the run journal and the
-reserved-value pre-flight are what exist. See HANDOFF.md.
+This build has no server and no UI yet. What exists is the whole sequence as
+packages: the peer pre-flight, the fee source, the dress rehearsal and the
+reserve check for Phase 0; the armed window and its single publish for Phase 1;
+the confirmation watch, the policy pass and the CPFP child for Phase 2; and the
+abort and recovery paths under all of it. See HANDOFF.md.
 `
 
 func main() {

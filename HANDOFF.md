@@ -3,18 +3,24 @@
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 
-**State: the happy path works end to end on regtest.** Three channels, one
-transaction funded from the simulated 2-of-2 cold wallet, both halves signing
-partially, combined and finalized in-app, verified against the plan and against
-all three streams, finalized to three `chan_pending` receipts with the mempool
-checked after every one of them, backups exported, published exactly once,
-confirmed, and all three channels open. Everything before it still holds: the
-abort paths, the run journal, the generated macaroon, the reserved-value
-pre-flight, the watch-only Core wallet and the batch-plan verifier.
+**State: all three phases exist as packages, and every one of them is exercised
+against the live regtest node.** Phase 0 — peer pre-flight, fee rate, anchor
+reserve, dress rehearsal — Phase 1's armed window and its single publish, and
+Phase 2's confirmation watch, policy pass and CPFP child. The abort paths, the
+run journal, the generated macaroon, the watch-only Core wallet and the
+batch-plan verifier all still hold. What is missing is the server, the UI,
+`winthistle doctor`, signet, and the mainnet cold probe.
 
-Two of `docs/design.html`'s open questions are now answered rather than open —
-Core's `finalizepsbt` and the ten-minute clock. The two that remain both sit past
-the broadcast line.
+All four of `docs/design.html`'s open questions are now answered. The two that
+were still open both sat past the broadcast line, and both are closed by Phase 2:
+`UpdateChannelPolicy` on a pending channel, and the settlement pass as a whole.
+The second is closed on regtest only — the first small live batch is still the
+thing that settles it on mainnet.
+
+**Three of the design's own claims turned out to be wrong**, and each is written
+up below: the shim probe is not free, `minimum_depth` cannot be read by the
+initiator at all, and the peers' 2016-block horizon is reachable on regtest in
+about ten seconds of mining rather than being out of reach.
 
 Private repo at `AusDavo/winthistle`, goes public once the cold probe passes on
 mainnet and the abort paths work.
@@ -37,6 +43,10 @@ mainnet and the abort paths work.
 | `internal/reserve` | the anchor-reserve pre-flight: predicts `psbt_verify`'s verdict before a signature is asked for, and says what to do about it |
 | `internal/combine` | I-2's only real code: merge the signers' partials, finalize in-app, execute every witness, re-verify against the plan |
 | `internal/arm` | the armed window — steps 2 to 9, and the only place in the repo that can broadcast |
+| `internal/fees` | the batch's fee rate, from Core's `estimatesmartfee` and nowhere else — with a relay floor, a configured floor, and a refusal to guess |
+| `internal/peers` | Phase 0's peer pre-flight: the key check, the local gossip graph, and the shim probe that is the only authoritative answer — plus what that probe costs |
+| `internal/rehearsal` | Phase 0's dress rehearsal and the measurement the 5:00 abort gate compares against |
+| `internal/settle` | Phase 2: the confirmation watch, `UpdateChannelPolicy` polled unconditionally, LND's funding horizon, and the CPFP child |
 | `internal/regtestenv` | test support: drives funding streams, signs with the cold wallet's two halves, and aborts what it opened |
 
 `internal/prose` is a lift-and-shift out of `internal/reserve/report.go`, which
@@ -133,12 +143,18 @@ enforcement rather than about the harness.
    open. `fundingTimeout` in `funding/manager.go` only fires for the responder
    after `DefaultMaxWaitNumBlocksFundingConf` = 2016 blocks from the funding
    height — and on regtest, where nothing mines, that is never. Every abort test
-   therefore consumes one of each peer's pending-channel slots permanently, which
-   is why `--maxpendingchannels` is now 200 rather than Polar's 10; `make reset`
-   is still the actual cure. Consequence past the harness: after an abort, a
-   re-arm against the same peer costs another of *its* slots, and a peer running
-   the LND default of 1 will refuse. "Re-arming is free" holds for cancelled
-   shims, not for channels that already reached `chan_pending`.
+   therefore consumes one of each peer's pending-channel slots, which is why
+   `--maxpendingchannels` is now 200 rather than Polar's 10. Consequence past the
+   harness: after an abort, a re-arm against the same peer costs another of *its*
+   slots, and a peer running the LND default of 1 will refuse. "Re-arming is
+   free" holds for cancelled shims, not for channels that already reached
+   `chan_pending`.
+
+   **Corrected by the Phase 2 work: "permanently" and "`make reset` is the actual
+   cure" were both wrong.** "Where nothing mines" was the load-bearing clause,
+   and mining is cheap — 2016 blocks takes about ten seconds on this machine, and
+   every peer then times every stale pending channel out at once. Observed:
+   bob went from five pending to zero. See "The funding horizon" below.
 
 7. **`make -C regtest info` never worked.** The recipe's inline Python used `\"`
    inside an f-string replacement field; Python 3.12+ parses that backslash as a
@@ -625,25 +641,380 @@ that can drift from the thing it is meant to be testing, and the options that ar
 not negotiable — `replaceable: false`, `lockUnspents`, `bip32derivs` — now live in
 the app, once.
 
+## Phase 0, and the two things the design got wrong about it
+
+`internal/peers`, `internal/fees` and `internal/rehearsal` are the untimed end
+before the clock starts. Everything in them is free and repeatable — except one
+thing, which is the first finding below.
+
+### The shim probe is not free, and probing then arming collides with itself
+
+`docs/design.html` calls the shim probe "free and abortable" and puts it in Phase
+0 for that reason. It is free of fees and free of risk — nothing is signed,
+nothing is broadcast, and `shim_cancel` still works after a successful
+`psbt_verify` — but it is not free of the peer's patience, and that turns out to
+be the constraint that matters.
+
+Reading `handleFundingOpen` at `v0.19.3-beta`, in order: the peer counts its live
+reservations for us plus its pending channels with no thaw height, and refuses
+with `ErrMaxPendingChannels` if that count already reaches
+`--maxpendingchannels`. **LND's default for that flag is 1.** Then it checks max
+chan size, min chan size and the channel acceptor. Only after all of those does
+it call `InitChannelReservation` and send `accept_channel`.
+
+Two consequences, in opposite directions:
+
+- **A refused probe costs nothing.** Every limit check runs *before* the peer
+  creates anything, so a refusal leaves no reservation behind. Probing downwards
+  to find a peer's minimum is therefore free, however many times you do it.
+- **An accepted probe costs one of that peer's pending-channel slots, and
+  `shim_cancel` does not give it back.** `CancelFundingIntent`
+  (`lnwallet/wallet.go`) deletes an entry in our own wallet's map, calls
+  `intent.Cancel()`, and sends the peer *nothing at all*. The peer's own zombie
+  sweeper releases it, after `DefaultReservationTimeout` with up to
+  `DefaultZombieSweeperInterval` of slack — ten minutes plus one.
+
+So a Phase 0 that probes all *n* peers and then immediately arms is a Phase 0
+that collides with its own probes. Against a peer running the default, step 2 is
+refused with *"Number of pending channels exceed maximum"* — on the clock, with
+the cold wallet out, for a reason we created ourselves a minute earlier.
+
+**What that means for the flow**, and it is a change to the phase model rather
+than a caveat on it:
+
+- **Do not probe as part of arming.** A successful probe *is* step 2 with the
+  answer thrown away: same RPC, same `no_publish` shim, same reservation, same
+  ten minutes. `peers.Do` is `arm.Open` plus `abort.CancelShim`, which is exactly
+  why. If the batch is ready to arm, arm it.
+- **Probe as a separate, earlier act**, when a peer's minimum is genuinely
+  unknown and the graph proxy is not good enough — then wait out
+  `Probe.HoldsUntil` before arming. `peers.ReadyToArm` is the gate, and it
+  refuses on the conservative reading because the peer's own limit is not
+  observable from here.
+- The probe therefore **starts a clock**, which is the one property Phase 0 was
+  defined by not having. That is worth saying out loud in the UI rather than
+  discovering.
+
+`TestAnAcceptedProbeIsAuthoritativeAndCostsAPeerSlot` asserts both halves against
+the live harness, including that the same peer accepts a *second* reservation
+straight away — this harness runs `--maxpendingchannels=200`, so the gate is a
+judgement about the peer's configuration and not a lock.
+
+### The peer's refusal survives, under a claim that it timed out
+
+`failFundingFlow` forwards the peer's real text only for
+`lnwallet.ReservationError`, `lnwire.FundingError` and
+`chanacceptor.ChanAcceptError`; everything else becomes *"funding failed due to
+internal error"*. So a peer's minimum *does* reach us — `chan size of 0.00001 BTC
+is below min chan size of 0.0002 BTC` — which is what makes the probe worth
+running at all.
+
+It arrives under two prefixes, and the outer one is a lie. `handleErrorMsg` wraps
+**every** peer error in `chanfunding.ErrRemoteCanceled` when the reservation is a
+PSBT one — *"if this was a PSBT funding flow, the remote likely timed out because
+we waited too long"* — so a peer that refused in 31 milliseconds because the
+channel was too small arrives claiming it *"possibly timed out"*. `peers.Unwrap`
+strips both prefixes and classifies what is left, and the report says how long
+the peer actually took, so the operator is never told a timeout happened when one
+did not.
+
+One more thing worth knowing about the amounts: they render through
+`btcutil.Amount.String()`, which is `strconv.FormatFloat(v, 'f', -8, 64)` and
+therefore **trims trailing zeros**. LND's own `MinChanFundingSize` of 20,000 sat
+prints as `0.0002 BTC`, not `0.00020000 BTC`. A parser that assumed eight decimal
+places reports a minimum of zero.
+
+### `estimatesmartfee` never answers on regtest, and it is not a fault
+
+There was no fee source in the repo at all; `plan.Fee.TargetSatPerVB` came from
+the caller and every test hardcoded 10. `internal/fees` is it, and Core is the
+only source — a fee API is handed the size of what is being built and the moment
+it is being built, which is most of what this tool exists not to leak.
+
+`estimatesmartfee` does not fail on a node with no block history. It *succeeds*,
+returns no `feerate` field at all, and puts `Insufficient data or no feerate
+found` in an `errors` array. A client that read the absent field as a rate would
+build the batch at zero sat/vB; one that read the array as an RPC failure would
+refuse to build on a node that is working perfectly well. Both are wrong, and the
+state is the ordinary one for regtest, for a freshly synced node, and for one
+that has been offline.
+
+Note what the harness's `-fallbackfee=0.0002` does **not** do here: it is a
+wallet setting, consulted by Core's own coin selection, and `estimatesmartfee`
+never looks at it.
+
+So the rate is the largest of three figures, and `Rate.Source` says which won:
+Core's estimate, the node's relay floor (the higher of `mempoolminfee` and
+`minrelaytxfee`), and a configured floor from `winthistle.toml`. **A node with no
+estimate and no configured floor is an error, not a guess** — I-4 forbids
+replacing the funding transaction, so a rate chosen badly costs a CPFP child and
+another cold-wallet session.
+
+`CONSERVATIVE` is the default mode, which is not the usual choice. The two modes
+differ in how willing they are to believe a recent fall in fees; for an ordinary
+payment the economical mode is right because a payment that lags can be replaced.
+This transaction cannot be.
+
+### The dress rehearsal, and the gate that existed only in the config block
+
+`limits.abort_after_signing_seconds = 300` was in `docs/design.html`'s config
+block and nowhere else. `internal/rehearsal` is the measurement and
+`rehearsal.Gate` is the refusal.
+
+The decoy mirrors the batch's *shape*, not merely its value: one output per
+member at the same amount, paying fresh addresses of the cold wallet's own, at
+the same fee rate and the same confirmation floor. Both halves of what a hardware
+device spends its time on — inputs to sign, outputs to display — therefore come
+out the same, which is what makes the measurement a prediction rather than a
+stopwatch reading.
+
+Two choices in it are deliberate:
+
+- **The measured number is the signing round alone**, from handing the first
+  device the PSBT to the last partial coming back. The build and the merge happen
+  off the peers' clock and must not count against a gate that exists to protect
+  the window.
+- **`Measurement` carries no transaction.** By the end of `Run` there is briefly
+  a fully signed transaction spending the coins the real batch is about to use.
+  It pays them straight back to cold storage, so publishing it would lose
+  nothing — but it would spend the batch's inputs, and the batch would then fail
+  at build time or, worse, at `psbt_verify` with the cold wallet already out. So
+  the bytes do not leave the package, the way `arm.Armed` keeps its raw
+  transaction unexported, and Core's coin locks are released on every path.
+
+`rehearsal.Gate` refuses on three counts, not one: a device that did not return a
+usable partial, a decoy `testmempoolaccept` would not have taken, and a round
+slower than the limit. The first is the more important — a signer that produces
+malformed witnesses is one of the two failures the phase exists to catch.
+
+### The reserve check needs the announced count, and now gets it
+
+`internal/reserve` was already Phase 0's reserve half and already knew that
+private members are invisible to LND's check twice over. What was missing was the
+wiring: `arm.Streams.PublicCount()` was exported and nothing called it, and no
+test opened a private channel, so the whole private path was written and
+unexercised.
+
+It is wired now. `arm.BatchOf` counts a planned batch the way `reserve.Check`
+needs it, `Streams.Batch()` counts the streams that actually opened the same way,
+and `reserve.Finding.StillApplies` compares the two: a Phase 0 finding is about a
+particular count of announced channels, and a batch that changed shape between
+the check and the arm has a finding that no longer describes it. That comparison
+costs no RPC and the armed window is where a stale figure would first do damage.
+`TestAPrivateMemberIsInvisibleToTheAnchorReserve` opens a mixed batch of three
+against the live node and asserts the counts on both sides of it.
+
+## Phase 2, and what LND will not tell an initiator
+
+`internal/settle` is the settlement pass: from the single publish to
+active-and-policied. Nothing in it can lose money — the transaction is public and
+every channel is already recoverable — so what it watches is fees, time, and the
+one hazard past the end.
+
+### `UpdateChannelPolicy` on a pending channel does not fail
+
+`docs/design.html` left this open — "will it accept a channel point that is
+pending but not yet active, or must Phase 2 poll?" — and defused it by polling.
+The instinct was right and the answer is worse than either option the question
+offered.
+
+The call **succeeds**. `localchans.Manager.UpdatePolicy` walks the graph's
+outgoing edges, finds no edge for the channel, falls through to `FetchChannel`,
+sees `IsPending`, and appends a `FailedUpdate` with reason
+`UPDATE_FAILURE_PENDING` and the text `not yet confirmed`. `rpcserver.go` then
+returns that list inside a `PolicyUpdateResponse` **with a nil error**.
+
+So a caller that checked only `err` would record a policy it had not applied, and
+go on routing at LND's defaults — 1000 msat base and 1 ppm, from
+`chainreg.DefaultBitcoinBaseFeeMSat` and `DefaultBitcoinFeeRate` — believing
+otherwise. `settle.ApplyPolicy` exists as a function rather than an inline call
+for exactly this: `Applied` is only ever true when `failed_updates` came back
+empty. `TestUpdateChannelPolicyRefusesAPendingChannelInsideASuccessOK` asserts it
+against the live node, and asserts LND's side of it first so the finding is about
+LND rather than about us.
+
+`UPDATE_FAILURE_PENDING`, `NOT_FOUND` and `INTERNAL_ERR` are retried;
+`INVALID_PARAMETER` is not, because waiting cannot make a CLTV delta of 4 valid
+and a loop that retried it forever would leave a channel routing at 1 ppm with a
+spinner beside it.
+
+### `minimum_depth` cannot be read by the initiator at all
+
+This one contradicts the design in two places. Phase 0 says to "check min and max
+channel size, accepted commitment type, and `minimum_depth`" and to "show the
+user *usable after k confirmations* per channel, up front". Phase 2 says to
+"track depth against each peer's `minimum_depth`". Neither is possible.
+
+The peer states `min_depth` in `accept_channel`. LND stores it as
+`OpenChannel.NumConfsRequired` and exposes it over **no RPC**: grepping
+`lnrpc/*.proto` at `v0.19.3-beta`, `min_accept_depth` appears exactly once, on
+`ChannelAcceptResponse` — the *responder's* side of somebody else's channel.
+`PendingChannels` does not carry it either; its `reserved 2` is a former
+`confirmation_height` field and there is a standing `TODO(roasbeef): need to
+track confirmation height`.
+
+Three things stand in, in descending order of certainty:
+
+1. **The observed depth.** When a channel first appears in `ListChannels`, the
+   number of confirmations it had at that moment is the peer's `minimum_depth`,
+   from above. It is authoritative, it is an upper bound because the loop polls,
+   and it arrives far too late to plan with — which makes it exactly the right
+   thing to record for the *next* batch. `settle.State.ObservedDepth` is written
+   once and never revised: on a later pass the transaction is merely older.
+2. **`settle.ExpectedDepth`,** which reproduces the `NumRequiredConfs` closure
+   wired up in `server.go`: 6 above `MaxFundingAmount`, otherwise
+   `6 * stake / MaxFundingAmount` clamped into `[3, 6]`. It is a prediction about
+   a peer running stock LND and the reports say so. For the harness's 250,000 sat
+   fixtures it predicts 3, and the live test observed 3.
+3. Nothing else. There is no gossip field, and no third party may be asked.
+
+The depth count itself comes from Core, not LND — `gettransaction` falling back
+to `getrawtransaction`. Without Core the settlement still works, because a
+channel leaving `pending_open_channels` is the authoritative signal and needs
+nobody's help; the operator just sees "not yet" instead of "2 of an expected 3".
+
+### The funding horizon, and how cheap it is to reach
+
+A funding transaction that never confirms is not a stalemate, it is asymmetric.
+After `lncfg.DefaultMaxWaitNumBlocksFundingConf` = 2016 blocks from the broadcast
+height, the **responder** gives up: `waitForFundingWithTimeout` starts
+`waitForTimeout` only `if !ch.IsInitiator && !ch.IsZeroConf()`, and `fundingTimeout`
+then closes its side as `FundingCanceled`. Our node — the initiator — waits
+forever, by design and with a `TODO` next to it. If the transaction then confirms
+we hold an open channel the peer has forgotten, and the only way out is a
+force-close.
+
+LND publishes the countdown, which the design did not know: `PendingChannels`
+reports `funding_expiry_blocks`, computed in `rpcserver.go` as
+`waitBlocksForFundingConf + pendingChan.BroadcastHeight() - currentHeight`, and
+its own proto says *"a negative value means the channel responder has very likely
+canceled the funding"*. `settle.State.ExpiryBlocks` is that number and the report
+turns it into a warning at 432 blocks and an urgent one at 144.
+
+**Reachable on regtest, and quickly.** `TestTheFundingHorizonIsReachedByMining`
+arms one channel, never publishes it, and mines 2016 blocks: about ten seconds on
+this machine. Measured, to the block:
+
+- at exactly 2016 blocks `funding_expiry_blocks` is **0**, not 1 — the boundary
+  is inclusive on both sides, since `waitForTimeout` fires on
+  `epoch.Height >= maxHeight`. Zero already means gone.
+- one block later it is **-1**, and bob has dropped the channel entirely.
+- alice still lists it as a pending open, and still will. The test asserts that
+  too, because if the initiator ever *did* start timing out, the hazard this
+  whole section describes would have changed shape.
+
+The side effect is the correction to finding 6 above: mining past the horizon is
+also the cheapest way to clear the pending channels that aborted batches leave on
+the peers, and it is far quicker than `make harness`.
+
+### The CPFP child, and the arithmetic Core already does
+
+I-4 says the batch can never be replaced, so a batch that is underpaying can only
+be accelerated by spending its own change. `internal/plan` already computed the
+floor that keeps such a child viable (`ChangeFloor`, `DefaultCPFPMultiple`);
+`settle.BuildChild` is where one actually gets built.
+
+The finding here is Core's, not LND's. **`walletcreatefundedpsbt`'s `fee_rate` is
+not the child's own rate when the child spends an unconfirmed input.** Core
+accounts for the unconfirmed ancestors and charges the fee that lifts the whole
+package to the rate it was given:
+
+    fee = ceil(rate * (parentVsize + childVsize)) - parentFee
+
+which is, term for term, `plan.ChildFeeSat` — the expression `ChangeFloor` is
+built out of. Measured against Core 29 at 50, 200 and 600 sat/vB on a 7,007 vB
+parent paying 1 sat/vB: exact agreement at all three, to the satoshi.
+
+So `BuildChild` asks Core for the package rate and then checks the answer with
+its own arithmetic, which is the relationship `internal/plan` already has with
+`psbt_verify`. It is one call, not two. Three options in it are load-bearing:
+
+- `add_inputs: false`. A second, already-confirmed input would make a cheaper
+  child and would also let a miner take the child without the parent, which is
+  the one thing a CPFP child must not allow.
+- `subtractFeeFromOutputs: [0]`. The only input is the change and the output
+  already claims all of it, so there is nowhere else the fee can come from — and
+  it is what stops Core adding a change output of its own.
+- `include_unsafe: true`. Core's "unsafe" is a heuristic about provenance: an
+  unconfirmed output is safe only if every input of the transaction that created
+  it belongs to this wallet. That holds for a batch the cold wallet funded and
+  does not hold in general. The input here is named explicitly, so there is no
+  coin selection for the heuristic to protect, and without it a batch whose
+  parent Core distrusts could not be accelerated at all — which under I-4 leaves
+  it with no remedy.
+
+The reported package rate is a **floor**, not an estimate: the child's size is
+measured with `plan.SizeOf`, which uses the verifier's upper bounds, so the
+transaction pays at least that much per virtual byte. `RateTolerance` is 2%,
+which covers the gap between our 73-byte signatures and Core's dummies and
+nothing else — a genuine failure to bump misses by orders of magnitude.
+
+When Core refuses, it says only *"The transaction amount is too small to pay the
+fee"*, which names neither the shortfall nor the rate the change *could* reach.
+Both are what the operator needs, since "a smaller lift" is the remaining option.
+So the refusal is re-derived: the child's size is computed from the change
+output's own `scriptPubKey` and `witnessScript`, read back from `listunspent`, via
+`plan.ChildVsize` — the same estimate the verifier used when it decided this
+change output was big enough. No second build is needed and none is made.
+
+The child is returned **unsigned**, and that is the shape of it: the change
+belongs to cold storage, so accelerating the batch costs another signing round.
+There is no shortcut that does not amount to a hot key able to spend the batch's
+change.
+
+### The recovery screen
+
+`CLAUDE.md` says the recovery screen is the highest-stakes copy in the product
+and should be written before the happy path. The happy path arrived first; that
+debt is paid in `internal/prose/recovery.go`.
+
+Three things decide everything the operator does next, and all three come out of
+the journal without asking LND anything — so it is the same screen on a node that
+is down:
+
+- **whether the run's transaction might be public.** `RecoveryList` flags it and
+  `Recovery` refuses outright, in the register the situation deserves: this is
+  the one combination in the design that loses money, and the screen says so and
+  then says what to do instead (look for the txid; re-broadcast from the
+  journal; do not abandon; do not replace).
+- **which channels reached `chan_pending` and which did not** — one side is free
+  to cancel, the other costs a peer slot for 2016 blocks, and the screen prices
+  both before the operator presses anything.
+- **what an abort will not clean up.** It is local. The peers keep their side, and
+  telling somebody their node is clean when their peers are not is how a second
+  incident starts.
+
+`BluntConfirmation` is the only prompt in the product where a human authorises
+something that could lose funds if the premise were wrong, so it says what the
+premise is, why LND's refusal of the safe flag is expected rather than alarming,
+what the fallback gives up, and what has already been checked on their behalf.
+
+The copy is tested for what it must say and for the pane it must fit in.
+`TestTheRecoveryScreensStayInThePane` caught a real overrun: a 64-character txid
+beside a label does not fit 78 columns, so txids and addresses now get their own
+line at a small indent throughout.
+
 ## Next actions, in order
 
-1. **Phase 0 and Phase 2, the two ends the sequence does not include.**
-   `internal/arm` covers steps 2 to 9; what is around it is still the caller's
-   business. Phase 0 needs peer pre-flight (`ConnectPeer`, `GetNodeInfo`, the
-   shim probe that reads `accept_channel`), a fee rate from Core's
-   `estimatesmartfee`, and the dress rehearsal that measures a signing round —
-   the number the five-minute gate is supposed to compare against. Phase 2 needs
-   the confirmation watch and `UpdateChannelPolicy`, polled unconditionally so
-   the pending-but-inactive question stops mattering.
-2. **The server and the UI.** One binary, loopback bind, a startup token, strict
+1. **The server and the UI.** One binary, loopback bind, a startup token, strict
    Origin and Host checks, no CORS. The transports the design asks for — base64,
-   file up/down, animated QR — and the countdown. The recovery screen's wording is
-   the highest-stakes copy in the product and `CLAUDE.md` says to write it before
-   the happy path; the happy path arrived first, so that debt is now due.
-3. **`winthistle doctor` and `winthistle.toml`.** The registry, the reserve
-   pre-flight, the coldwallet pre-flight and the coin filter are all already the
-   checks it has to run; what is missing is the config plumbing and the one place
-   that runs them in order.
+   file up/down, animated QR — and the countdown. Every screen it has to render
+   now exists as text: the peer reports, the fee report, the reserve report, the
+   plan document, the rehearsal measurement, the settlement report and the
+   recovery screens. What is missing is the shell around them and the state
+   machine that decides which one is showing.
+2. **`winthistle doctor` and `winthistle.toml`.** The registry, the reserve
+   pre-flight, the coldwallet pre-flight, the coin filter and now the fee source
+   are all already the checks it has to run; what is missing is the config
+   plumbing and the one place that runs them in order. Two config keys are named
+   by code and not yet read from anywhere: `limits.abort_after_signing_seconds`
+   (`rehearsal.DefaultAbortAfterSigning`) and the fee floor
+   (`fees.Request.FloorSatPerVB`, which has no default *on purpose* — see the
+   refusal to guess).
+3. **The peer-policy table.** Phase 2 applies `settle.Policy` per peer and Phase 0
+   is where it is chosen, but nothing chooses it yet: the tests hand-build one.
+   It belongs in the plan document, beside the amounts, because it is a decision
+   the operator should review at the same moment.
 4. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
@@ -652,22 +1023,69 @@ the app, once.
    the production code path, step 9 is one call it simply does not make, and the
    abort paths it terminates through are tested.
 
-Done since the last handoff, both from the previous list:
+Done since the last handoff, all from the previous list:
 
-- **Combining and finalizing in-app** — `internal/combine`, described above.
-- **Directed mode's step 4** — `coldwallet.Build`, and the fixtures that used to
-  have their own copy of it now go through it.
+- **Phase 0** — `internal/peers`, `internal/fees`, `internal/rehearsal`, and the
+  reserve wiring that finally exercises the private path.
+- **Phase 2** — `internal/settle`: the policy pass, the confirmation watch, the
+  funding horizon and the CPFP child.
+- **The recovery screen's copy** — `internal/prose/recovery.go`, the debt
+  `CLAUDE.md` said to pay before the happy path.
 
 ## Watch out for
 
-- **The peers do not forget an aborted batch.** See finding 6: `AbandonChannel`
-  touches only our own database. If the harness starts refusing opens with
-  *"Number of pending channels exceed maximum"*, that is what it is, and
-  `make harness` clears it. `internal/plan`'s regtest tests add to the pressure
-  from the other side: they open eight shim streams per run and cancel every one
-  without finalizing. A cancelled shim costs *us* nothing, but the peer has
-  already sent `accept_channel` and holds its reservation until its own timeout,
-  so a tight run of `make test` can still crowd a peer for ten minutes.
+- **The peers do not forget an aborted batch, until something mines.** See
+  finding 6: `AbandonChannel` touches only our own database. If the harness
+  starts refusing opens with *"Number of pending channels exceed maximum"*, that
+  is what it is — and the cheap cure is `make -C regtest mine N=2016`, about ten
+  seconds, which times every stale pending channel out on every peer at once.
+  `make harness` also works and is slower. `internal/plan`'s and
+  `internal/peers`' regtest tests add to the pressure from the other side: they
+  open shim streams and cancel every one without finalizing. A cancelled shim
+  costs *us* nothing, but the peer has already sent `accept_channel` and holds
+  its reservation until its own timeout, so a tight run of `make test` can still
+  crowd a peer for ten minutes.
+- **A shim probe that succeeds is not free.** The peer holds a reservation for
+  about eleven minutes and `shim_cancel` does not tell it otherwise. Probing all
+  *n* peers and then arming collides with itself against any peer running LND's
+  default `--maxpendingchannels=1`. `peers.ReadyToArm` is the gate; the long
+  version is in "Phase 0" above. A probe that is *refused* costs nothing at all,
+  because every limit check runs before the peer creates a reservation.
+
+- **`UpdateChannelPolicy` reports failure inside a success.** Nil error,
+  `failed_updates` populated. Reading only `err` records a policy that was never
+  applied. `settle.ApplyPolicy` is the only place this build calls it.
+
+- **`minimum_depth` is not readable.** It is in `accept_channel` and in
+  `OpenChannel.NumConfsRequired`, and in no RPC. `settle.ExpectedDepth` predicts
+  what a stock LND peer will do and `State.ObservedDepth` records what it
+  actually did, which is only knowable after the fact. Do not add a UI that
+  promises "usable after k confirmations" up front — the design asks for it and
+  it cannot be delivered.
+
+- **`estimatesmartfee` succeeds when it has nothing to say.** No `feerate` field,
+  an `errors` array, and a 200. Every regtest node is in that state permanently.
+  `-fallbackfee` does not help: it is a wallet setting and `estimatesmartfee`
+  never consults it.
+
+- **`gettransaction` on a client with no wallet scope returns -19, not -5.**
+  "Multiple wallets are loaded. Please select which wallet to use...".
+  `bitcoind.Client.Confirmations` falls back to `getrawtransaction` on both, plus
+  on a node built without wallet support — otherwise a node-level client can
+  never report a confirmation count.
+
+- **Mining and then acting needs a wait.** LND refuses to open a channel while
+  its wallet is behind the chain — *"channels cannot be created before the wallet
+  is fully synced"* — and one block is enough to trigger it. `regtestenv.Mine`
+  now blocks until alice has caught up, which is why it takes a `*testing.T` and
+  can fail.
+
+- **Core does the CPFP arithmetic for you, and it is the same arithmetic.**
+  `walletcreatefundedpsbt`'s `fee_rate` applies to the whole unconfirmed ancestor
+  package. Passing "the rate I want the child to pay" would badly overpay; the
+  right value is the package target. Verified to the satoshi against
+  `plan.ChildFeeSat` at three rates.
+
 - **`chan_pending` txids are chainhash bytes**, i.e. reversed relative to every
   txid a human or Core sees. `lnd.ChannelPointFromPending` handles it; hex-encoding
   those bytes directly yields a plausible txid that matches nothing.
@@ -754,10 +1172,33 @@ Done since the last handoff, both from the previous list:
 
 ## Open questions
 
-Listed at the end of `docs/design.html`. Four are now closed:
-`shim_cancel`-after-verify, `chan_pending`-without-broadcast at *n* = 3,
-`RequiredReserve` for private channels, and Core's `finalizepsbt` — answered by
-not needing Core.
+Listed at the end of `docs/design.html`. All of them are now closed, four by the
+earlier work — `shim_cancel`-after-verify, `chan_pending`-without-broadcast at
+*n* = 3, `RequiredReserve` for private channels, and Core's `finalizepsbt`,
+answered by not needing Core — and the last two by Phase 2.
+
+**`UpdateChannelPolicy` on a pending channel:** it does not refuse, it does not
+accept, and it does not error. It returns success with the refusal inside it, as
+`UPDATE_FAILURE_PENDING` / *"not yet confirmed"* in `failed_updates`. Polling was
+the right answer for a better reason than the question knew. Observed live —
+"Phase 2" above.
+
+**The settlement pass on a real confirmation:** proved on regtest, one block at a
+time. The channel opened at 3 confirmations, `ExpectedDepth` predicted 3, and the
+policy landed and read back out of the announced graph. That is not the same as
+proving it on mainnet, and the design's answer to *that* still stands: make the
+first live batch a deliberately small one and treat it as commissioning.
+
+`docs/design.html` itself is now out of date in three places, and the doc is the
+spec so the corrections belong in it rather than only here:
+
+- Phase 0 item 1 says to check each peer's `minimum_depth` and show "usable after
+  *k* confirmations" up front. An initiator cannot read `minimum_depth` at all.
+- The peer-validation table calls the shim probe "free and abortable". It is free
+  only when it is refused.
+- The hazard row for the funding horizon says "LND forgets the pending channel
+  after roughly 2016 blocks". The *peer* forgets; we never do, and that asymmetry
+  is the hazard.
 
 The ten-minute clock is closed too, and the answer is not one of the two options
 the question offered. **We have no clock at all**: `pruneZombieReservations` skips
@@ -783,5 +1224,6 @@ What the operator sees is *"remote canceled funding, possibly timed out"* —
 "funding failed due to internal error". The "possibly" is ours; the peer does not
 say it timed out.
 
-The two that remain both sit past the broadcast line, and one is defused by having
-Phase 2 poll unconditionally.
+What is left is not an open question but an untested claim: everything past the
+broadcast line has been proved against regtest and against nothing else. The
+first small live batch is what turns that into evidence.
