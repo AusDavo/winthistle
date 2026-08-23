@@ -2357,6 +2357,68 @@ affordance rather than a cosmetic:
   is checked — and every line is inside the pane. `winthistle run`'s pre-arm
   confirmation shares the function and gets the same fix.
 
+### What rendering `doctor` and the recovery screens found
+
+Both were rendered against the live harness. `doctor` has a route; the recovery
+screens do not — they reach the browser as part of a run's transcript, which is
+worth being precise about:
+
+| screen | how it reaches a browser |
+|---|---|
+| `doctor`'s report | `GET /doctor` |
+| `prose.Recovery` — what an abort would do | written to the run's transcript by `recoverRun` |
+| `prose.RecoveryOutcome` — what it did | the same |
+| `prose.BluntConfirmation` | the pending question's prompt, and now the transcript record too |
+| `prose.RecoveryList` — the runs that stopped | **no route at all.** `winthistle recover` with no argument is the only way to it, and it is the screen an operator reads on a node that is down. Item 1.6 |
+
+**The pasteable command survives a soft wrap.** `doctor`'s report allows exactly
+one thing past the pane — a shell command, because a command cannot be wrapped
+without changing it — and in a browser that line came out 189 characters, wrapped
+across three visual rows. It is still *one line in the DOM*, so selecting it
+copies the intact command. That is the property the pane exemption depends on and
+it now has a measurement behind it rather than an assumption. Exactly two lines
+exceeded the pane on a real report, both absolute paths, which is the documented
+case.
+
+**Both shapes of recovery screen read correctly.** The partially-armed one —
+forced by asking a peer for less than LND's minimum, so `arm.Open` returns partway
+— says "everything about this run is cancellable for free" and cancels one shim
+with no confirmation asked, because nothing reached `chan_pending`. The armed one
+abandons two channels, asks per channel, and reports "of those, blunt flag 2".
+
+Four defects came out of it, and none of them was cosmetic:
+
+- **The transcript kept no record of what the operator was asked.** A question
+  vanished when it was answered. The blunt flag was authorised for two channels,
+  and a reload showed no trace of either — the journal had the count, and the
+  transcript, which decision 2 calls the thing rendered from the beginning on
+  every attach, had nothing. `Run.Ask` now writes a summary of every resolved
+  question: the subject, and the label of the choice taken, or the reason nobody
+  answered. `TestTheTranscriptKeepsWhatWasAskedAndAnswered`.
+- **The dress rehearsal's report claimed `testmempoolaccept` had refused when
+  Core was never asked.** `Measurement.Accepted` is a bool, and false is both
+  "Core refused" and "we stopped before asking" — so a rehearsal that failed in
+  the finalizer printed *"testmempoolaccept refused the result: """*, with the
+  real error reported separately. That is a false statement in operator copy
+  about the one call that decides whether a batch is worth arming, and it cost
+  twenty minutes here looking for a fee problem that did not exist.
+  `Measurement.Asked` now separates them.
+- **`internal/plan` had no pane test**, alone among the report packages, and it
+  renders two of the twelve screens — including the plan document an operator
+  approves before the cold wallet comes out. A 79-character line had shipped in
+  the verification report, and its width depended on the vsize's digit count, so
+  a big batch would have been worse. `TestTheReportsFitThePane` and
+  `TestTheEstimatedSizeNoteFitsWhateverTheSizeIs` close it.
+- **Two lines went to the transcript unwrapped** — the armed-window failure
+  (which carries LND's verbatim errors, 251 characters on one of them) and the
+  `psbt_verify` confirmation. They were the only paragraphs in the transcript not
+  written to the pane, at the two moments an operator is reading hardest.
+
+And one test was measuring the wrong thing: `internal/doctor`'s pane check counted
+*bytes*, so every em dash in that report read as three columns. It counts runes
+now, like every other pane test in the repository. A byte count is worse than no
+check, because it is the kind of wrongness that gets fixed by widening the pane.
+
 ### What this slice does not do
 
 No transports beyond the minimum — the browser signer is one read-only field out
@@ -2425,8 +2487,15 @@ reproducible from this description in a few minutes, and the durable half of it 
       give `bump.Approve` its own; both adapters are built and unit tested and
       neither has a caller, which is the one place written-but-uncalled code is
       back. Then the peer reports, the fee report, the reserve report, the plan
-      document, the settlement report and the recovery screens. Verbatim in a
-      `<pre>` is v1 for every one of them.
+      document and the settlement report. Verbatim in a `<pre>` is v1 for every
+      one of them.
+
+      **`prose.RecoveryList` is the one to do first.** Three of the four recovery
+      screens already reach a browser inside a run's transcript, and that one does
+      not reach it at all — it is the list of runs that stopped, it needs nothing
+      but the journal, and it is therefore the screen an operator reads on a node
+      that is down. `run.List` and `run.Show` are the functions; both take a
+      journal and an `io.Writer`, so neither needs a run in the registry.
 
    Still true before the first browser-driven armed window on anything that
    matters: the startup-token cookie is not port-scoped (see "Watch out for").
@@ -2480,7 +2549,23 @@ Done since the last handoff, all from the previous list:
 
 - **A browser is installed on this machine.** Two handoffs said there was not,
   and that claim was never checked; `which chromium google-chrome firefox` finds
-  three. Render before believing a page works.
+  three. Render before believing a page works. Two rendering sessions have now
+  produced five defects between them, four of which no test would have caught,
+  and one of which was a false statement in operator copy.
+
+- **A `bool` that means "it failed" cannot also mean "we never tried".**
+  `rehearsal.Measurement.Accepted` was both, and the report read the second as the
+  first: a rehearsal that died in the finalizer announced that
+  `testmempoolaccept` had refused it. `Asked` separates them now. When a report
+  renders a verdict, check that the zero value is not a verdict.
+
+- **A Core container restart unloads the harness wallets and the tests reload
+  nothing.** Symptom: `Requested wallet does not exist or is not loaded`, from
+  `getwalletinfo`. `./bin/bcli listwallets` will show only the
+  `winthistle-*-test` wallets that earlier test runs created — `miner`,
+  `cold-watch`, `cold1` and `cold2` are gone. `./bin/bcli loadwallet NAME` for
+  each of the four is the quick fix; `make -C regtest bootstrap` is the blunt
+  one. Distinct from the generation mismatch below, which bootstrap cannot fix.
 
 - **The seams' bound is the 5:00 gate and never the peers' ten minutes.** The
   gate is ours and enforceable; the peers' clock is theirs, because

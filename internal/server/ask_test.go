@@ -315,3 +315,124 @@ func TestAnUnofferedChoiceReachesTheSeamVerbatim(t *testing.T) {
 		t.Fatal("the answer never arrived")
 	}
 }
+
+// TestTheTranscriptKeepsWhatWasAskedAndAnswered.
+//
+// Found by rendering: the operator authorised LND's blunt flag for two channels,
+// reloaded the run screen, and the page showed no trace of either question. The
+// journal had the count; the transcript — which decision 2 calls the thing
+// rendered from the beginning on every attach — had nothing about what was asked
+// or what was said to it. For the one prompt in this product where a human
+// authorises something that could lose funds if the premise were wrong, that is
+// the wrong record to keep.
+//
+// The expired and cancelled cases matter as much as the answered one: "nobody
+// answered" is a fact about the ceremony, and a transcript that omits it reads as
+// though the question was never asked.
+func TestTheTranscriptKeepsWhatWasAskedAndAnswered(t *testing.T) {
+	blunt := Question{
+		Prompt: "Abandon this channel?\n\n    abc123:0\n\nLND refused the safe flag.",
+		Choices: []Choice{
+			{Value: "no", Label: "No — leave this channel alone"},
+			{Value: "yes", Label: "Yes — abandon abc123:0 with i_know_what_i_am_doing"},
+		},
+	}
+
+	t.Run("answered", func(t *testing.T) {
+		run := NewRegistry().add("run-1")
+		q := blunt
+		q.Deadline = time.Now().Add(time.Minute)
+
+		go func() { run.Ask(context.Background(), q) }()
+		got := awaitPending(t, run)
+		if err := run.Reply(got.ID, Answer{Choice: "yes"}); err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+
+		transcript := awaitTranscript(t, run, "abandon")
+		// The subject, so the record says which question — and the choice's own
+		// label, which is a sentence about what was decided rather than a value
+		// only this package can read.
+		for _, want := range []string{
+			"Abandon this channel?",
+			"Yes — abandon abc123:0 with i_know_what_i_am_doing",
+		} {
+			if !strings.Contains(transcript, want) {
+				t.Errorf("the transcript does not record %q:\n%s", want, transcript)
+			}
+		}
+	})
+
+	t.Run("expired", func(t *testing.T) {
+		run := NewRegistry().add("run-2")
+		q := blunt
+		q.Deadline = time.Now().Add(10 * time.Millisecond)
+
+		if _, err := run.Ask(context.Background(), q); !errors.Is(err, ErrUnanswered) {
+			t.Fatalf("Ask returned %v", err)
+		}
+		transcript, _, _ := run.State()
+		for _, want := range []string{"Abandon this channel?", "nobody answered"} {
+			if !strings.Contains(transcript, want) {
+				t.Errorf("the transcript does not record %q:\n%s", want, transcript)
+			}
+		}
+	})
+
+	t.Run("a form with nothing in it", func(t *testing.T) {
+		run := NewRegistry().add("run-3")
+		q := blunt
+		q.Deadline = time.Now().Add(time.Minute)
+
+		go func() { run.Ask(context.Background(), q) }()
+		got := awaitPending(t, run)
+		if err := run.Reply(got.ID, Answer{}); err != nil {
+			t.Fatalf("Reply: %v", err)
+		}
+		transcript := awaitTranscript(t, run, "offered")
+		if !strings.Contains(transcript, "no answer this question offered") {
+			t.Errorf("an empty answer was not recorded as one:\n%s", transcript)
+		}
+	})
+}
+
+// TestTheRecordIsClearedBeforeItIsWritten. A screen must never show a question
+// beside its own answer: the answer is in the transcript, the question is the
+// pending one, and rendering both would read as two questions.
+func TestTheRecordIsClearedBeforeItIsWritten(t *testing.T) {
+	run := NewRegistry().add("run-1")
+
+	go func() {
+		run.Ask(context.Background(), Question{
+			Prompt:   "well?",
+			Choices:  []Choice{{Value: "yes", Label: "yes"}},
+			Deadline: time.Now().Add(time.Minute),
+		})
+	}()
+	q := awaitPending(t, run)
+	if err := run.Reply(q.ID, Answer{Choice: "yes"}); err != nil {
+		t.Fatalf("Reply: %v", err)
+	}
+	awaitTranscript(t, run, "yes")
+
+	if run.Pending() != nil {
+		t.Error("the question is still pending after its answer was recorded")
+	}
+}
+
+// awaitTranscript waits for the transcript to mention something. The record is
+// written by the asking goroutine after Ask returns, so a test that read it
+// straight away would be racing that write rather than testing it.
+func awaitTranscript(t *testing.T, r *Run, want string) string {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if got, _, _ := r.State(); strings.Contains(got, want) {
+			return got
+		}
+		time.Sleep(time.Millisecond)
+	}
+	got, _, _ := r.State()
+	t.Fatalf("the transcript never mentioned %q:\n%s", want, got)
+	return ""
+}

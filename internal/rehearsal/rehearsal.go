@@ -178,6 +178,15 @@ type Measurement struct {
 	// Total is the whole rehearsal, for the operator's sense of the evening.
 	Total time.Duration
 
+	// Asked records that testmempoolaccept was actually called. Without it,
+	// Accepted's false is ambiguous: it is both "Core refused" and "we never got
+	// far enough to ask", and the report read the second as the first — telling
+	// an operator that testmempoolaccept had refused their transaction when the
+	// truth was that the finalizer had not produced one. Found by rendering the
+	// screen, and it cost twenty minutes of looking for a fee problem that was
+	// not there.
+	Asked bool
+
 	// Accepted is testmempoolaccept's verdict, and RejectReason is Core's own
 	// words when it says no. testmempoolaccept validates without relaying, which
 	// is the only pre-flight there is and specifically not a broadcast.
@@ -355,6 +364,7 @@ func Run(ctx context.Context, req Request) (*Measurement, error) {
 		m.Total = time.Since(started)
 		return m, err
 	}
+	m.Asked = true
 	m.Accepted, m.RejectReason = accepted, why
 	m.Total = time.Since(started)
 	return m, nil

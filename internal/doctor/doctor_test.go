@@ -78,9 +78,14 @@ func TestTheReportStaysInThePane(t *testing.T) {
 		if strings.HasPrefix(line, "  $ ") {
 			continue
 		}
-		if len(line) > prose.PaneWidth {
+		// Runes, not bytes. This copy is full of em dashes, and a byte count
+		// reports a line as three columns wider than it renders — which is worse
+		// than no check, because it is the kind of wrongness that gets fixed by
+		// widening the pane. Every other pane test in the repository counts
+		// runes; this one did not.
+		if n := len([]rune(line)); n > prose.PaneWidth {
 			t.Errorf("line %d is %d columns, past the %d-column pane:\n%s",
-				i+1, len(line), prose.PaneWidth, line)
+				i+1, n, prose.PaneWidth, line)
 		}
 	}
 	if r.OK() {

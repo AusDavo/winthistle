@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/AusDavo/winthistle/internal/policy"
+	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/reserve"
 )
 
@@ -1003,5 +1004,62 @@ func TestThePolicySitsBesideTheAmount(t *testing.T) {
 	f.plan.Channels[0].Policy = &bad
 	if _, err := f.plan.Outputs(); err == nil {
 		t.Fatal("a plan carrying a CLTV delta LND refuses was accepted")
+	}
+}
+
+// TestTheReportsFitThePane closes the gap that let a 79-character line ship.
+//
+// internal/setup, internal/bump and internal/doctor all measure their reports
+// against prose.PaneWidth. This package did not, and it renders two of the twelve
+// operator-facing screens: the plan document an operator approves before the cold
+// wallet comes out, and the verification an operator reads when something does
+// not match. A line one character over the pane in the second of those was found
+// by rendering the screen in a browser, which is a slower way to find it than a
+// test.
+//
+// Runes rather than bytes, deliberately. This copy is full of em dashes, and a
+// byte count would report a line as over the pane when it is not — which is worse
+// than no test, because it teaches you to widen the pane.
+func TestTheReportsFitThePane(t *testing.T) {
+	f := newFixture(t)
+
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"the plan document", f.plan.Document()},
+		{"a clean verification", verify(t, f.plan, f.good(t)).Report()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if strings.TrimSpace(tc.text) == "" {
+				t.Fatal("the report is empty, so this measures nothing")
+			}
+			for i, line := range strings.Split(tc.text, "\n") {
+				if n := len([]rune(line)); n > prose.PaneWidth {
+					t.Errorf("line %d is %d runes, past the %d-column pane:\n%s",
+						i+1, n, prose.PaneWidth, line)
+				}
+			}
+		})
+	}
+}
+
+// TestTheEstimatedSizeNoteFitsWhateverTheSizeIs. The note used to trail the
+// vsize on the same line, which made the width depend on how many digits the
+// vsize had — so a batch large enough to need six digits would have pushed it
+// over even after the text was shortened. It is on its own line now, and this is
+// the assertion that keeps it there.
+func TestTheEstimatedSizeNoteFitsWhateverTheSizeIs(t *testing.T) {
+	for _, vsize := range []int64{1, 236, 99_999, 1_000_000} {
+		v := &Verification{
+			UnsignedTxID: strings.Repeat("a", 64),
+			Size:         Size{Vsize: vsize, Estimated: true},
+		}
+		for i, line := range strings.Split(v.Report(), "\n") {
+			if n := len([]rune(line)); n > prose.PaneWidth {
+				t.Errorf("vsize %d: line %d is %d runes, past the %d-column pane:\n%s",
+					vsize, i+1, n, prose.PaneWidth, line)
+			}
+		}
 	}
 }

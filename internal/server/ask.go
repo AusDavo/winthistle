@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -194,12 +195,6 @@ func (r *Run) Ask(ctx context.Context, q Question) (Answer, error) {
 	r.pending, r.replies = &q, replies
 	r.mu.Unlock()
 
-	defer func() {
-		r.mu.Lock()
-		r.pending, r.replies = nil, nil
-		r.mu.Unlock()
-	}()
-
 	// A deadline already past is refused rather than raced: with n devices in a
 	// round sharing one deadline, the second device can legitimately be asked
 	// after the budget is gone, and "the round is over" is a better thing to say
@@ -207,15 +202,67 @@ func (r *Run) Ask(ctx context.Context, q Question) (Answer, error) {
 	timer := time.NewTimer(time.Until(q.Deadline))
 	defer timer.Stop()
 
+	var (
+		answer Answer
+		err    error
+	)
 	select {
-	case a := <-replies:
-		return a, nil
+	case answer = <-replies:
 	case <-timer.C:
-		return Answer{}, fmt.Errorf("%w (asked at %s, gate %s)", ErrUnanswered,
+		err = fmt.Errorf("%w (asked at %s, gate %s)", ErrUnanswered,
 			q.Asked.Format(time.TimeOnly), q.Deadline.Sub(q.Asked).Round(time.Second))
 	case <-ctx.Done():
-		return Answer{}, ctx.Err()
+		err = ctx.Err()
 	}
+
+	r.mu.Lock()
+	r.pending, r.replies = nil, nil
+	r.mu.Unlock()
+
+	// The transcript keeps what was asked and what was decided. Clearing the
+	// pending question first, so no screen can render a question that has been
+	// answered beside its own answer.
+	r.Write([]byte(record(q, answer, err)))
+	return answer, err
+}
+
+// record is the line a resolved question leaves in the transcript.
+//
+// Without it a question vanished when it was answered, and that was found by
+// rendering the recovery screen: the operator authorised LND's blunt flag for two
+// channels, reloaded, and the page showed no trace of either. The journal had the
+// count — "of those, blunt flag 2" — and the transcript, which decision 2 calls
+// the thing rendered from the beginning on every attach, had nothing about the
+// question or the answer. For the one prompt in this product where a human
+// authorises something that could lose funds if the premise were wrong, that is
+// the wrong record to keep.
+//
+// It is a summary rather than the prompt again. The prompt is long by design and
+// most of it is already above in the transcript; what is missing afterwards is
+// which question, and what was said to it.
+func record(q Question, a Answer, err error) string {
+	subject := "a question"
+	for _, line := range strings.Split(q.Prompt, "\n") {
+		if s := strings.TrimSpace(line); s != "" {
+			subject = s
+			break
+		}
+	}
+
+	said := "no answer this question offered"
+	switch {
+	case err != nil:
+		said = err.Error()
+	case a.Choice != "":
+		said = a.Choice
+		for _, c := range q.Choices {
+			if c.Value == a.Choice {
+				said = c.Label
+				break
+			}
+		}
+	}
+	return fmt.Sprintf("\n  > %s\n    %s\n", subject, said)
 }
 
 // Pending is the question this run is waiting on, or nil. A copy, so a screen

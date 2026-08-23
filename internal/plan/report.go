@@ -177,11 +177,17 @@ func (v *Verification) Report() string {
 	}
 
 	b.WriteString(fmt.Sprintf("  txid   %s\n", v.UnsignedTxID))
-	b.WriteString(fmt.Sprintf("  size   %d vB", v.Size.Vsize))
+	b.WriteString(fmt.Sprintf("  size   %d vB\n", v.Size.Vsize))
 	if v.Size.Estimated {
-		b.WriteString("  (estimated, and an upper bound — so the rate below is a floor)")
+		// Its own line rather than trailing the size. Beside it, this note came
+		// to 79 characters against a 78-column pane — found by rendering the
+		// screen in a browser, not by a test, because this was the one report
+		// package with no pane test. Trailing it also made the width depend on
+		// the vsize's digit count, which a big batch grows.
+		b.WriteString("         (estimated, and an upper bound — so the rate " +
+			"below is a floor)\n")
 	}
-	b.WriteString("\n\n")
+	b.WriteString("\n")
 
 	b.WriteString(prose.Table([]prose.Row{
 		prose.Note("inputs", v.InputSat, fmt.Sprintf("%d", len(v.Inputs))),

@@ -225,7 +225,13 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		// Nothing has been broadcast — that is what the armed window is defined
 		// by — so the answer is always the same, and it is taken rather than
 		// suggested.
-		fmt.Fprintf(d.Out, "\nThe armed window failed: %v\n\n", err)
+		// Wrapped like the rest of the copy. It was a bare Fprintf until a
+		// browser rendered it: LND's verbatim errors run to 250 characters, so
+		// the one paragraph an operator reads at the worst moment was the one
+		// paragraph that did not match the pane everything around it is written
+		// to.
+		fmt.Fprintf(d.Out, "\n%s\n", prose.Para(fmt.Sprintf(
+			"The armed window failed: %v", err)))
 		// The teardown's own failure is reported on the screen above rather
 		// than returned: the error worth exiting with is the one that stopped
 		// the run, and the recovery screen already says what is left and that
@@ -537,9 +543,9 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	if err := arm.Verify(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, built.Raw); err != nil {
 		return nil, err
 	}
-	fmt.Fprintf(d.Out, "\npsbt_verify: all %d channels. LND has committed to the "+
-		"funding outpoints, and from here only signatures may be added.\n",
-		len(streams.All))
+	fmt.Fprintf(d.Out, "\n%s", prose.Para(fmt.Sprintf("psbt_verify: all %d "+
+		"channels. LND has committed to the funding outpoints, and from here only "+
+		"signatures may be added.", len(streams.All))))
 
 	parts, err := sign(ctx, d, o, built)
 	if err != nil {

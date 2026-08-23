@@ -80,13 +80,27 @@ func (m *Measurement) Report() string {
 				"one of the two failures this phase exists to catch, and catching " +
 				"it here costs nothing: no stream is open, no peer is waiting, and " +
 				"the batch has not been armed."))
+	case !m.Asked:
+		// The measurement stopped before Core was asked anything, so the reason
+		// is the error the caller is about to report rather than a verdict of
+		// Core's. Saying nothing here beats saying the wrong thing: this branch
+		// used to be the one below, which claimed a refusal that never happened.
+		b.WriteString(prose.Para(
+			"This rehearsal did not get as far as offering a transaction to Core, " +
+				"so there is no verdict from testmempoolaccept above and nothing " +
+				"went out. What stopped it is reported with the failure itself."))
 	case !m.Accepted:
+		// Core does not always give a reason, and %q on an empty one renders as
+		// a bare pair of quotes that reads as though the tool lost the answer.
+		why := fmt.Sprintf("refused the result: %q", m.RejectReason)
+		if m.RejectReason == "" {
+			why = "refused the result and gave no reason for it"
+		}
 		b.WriteString(prose.Para(fmt.Sprintf(
 			"The signatures combined and finalized, and then testmempoolaccept "+
-				"refused the result: %q. testmempoolaccept validates without "+
-				"relaying, so nothing went out — but the real batch would have "+
-				"been refused the same way, after the signing round, with the "+
-				"peers' windows open.", m.RejectReason)))
+				"%s. testmempoolaccept validates without relaying, so nothing went "+
+				"out — but the real batch would have been refused the same way, "+
+				"after the signing round, with the peers' windows open.", why)))
 	case m.Signing > m.Limit:
 		b.WriteString(prose.Para(fmt.Sprintf(
 			"This batch will not be armed. The signing round took %s and the gate "+
