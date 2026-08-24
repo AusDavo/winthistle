@@ -254,6 +254,11 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /doctor", s.doctor)
 	s.mux.HandleFunc("GET /runs/{id}", s.attach)
 
+	// The file transport's outbound leg. A GET, because it reads: the packet is
+	// the pending question's, checked by id, and serving it changes nothing.
+	// See transport.go.
+	s.mux.HandleFunc("GET /runs/{id}/payload/{question}", s.downloadPayload)
+
 	// The journal, read-only. There is no POST under /recover and there is not
 	// meant to be: an abort of a journalled run asks abort.Confirmation once per
 	// channel and a browser answers those through a Run, which a journalled run

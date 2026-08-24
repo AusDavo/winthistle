@@ -643,3 +643,57 @@ func awaitQuestion(t *testing.T, r *server.Run) *server.Question {
 	t.Fatal("nothing was asked")
 	return nil
 }
+
+// TestTheDownloadNameSeparatesTheRoundsAndTheDevices is the webrun half of the
+// file transport's naming, and the property is separation rather than a format.
+//
+// A batch's signing happens twice: the dress rehearsal signs a decoy over the
+// same coins, and minutes later the real round signs the batch. Both rounds ask
+// the same m devices, both hand over a base64 PSBT, and with the file transport
+// both land in one Downloads folder. internal/signers' file handshake already
+// keys its files on the round name for exactly this reason — a signed file left
+// over from the rehearsal, picked up as the batch's, is a signature over the
+// decoy, which internal/combine refuses at the worst possible moment with a
+// message about a moved txid rather than about a leftover file.
+//
+// So every (round, device) pair has to produce its own name. That is what is
+// asserted here; the shape of the name is internal/server's business.
+func TestTheDownloadNameSeparatesTheRoundsAndTheDevices(t *testing.T) {
+	seen := map[string]string{}
+
+	for _, round := range []string{"rehearsal", "batch"} {
+		for i, label := range []string{"cold1", "cold2"} {
+			r := aRun(t)
+			sign := Signer(r, SignRequest{
+				Round: round, Label: label, Index: i + 1, Of: 2,
+				Deadline: time.Now().Add(testGate),
+			})
+
+			done := make(chan struct{})
+			go func() {
+				defer close(done)
+				sign(context.Background(), "cHNidP8BAAA=")
+			}()
+			q := answerWith(t, r, ChoiceSigned, "cHNidP8BAAA=")
+			<-done
+
+			if q.PayloadFilename == "" {
+				t.Fatalf("%s/%s asked with no download name, so the file lands "+
+					"under a name that distinguishes nothing", round, label)
+			}
+			if was, dup := seen[q.PayloadFilename]; dup {
+				t.Errorf("%s/%s and %s both download as %q", round, label, was,
+					q.PayloadFilename)
+			}
+			seen[q.PayloadFilename] = round + "/" + label
+
+			// The two facts an operator matches the file against the screen by.
+			for _, want := range []string{round, label} {
+				if !strings.Contains(q.PayloadFilename, want) {
+					t.Errorf("%s/%s downloads as %q, which does not name %q",
+						round, label, q.PayloadFilename, want)
+				}
+			}
+		}
+	}
+}

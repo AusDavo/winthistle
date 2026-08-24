@@ -311,10 +311,10 @@ func (l *Launcher) Progress(ctx context.Context, runID string) (string, error) {
 //
 // The devices are the same devices `winthistle run` uses. What changes is the
 // transport: internal/signers has a command on stdin/stdout and a file handshake,
-// and this is the third one it always said was coming — the browser's. It is at
-// its minimum here, one read-only field out and one field back. The file download
-// and upload and the animated QR go *around* this same Question rather than
-// beside it, because Payload and Reply already are the seam.
+// and this is the third one it always said was coming — the browser's. The packet
+// goes out two ways and they are one choice rather than two seams: a read-only
+// field to copy, and a .psbt download of the same bytes. Both are built from
+// Question.Payload, which is why there is no second copy of the packet anywhere.
 //
 // What this does not do yet is mix transports. A browser-driven run uses the
 // browser for every device, even when a [[signer]] block names a working command,
@@ -386,7 +386,15 @@ func Signer(r *server.Run, req SignRequest) rehearsal.Signer {
 			Prompt:       signPrompt(req),
 			Payload:      psbtB64,
 			PayloadLabel: "the packet to take to " + req.Label + " (base64 PSBT)",
-			Reply:        "paste what " + req.Label + " gave back, base64",
+			// The round and the device, which is internal/signers' file
+			// handshake naming exactly (signers.go's handshake builds
+			// "<round>-<label>.psbt"). Same reason, and the reason is not
+			// consistency: the rehearsal and the batch are two rounds minutes
+			// apart over two different transactions, and one Downloads folder
+			// holding both under one name is how a signature over the decoy
+			// gets returned as the batch's.
+			PayloadFilename: req.Round + "-" + req.Label + ".psbt",
+			Reply:           "paste what " + req.Label + " gave back, base64",
 			Choices: []server.Choice{
 				{Value: ChoiceSigned, Label: "This is the signed packet"},
 				{Value: ChoiceCannot, Label: req.Label + " cannot sign — stop the round"},

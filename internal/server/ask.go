@@ -125,15 +125,33 @@ type Question struct {
 
 	// Payload is a base64 PSBT, when there is one. Empty otherwise.
 	//
-	// A read-only field the operator copies out of, and a field they paste the
-	// signed packet back into, is the whole of the browser transport in this
-	// slice. The file handshake and the animated QR that belong around it are
-	// item 1.4, and they are additions to this same Question rather than a
-	// different seam.
+	// A read-only field the operator copies out of, a file they download, and a
+	// field they paste or upload the signed packet back into: that is the whole
+	// of the browser transport. The file legs go *around* this same Payload
+	// rather than beside it, which is why there is no second copy of the packet
+	// on this struct — the download decodes this string.
 	Payload string
 
 	// PayloadLabel names the payload on the screen.
 	PayloadLabel string
+
+	// PayloadFilename is what the download is called, and the name is not
+	// cosmetic.
+	//
+	// internal/signers' file handshake keys its files on the round name for a
+	// reason that applies verbatim to a Downloads folder: the dress rehearsal
+	// and the real batch are two rounds minutes apart, asking m devices for
+	// signatures over two different transactions, and a signed file from the
+	// first one picked up as the second's would be a signature over the decoy.
+	// internal/combine would refuse it — at the worst possible moment, with a
+	// message about a moved txid rather than about the wrong file.
+	//
+	// So the name carries the round and the device, and this package cannot
+	// compose it: it does not know what a round is. It comes from
+	// internal/webrun, which does. A Question with a Payload and no filename
+	// still downloads — see fileName — but it downloads under a name that
+	// distinguishes nothing, so the adapters set it.
+	PayloadFilename string
 
 	// Reply, when non-empty, is the label of a free-text field the answer needs.
 	// It is how a signed packet gets back.

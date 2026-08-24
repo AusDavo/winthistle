@@ -250,8 +250,19 @@ func questionForm(runID string, q *Question) string {
 		if label == "" {
 			label = "the packet to sign"
 		}
-		fmt.Fprintf(&b, "<p><label for=\"payload\">%s</label></p>\n",
-			html.EscapeString(label))
+		// The link is on the label's line, above the field, and both halves of
+		// that are a render defect that was found by looking at the page.
+		//
+		// Below the field it landed between the payload and "paste what cold1
+		// gave back", equidistant from each, and read as "download it instead of
+		// pasting" — which is backwards: the file replaces the *copy*, not the
+		// reply. And "instead" on its own named nothing, so it is "or" now. The
+		// two ways of taking the packet are one choice and they belong on one
+		// line, before the blob rather than after it, because which way to take
+		// it is decided before it is read.
+		fmt.Fprintf(&b, "<p><label for=\"payload\">%s</label> — "+
+			"<a download href=\"%s\">or download it as a .psbt file</a></p>\n",
+			html.EscapeString(label), payloadPath(runID, q))
 		fmt.Fprintf(&b, "<textarea id=\"payload\" rows=\"6\" readonly>%s</textarea>\n",
 			html.EscapeString(q.Payload))
 	}

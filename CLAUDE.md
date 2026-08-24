@@ -11,11 +11,24 @@ Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 loopback bind, a startup token, strict `Origin` and `Host` checks, no CORS — and
 can now open a batch: it starts a run, answers the four questions a run asks, and
 stops one. It also serves the journal read-only, at `/recover`, which is the one
-screen that works on a node that is down. Still missing are the transports (file
-up/down, animated QR), the countdown, the setup and bump screens and the five
-reports, signet, and the mainnet cold probe. So the
-safety model below is verified against LND source *and* against a running node —
-but never yet against mainnet, which is what the cold probe is for.
+screen that works on a node that is down. The file transport's outbound leg is
+built — a question's packet downloads as a binary `.psbt` named for its round and
+device — and the upload that returns it is next. Still missing are that upload,
+the countdown, the setup and bump screens and the five reports, signet, and the
+mainnet cold probe. So the safety model below is verified against LND source
+*and* against a running node — but never yet against mainnet, which is what the
+cold probe is for.
+
+**In-house animated QR is out of scope, decided 2026-08-24**, and it is out of
+scope rather than unbuilt: this file, `HANDOFF.md` and `docs/design.html` all
+promised it, and the promise is withdrawn from all three in the same commit. The
+transport contract is BIP174 — any wallet that round-trips a PSBT against the
+descriptor works — and a QR-only signer reaches it through a desktop wallet that
+already does animated QR. What settled it is this repo rather than taste: the
+server's CSP is `default-src 'none'` with no script on any page and a test that
+fails on one, so webcam capture would begin by reversing the strongest property
+the UI has. It is **held open, not rejected** — see "Held open" in
+`docs/review-2026-08-triage.md`, which carries the cost of picking it up.
 
 The three decisions that had to be made before any web handler are made and each
 carries a guard rather than a promise; `HANDOFF.md`'s "The server, and the three

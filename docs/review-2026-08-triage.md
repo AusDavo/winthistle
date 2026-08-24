@@ -346,7 +346,47 @@ and in one commit with `docs/design.html` — not arrived at via a spec.
 | Split the status blockquote | **VALID, and badly understated.** This is not a run-on to break in two: the clause is **false**. "the web interface described in the design does not exist yet" contradicts `internal/server`, and the command list omits `winthistle serve` entirely. Highest-value item in the document, and the reason the review under-reads the repo |
 | `print-macaroon-command` vs `make macaroon` | **VALID.** They are one door: the Makefile's `macaroon` target is literally `go run ./cmd/winthistle print-macaroon-command`. Cross-reference or drop one |
 
-### 7. In-house QR — **CONFLICT with the design, and this entry had it backwards**
+### 7. In-house QR — **DECIDED 2026-08-24: out of scope, held open**
+
+**Decided 2026-08-24, by the owner: outcome 3.** In-house animated QR comes out
+of the design rather than sitting there as an unbuilt promise. The QR sentences
+are gone from `docs/design.html`, `CLAUDE.md` and `HANDOFF.md` in the same commit
+as the file transport's download leg, and QR moves to "Held open" below with the
+cost of picking it up written down. What replaces it in all three is the contract
+this entry already found VALID: **any wallet that round-trips BIP174 against the
+descriptor works.**
+
+Two things settled it, and neither is the review's own argument:
+
+- **The audit surface is repo-specific and larger than the review knew.** The
+  server has no JavaScript, and that is enforced rather than conventional:
+  `internal/server/guard.go` sets `default-src 'none'; style-src 'unsafe-inline';
+  img-src 'none'`, and `TestNoScreenFetchesAnything` fails if any page body
+  contains `<script`, `<img`, `http://` or `https://`. Webcam capture is in the
+  browser and has no server-side route, so outcome 1 *begins* by reversing the
+  strongest property the UI has — plus either a vendored JS decoder (a new supply
+  chain in a repo whose whole dependency surface is `go.sum`) or Go→WASM with
+  `wasm_exec.js` re-vendored on every Go upgrade. And the fixtures would be a
+  reading of three specs with no QR device here to check them against, which is
+  the failure mode this repo already recorded once: the invented `Origin:
+  http://127.0.0.1:7420` header, a test asserting its own assumption.
+- **The loss is smaller than it looks, and it was the owner's point.** A QR-only
+  signer is reached through a desktop wallet: download the file, let that wallet
+  do the animated-QR round trip with the device, export the result, upload it.
+  The webcam is the same desktop webcam outcome 1 would have driven — the only
+  difference is whether *this* code drives it. Outcome 2 does not serve that
+  signer either, having no return leg.
+
+One caveat belongs with the copy, and it is about **our** contract rather than any
+named wallet's behaviour, which is not testable from this machine: only *partial*
+signatures may come back. `combine.mergeInput` refuses a part whose input is
+already finalized (`ErrAlreadyFinalized`, citing I-2). Independently, `Merge`
+requires a distinct label per part and counts signatures per device, so one packet
+carrying two devices' signatures loses the attribution every refusal in
+`internal/combine` is built to name — which is why the advice is to route one
+device per round, and why it is advice about rounds rather than about a wallet.
+
+The original conflict, kept because the drift is the lesson:
 
 **Corrected 2026-08-24.** This entry previously read DONE, on the grounds that
 the review's "explicitly out of scope" agreed with the repo because "`CLAUDE.md`
@@ -370,8 +410,10 @@ middle position is the interesting one: display-only QR is cheap (Unicode
 half-blocks, two modules per cell to cancel the cell aspect ratio) and covers the
 outbound half, while camera capture stays a browser problem.
 
-**This needs a decision before the transports slice starts, and it is not mine
-to make.** Three ways it can go, and each is coherent:
+**This needed a decision before the transports slice started, and it was not
+mine to make.** It was made — outcome 3, above. The three ways it could have gone
+are kept below because the two that lost are the reason the third is written down
+as *held open* rather than rejected:
 
 1. **Keep the design's scope.** Build the file transport, then animated QR with
    webcam capture. Most work, and it is what the design promised.
@@ -385,7 +427,8 @@ to make.** Three ways it can go, and each is coherent:
 
 Whichever wins, the losing document has to change in the same commit. An unbuilt
 feature listed as planned in three places and argued out of scope in a fourth is
-the drift this whole review turned out to be about.
+the drift this whole review turned out to be about. *Outcome 3 won, and the three
+documents changed with the download leg.*
 
 One sliver is **VALID** regardless and belongs with item 6: state the contract,
 not the app
@@ -457,13 +500,13 @@ scoped (4). What is left, cheapest-first:
 Not doing now, on the evidence above: 2b (built and tested), 8 as specified (no
 such artifact, and versioning is rejected by design).
 
-Needing a decision before the next slice, not work: **item 7**. The transports are
-next in the build order, and animated QR's scope is contradicted between the
-design and this review — see item 7 above for the three coherent ways it can go.
+Decided, no longer owed: **item 7**. Animated QR is out of scope as of
+2026-08-24 and the three documents that promised it no longer do. It is held
+open, not rejected — see below.
 
 ## Held open — set aside, not ruled out
 
-Three things are **deferred by the owner rather than settled**, and this section
+Four things are **deferred by the owner rather than settled**, and this section
 exists so a later reader does not mistake "not now" for "no". Each has merits and
 may be picked up; none should be re-litigated as though it had been rejected.
 
@@ -496,6 +539,34 @@ may be picked up; none should be re-litigated as though it had been rejected.
   up, the shape to consider is an explicit per-batch opt-in that fails loudly and
   says what it costs — not a relaxation of the floor, and not a switch on the
   verifier.
+
+- **Item 7, in-house animated QR.** Decided out of scope on 2026-08-24 and moved
+  here the same day, because "we are not building this" is not "this is a bad
+  idea". What it would buy is real and the design was right to want it: a signer
+  with no SD card and no USB is served by nothing else this build does, and
+  routing it through a desktop wallet means the operator runs two applications
+  where they wanted one.
+
+  What it costs is specific, and it is the number to weigh rather than re-derive:
+  **`script-src` in a CSP that is `default-src 'none'` today**, and the retirement
+  of `TestNoScreenFetchesAnything`. Every page in this UI is one inline `<style>`
+  block and text; webcam capture needs `getUserMedia`, a frame loop and a decoder,
+  none of which exists server-side. On top of that, multipart is mandatory at 1–3
+  KB, so BBQr *and* UR2.0 *and* SeedSigner's scheme, and no QR device on the
+  development machine to test any of them against.
+
+  The middle position — display-only QR outbound in Unicode half-blocks, camera
+  left to the browser — keeps the CSP intact and is the cheaper thing to
+  reconsider first. But price it honestly: a batch's base64 PSBT is past a v40
+  code's ~2.9 KB ceiling, so it still needs a splitting encoder; a v40 is 177
+  modules, which at the two-modules-per-cell that cancels the cell aspect ratio
+  is 354 columns against a 78-column pane; and it has no return leg, so the file
+  transport is needed regardless.
+
+  If it is picked up, the thing that makes it tractable is the shape already
+  built: `Question.Payload` is the only source of the packet and the download
+  decodes it, so a QR renderer is a third reading of one string rather than a
+  fourth copy of it.
 
 Nothing above touches `arm.Publish`, the I-1 gate, or the pinned call-site count
 of 2.

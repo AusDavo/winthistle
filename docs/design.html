@@ -465,7 +465,7 @@ footer p{font-size:.9rem; color:var(--muted)}
    │
 <b>signers</b>  USB · SD card · QR
    <i>─ ─ ─ ─ ─ trust boundary: keys never cross ─ ─ ─ ─ ─</i></pre>
-    <p>Note what carries the PSBT between the two machines: <strong>the browser</strong>. The UI is viewed on the desktop through the tunnel, so a download hands the PSBT to Sparrow and an upload hands it back — no file sync, no shared mount, no extra daemon. The topology most people already have turns out to be the transport.</p>
+    <p>Note what carries the PSBT between the two machines: <strong>the browser</strong>. The UI is viewed on the desktop through the tunnel, so a download hands the PSBT to whatever wallet is on that desktop &mdash; Sparrow, or anything else that reads a <code>.psbt</code> &mdash; and an upload hands it back — no file sync, no shared mount, no extra daemon. The topology most people already have turns out to be the transport.</p>
     <div class="split wide">
       <div class="card">
         <span class="lbl">Two engines, one safety model</span>
@@ -477,7 +477,7 @@ footer p{font-size:.9rem; color:var(--muted)}
       </div>
       <div class="card">
         <span class="lbl">Transport, not typing</span>
-        <p>Base64 in and out, file download and upload, and animated QR — BBQr and <code>ur:crypto-psbt</code> — with webcam capture on the return leg. This is the one place a browser UI is genuinely better than a terminal, and it is where multisig ergonomics are won.</p>
+        <p>Base64 in and out, and file download and upload — the topology above is why that is enough. The contract is BIP174, not an application: <strong>any wallet that round-trips a PSBT against the descriptor works</strong>, and only <em>partial</em> signatures may come back. In-house animated QR is deliberately out of scope; a QR-only signer is reached through a desktop wallet that already does it.</p>
       </div>
       <div class="card">
         <span class="lbl">Commissioning without a testnet</span>
@@ -786,7 +786,7 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
           <li>Both engines: directed with Core, assisted with Sparrow</li>
           <li><code>winthistle doctor</code> and a generated macaroon command</li>
           <li><code>winthistle bump</code> — the CPFP child of a stalled batch, built, verified twice, signed from cold storage and broadcast</li>
-          <li>Base64, file and QR transports</li>
+          <li>Base64 and file transports, on a BIP174 contract</li>
           <li>Reserve top-up and post-open policy application</li>
           <li>Cold probe mode, and the recovery paths it depends on</li>
           <li>A regtest harness, built before the happy path — it has already caught three faults that would otherwise have been paid for in mainnet probe time</li>

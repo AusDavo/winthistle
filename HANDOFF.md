@@ -36,10 +36,12 @@ every form in the UI unusable.** See "The bug the first render found" below —
 `Origin: null` — and note the correction it carries: a browser *is* installed on
 this machine, and the previous two handoffs said otherwise.
 
-What is missing is the transports — file up and down, animated QR with webcam
-capture on the return leg; the browser transport is currently one field out and
-one field back — the setup and bump screens, plus signet and the mainnet cold
-probe. **The countdown is built**; see the review section below.
+What is missing is the file transport's return leg — the download is built, and
+an upload is what still has to come back — the setup and bump screens, plus
+signet and the mainnet cold probe. **The countdown is built**; see the review
+section below. **In-house animated QR is out of scope as of 2026-08-24**, by the
+owner's decision, and it is out of scope rather than unbuilt: see "The QR decision
+and the file transport" below.
 
 **An external review arrived, and triaging it was most of a session.**
 `docs/review-2026-08.md` was written from `README.md` alone by a reviewer who
@@ -118,21 +120,12 @@ see "Held open" below.
    — and Phase 0's fee estimate uses the same client, so a dead one fails earlier
    and tests a different thing.
 
-**One decision is owed before the transports slice, and the triage got it
-wrong.** Review item 7 argues in-house QR "explicitly out of scope"; the triage
-originally accepted that as agreeing with this repo, on the grounds that
-`CLAUDE.md` lists animated QR as unbuilt. That conflated *unbuilt* with *not
-going to be built*. `CLAUDE.md`, this file's own missing list and item 4 of its
-build list, and `docs/design.html` all list animated QR — BBQr and
-`ur:crypto-psbt`, webcam capture on the return leg — as **planned**. So the review
-is arguing against a planned feature, not recording a settled one, and the triage
-entry is corrected to say so. Three coherent outcomes are written out there:
-keep the design's scope, take the review's middle (file transport plus
-display-only QR outbound, camera capture left to a browser), or take its
-conclusion and remove the QR paragraphs from the design rather than leaving them
-as an unbuilt promise. Whichever wins, the losing document changes in the same
-commit — an unbuilt feature promised in three places and argued out of scope in a
-fourth is exactly the drift this review turned out to be about.
+**That decision was owed before the transports slice and it has been made.** See
+"The QR decision and the file transport" below. In short: review item 7 was
+arguing against a *planned* feature rather than recording a settled one — three
+documents listed animated QR as coming — and the owner's answer on 2026-08-24 was
+to take it out of the design rather than leave it there unbuilt. All three
+documents changed in the same commit as the download leg.
 
 **Held open — set aside, not rejected.** Three ideas are deferred by David rather
 than settled, and a later pass must not quietly convert them into "no". A
@@ -2247,6 +2240,125 @@ by. The same chokepoint is what stops a transcript becoming markup: a run's
 transcript carries peer pubkeys, file paths and error strings from LND and Core,
 none of which this repository chose.
 
+## The QR decision and the file transport
+
+Item 1.4's first half, and the decision that had to be settled before any of it.
+
+### The decision: in-house animated QR is out of scope, held open
+
+Made by the owner on 2026-08-24, as triage item 7's outcome 3. Three documents —
+`CLAUDE.md`, this file and `docs/design.html` — promised animated QR (BBQr,
+`ur:crypto-psbt`, webcam capture on the return leg) and a fourth argued it out of
+scope, so the promise came out of all three in the same commit as the download
+leg. **It is out of scope, not rejected**, and the difference is recorded: the
+triage's "Held open" section carries the cost of picking it up.
+
+Two facts settled it, and **do not re-derive them**:
+
+- **The audit surface, which is repo-specific.** The server has no JavaScript,
+  and that is enforced: `guard.go` sets `default-src 'none'; style-src
+  'unsafe-inline'; img-src 'none'`, and `TestNoScreenFetchesAnything` fails on
+  `<script`, `<img`, `http://` or `https://` in any page body. Webcam capture is
+  in the browser and has no server-side route, so building it *begins* by
+  reversing the strongest property this UI has. Add a vendored JS decoder (a new
+  supply chain in a repo whose dependency surface is `go.sum`) or Go→WASM with
+  `wasm_exec.js`, three multipart encodings, and no QR device on this machine to
+  test any of them against — which is the failure mode already recorded here
+  once, as the invented `Origin: http://127.0.0.1:7420` header.
+- **The loss is smaller than the design assumed.** A QR-only signer is reached
+  through a desktop wallet: download the file, let that wallet do the animated-QR
+  round trip with the device, export the result, upload it. The webcam is the same
+  desktop webcam; what changes is only whether this code drives it.
+
+What replaces the QR sentences in all three documents is the contract, which the
+triage found VALID regardless: **any wallet that round-trips BIP174 against the
+descriptor works.** Naming one application was wrong for SD-card signers and
+wrong for a headless node.
+
+One caveat is worth keeping straight, because the first draft of it overstated the
+case. The rule is about **our** contract, not about any named wallet's export
+behaviour, which is not testable from this machine: only *partial* signatures may
+come back, and `combine.mergeInput` refuses a part whose input is already
+finalized (`ErrAlreadyFinalized`, citing I-2). Separately and checkably, `Merge`
+requires a distinct label per part and counts signatures per device, so one packet
+carrying two devices' signatures loses the attribution every refusal in
+`internal/combine` is built to name. That is why the advice is one device per
+round — a fact about rounds, not a claim about a wallet.
+
+### The download: binary, and named for the round and the device
+
+`GET /runs/{id}/payload/{question}` in `internal/server/transport.go`. It serves
+the pending question's `Payload` decoded to bytes, as an attachment. The link is
+on the payload label's line — "or download it as a .psbt file" — so the two ways
+of taking the packet read as one choice, and the read-only field stays.
+
+**Binary rather than base64 text**, and the reason is the file format rather than
+a device report: BIP174 defines the `.psbt` file as the raw serialisation, base64
+is the encoding for a text transport, and the text transport is the textarea
+beside this link. The decode is `base64.StdEncoding`, which is exactly what
+produced the string — `coldwallet.Build` decodes Core's `psbt` field with it
+(`build.go:184`) to fill `Built.Raw`, and `Built.PSBT`, the string that reaches
+this handler, is that same field untouched. `Built.PSBT`'s own comment already
+said "as Core returns it and as a browser download carries it".
+
+**The name carries the round and the device**, `{round}-{label}.psbt`, which is
+`internal/signers`' file-handshake naming exactly — and for its reason, not for
+consistency: the rehearsal and the batch sign two different transactions minutes
+apart, both files land in one Downloads folder, and a signed rehearsal file picked
+up as the batch's is a signature over the decoy, which `internal/combine` refuses
+at the worst possible moment with a message about a moved txid. `internal/server`
+cannot compose that name — it does not know what a round is — so it comes from
+`internal/webrun` on `Question.PayloadFilename`. There is **no second copy of the
+packet** anywhere: the download decodes the same `Payload` the field shows.
+
+**A stale link is refused, by question id**, the same check and the same reason as
+`Run.Reply`: the two rounds ask the same devices about two different
+transactions, so serving a superseded packet would hand a device the wrong one to
+sign.
+
+### Three defects, and two of them only a browser could find
+
+1. **A silent filename collision.** A label written in a script the allowlist has
+   no letters for — 冷1, 寒2 — sanitised to punctuation and then to nothing, so
+   *every* device in *every* round downloaded under one fixed name. That removes
+   precisely the property the name exists for, with nothing on the screen to say
+   so. The fallback is now built from the run and question ids, which are
+   counters, so two packets always get two names.
+   `TestTwoUnwritableLabelsStillDownloadUnderTwoNames`.
+2. **The link read backwards.** Below the payload box it sat equidistant between
+   the packet and "paste what cold1 gave back", and "download it *instead*"
+   parsed as *instead of pasting* — when it replaces the copy, not the reply. It
+   is on the label line now, above the blob, because which way to take the packet
+   is decided before it is read, and "instead" became "or".
+3. **The stale-download refusal was a dead end.** Correct copy, inside the pane,
+   naming the run screen — with no link to it, on a page whose nav offers
+   overview, doctor and recover. It links back now, the way `noSuchRun` links to
+   the journal.
+
+The header is an allowlist rather than a blocklist because the name is built from
+`config.Signer.Label`, an operator string that lands inside a quoted
+`Content-Disposition` parameter and then in a filename. `net/http` turns newlines
+in a header value into spaces, so header splitting was never the hole; a quote
+closing the parameter early was, and a slash naming a path was. The property
+tested is that a label cannot become *syntax* — one quoted value, one parameter,
+still `.psbt` — not that its text disappears, because it does not need to.
+
+### What the browser proved that the tests could not
+
+Rendered against a real listener on 127.0.0.1:7420, in Chrome, with one signing
+question pending. The file arrives as `rehearsal-cold1.psbt`, 86 bytes beginning
+`70 73 62 74 ff`, byte-identical to the decoded payload with no base64 in it; the
+click downloads without navigating, so the question survives it; the 409 renders
+in the pane and its link returns to the run. Defects 2 and 3 above were both
+invisible to a passing suite.
+
+**Still to do here:** the upload, which is the return leg and its own commit. It
+accepts both forms — binary or base64 — because an operator moving files by hand
+should not have to know which one their wallet wrote, and `signers.decode`
+(`signers.go:225`) is the tolerance to reuse: it settles it on the five-byte
+magic rather than by guessing. `maxAnswer` (`control.go:52`, 1 MiB) already bounds
+a posted form and is the bound to keep.
+
 ## The four seams, and the five things that were actually hard
 
 `run.Do` stops four times to ask a person something. Those are the seams, and
@@ -2782,8 +2894,9 @@ Three patterns are worth more than the list:
 ### What this slice does not do
 
 No transports beyond the minimum — the browser signer is one read-only field out
-and one field back, and the file up/down and the animated QR with webcam capture
-go *around* that same `Question` rather than beside it. No countdown. No setup or
+and one field back, and the file up/down goes *around* that same `Question` rather
+than beside it. (Written before the transports slice: the download exists now, and
+the animated QR this paragraph also named is out of scope as of 2026-08-24.) No countdown. No setup or
 bump screen, so two of the four adapters have no POST yet. A browser-driven run
 uses the browser for every device: the `[[signer]]` blocks supply the labels and
 the count, not a command, and a signer with a working `hwi` command cannot yet be
@@ -2824,10 +2937,12 @@ reproducible from this description in a few minutes, and the durable half of it 
       install-browser chrome-for-testing` fetches the headless shell the MCP
       wants. What has *not* been driven in a browser yet is `doctor` under a slow
       node, and the screens that do not exist.
-   4. **The transports.** File download and upload, and animated QR — BBQr and
-      `ur:crypto-psbt` — with webcam capture on the return leg.
-      `docs/design.html` calls this the one place a browser UI is genuinely
-      better than a terminal. They go *around* the existing `server.Question`
+   4. **The transports.** The **download is done** — `GET
+      /runs/{id}/payload/{question}`, a binary `.psbt` named for its round and
+      device; see "The QR decision and the file transport". What is left is the
+      **upload**, and then mixing transports. Animated QR was the third item here
+      and is out of scope as of 2026-08-24, held open in the triage rather than
+      rejected. They go *around* the existing `server.Question`
       rather than beside it: `Payload` and `Reply` are already the seam, and what
       is missing is more ways to move the same two strings. `internal/signers`
       has two working transports (a command on stdin/stdout, and a file
