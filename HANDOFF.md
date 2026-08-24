@@ -38,8 +38,112 @@ this machine, and the previous two handoffs said otherwise.
 
 What is missing is the transports — file up and down, animated QR with webcam
 capture on the return leg; the browser transport is currently one field out and
-one field back — the countdown, the remaining screens, plus signet and the
-mainnet cold probe.
+one field back — the setup and bump screens, plus signet and the mainnet cold
+probe. **The countdown is built**; see the review section below.
+
+**An external review arrived, and triaging it was most of a session.**
+`docs/review-2026-08.md` was written from `README.md` alone by a reviewer who
+never saw the source, and it carried its own mandatory Phase 0: classify every
+finding against the code before implementing any of it. The triage is
+`docs/review-2026-08-triage.md` and it is the thing to read rather than the
+review. About half the findings were already built — item 2b asked for a *spec*
+for signed-PSBT validation that exists in `internal/combine` with seventeen
+adversarial tests — and the half that was wrong turned out to be a map of where
+the public docs mislead. Item 4 called the web UI "the largest unbuilt thing in
+the repo" because the README's status blockquote said so. Item 8 asked to freeze
+a "run-directory format" because nothing public said the journal is SQLite.
+
+So **the README was the actual defect**, and it was rewritten: the stale status
+blockquote, an install section, a requirements-and-topology section, the no-RBF
+claim qualified with what actually enforces I-4, the change-output guarantee, the
+peers' eleven-minute clock and the dress rehearsal that gates it, "why not just
+sign it in Sparrow", and the BIP174 contract in place of naming Sparrow. Plus the
+three things whose absence produced the review's wrong guesses: `doctor`'s ten
+checks, the journal's seven states, and the inbound PSBT checks.
+
+**Four small items came out of it, one commit each**, and two of them found
+things:
+
+- The peer pre-flight now reads whether this node already has a channel pending
+  open with a batch peer — free, local, and the same answer a probe pays a
+  peer-slot for. A warning and not a gate: `--maxpendingchannels` is the peer's
+  own and published nowhere. It is honest in one direction only, because
+  `AbandonChannel` is local-only, so an empty answer is not proof of a free slot.
+- The peer's alias reaches the batch plan, beside its key and never instead of
+  it. An alias is self-declared, non-unique gossip; a test asserts the verifier
+  produces identical scripts and amounts whether it is right, wrong or absent.
+- Receipt tests, which **found a defect**: a second `chan_pending` receipt naming
+  a *different* outpoint silently overwrote the first, and that outpoint is what
+  an abort abandons. `MarkPending` now refuses with `ErrOutpointMoved`. An
+  identical repeat is still accepted.
+- The journal's seven states and what `recover` does in each are now in
+  `docs/design.html`, and a stale single-sig claim there was removed.
+
+**Then the countdown and the live state, which was item 4 reduced to its core.**
+`prose.Progress` renders one row per channel, the receipt count, whether the
+funding transaction is still held, and what is left of the peers' window; the
+attach screen shows it *above* the transcript, because a transcript grows without
+bound. It reaches the server through `Launcher.Progress` — decision 1 means
+`internal/server` cannot import `internal/journal` — as text rather than rows,
+for the reason `Unfinished` is text. The TUI the review proposed was not built;
+see "Held open" below.
+
+**Four things from that work worth carrying forward.**
+
+1. **`journal.loadChannels` orders by `pending_chan_id`, which is 32 random
+   bytes.** So a run's channels come back in an order unrelated to the batch
+   file's. This was found by rendering the live screen in a browser and seeing
+   channel 1 hold the third channel's amount. Numbering rows on that screen would
+   have invited an operator to match row 2 against the plan document's "channel 2
+   to bitrefill" and get a different channel, so the numbers were dropped.
+   Fixing the order properly needs a position column, and the journal grows by
+   new tables rather than new columns.
+2. **`Run.Reply` returns before the asking `Ask` has cleared `r.pending`.** The
+   answer is buffered and `Ask` clears the slot on its way out, so anything that
+   treats `Reply` returning as "that question is finished" is racing. A test in
+   `internal/webrun` was doing exactly that and flaked about one run in four once
+   the package's test binary grew; it now awaits each device, which is what
+   `run.sign` does in production. Production was never affected — but a new test
+   here will hit it again.
+3. **Harness state still leaks across packages even under `-p 1`.**
+   `internal/bump`'s `TestTheChildsArithmeticAgreesWithCoresOnARealStalledParent`
+   failed once in a full-suite run and passes alone and on repeat. `-p 1` stops
+   two test binaries sharing alice concurrently; it does not undo what an earlier
+   package left in the mempool.
+4. **Three of the review's item-3 scenarios were not written, and they are not
+   test-writing jobs.** An LND restart mid-batch and a peer that accepts then
+   goes silent both need container stop/start, which `internal/regtestenv` does
+   not have. Core unreachable at the `testmempoolaccept` pre-flight inside the
+   armed window needs a seam where `run.Deps` holds a concrete `*bitcoind.Client`
+   — and Phase 0's fee estimate uses the same client, so a dead one fails earlier
+   and tests a different thing.
+
+**Held open — set aside, not rejected.** Three ideas are deferred by David rather
+than settled, and a later pass must not quietly convert them into "no". A
+**pre-signed abort** (review item 5) is blocked on an invariant decision rather
+than on a spec: as specified it puts a funding-transaction replacement in this
+repository, which the rejected list forbids and I-4 scopes by *authorship*. A
+**TUI** is held on audit surface rather than merit — a second front end is a
+large spend against "small enough to read end to end", and the review's
+`ratatui`/`crossterm` are Rust — but the reason to want one survives for a
+headless box beside LND, and `journal.Run` plus `prose.RecoveryList` already
+supply the state and the renderer. And a **no-change / spend-all batch**, which
+is David's own question: currently refused by the verifier (`ChangeMissing`), and
+the cost is the one the gate exists for — no change output means no CPFP lever,
+so a slow batch is frozen with no exit this build implements. If it is taken up,
+the shape is an explicit per-batch opt-in that fails loudly and says what it
+costs, not a lowered floor and not a switch on the verifier.
+
+**I-2 lost a clause it could never have kept.** It used to end "Impossible for
+single-sig, which therefore requires a genuinely air-gapped signer — enforce that
+in the UI, don't just document it". Nothing enforced it, and nothing can: a
+single-sig wallet that signs at all returns a complete transaction, and no check
+in a program can establish that a device is air-gapped. That is David's call —
+single-sig runs work and nothing refuses one — and it is recorded in `CLAUDE.md`,
+`README.md` and `docs/design.html` as a limit on I-2's *reach* rather than a
+relaxation. Nothing may hand a *multisig* signer enough to broadcast. The claim
+was found by fact-checking the README's own new prose, which is worth repeating
+as a habit.
 
 **Two functions have no production caller, and they are named rather than left to
 be found.** `internal/server`'s `Registry` used to be the one and `POST /runs`
