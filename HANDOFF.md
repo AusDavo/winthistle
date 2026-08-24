@@ -39,9 +39,16 @@ this machine, and the previous two handoffs said otherwise.
 What is missing is the transports — file up and down, animated QR with webcam
 capture on the return leg; the browser transport is currently one field out and
 one field back — the countdown, the remaining screens, plus signet and the
-mainnet cold probe. **There is no written-but-uncalled code left.**
-`internal/server`'s `Registry` was the last of it and `POST /runs` is what calls
-it.
+mainnet cold probe.
+
+**Two functions have no production caller, and they are named rather than left to
+be found.** `internal/server`'s `Registry` used to be the one and `POST /runs`
+calls it now; what replaced it on the list is `webrun.Ask` and `webrun.Approve` —
+the adapters for `setup.Ask` and `bump.Approve`. Both are built and unit tested,
+and their POSTs arrive with the setup and bump screens (item 1.6). That is a
+deliberate exception, made for `setup.Ask` in particular because the guard on
+"a comparison nobody made is never recorded" is worth having before its screen
+rather than after.
 
 **The rule that said "there must be no other publish call site" has changed,
 deliberately, and it is now enforced rather than asserted.** There are two calls

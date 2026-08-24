@@ -15,14 +15,15 @@ import (
 	"github.com/AusDavo/winthistle/internal/server"
 )
 
-// TestTheDoctorScreenIsServedEndToEnd is the one screen this slice carries all
-// the way through, against the live harness.
+// TestTheDoctorScreenIsServedEndToEnd is the read-only screen, end to end
+// against the live harness.
 //
-// doctor is the right first screen precisely because it is the least dangerous
-// one: no clock, no signer, no state, and the only thing it creates is the
-// journal file. Nothing on this path can arm, publish or abort, so what is being
-// proved is the plumbing — a real winthistle.toml, a real pre-flight against a
-// real node, through the guard, into a <pre>.
+// doctor was the right *first* screen precisely because it is the least
+// dangerous one: no clock, no signer, no state, and the only thing it creates is
+// the journal file. Nothing on this path can arm, publish or abort, so what is
+// being proved here is the plumbing — a real winthistle.toml, a real pre-flight
+// against a real node, through the guard, into a <pre>. The screens that *can*
+// arm are proved by internal/webrun's browser-driven cold probe.
 //
 // The assertion that carries weight is the pane. Every Report() in this
 // repository is written to prose.PaneWidth and tested against it, and serving

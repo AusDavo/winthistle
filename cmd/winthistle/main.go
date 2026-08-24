@@ -67,12 +67,17 @@ Commands:
 Common flags:
   --config PATH            winthistle.toml (default: ./winthistle.toml)
 
-The web UI serves one screen so far — doctor's — and nothing in it can arm,
-publish or abort. What exists on the command line is the whole sequence: the
-peer pre-flight, the fee source, the dress rehearsal and the reserve check for
-Phase 0; the armed window and its single publish for Phase 1; the confirmation
-watch, the policy pass and the CPFP child for Phase 2; and the abort and
-recovery paths under all of it. See HANDOFF.md.
+The web UI can open a batch: it starts a run, answers the four questions a run
+asks, and stops one. What it cannot do is publish — that stays inside the
+sequence that earned it. Missing from it still: the file and QR transports, the
+countdown, and the screens that list what an earlier run left behind, which
+recover is still the only way to read.
+
+Either front door drives the same sequence: the peer pre-flight, the fee source,
+the dress rehearsal and the reserve check for Phase 0; the armed window and its
+single publish for Phase 1; the confirmation watch, the policy pass and the CPFP
+child for Phase 2; and the abort and recovery paths under all of it. See
+HANDOFF.md.
 `
 
 func main() {
