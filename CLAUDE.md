@@ -11,11 +11,13 @@ Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 loopback bind, a startup token, strict `Origin` and `Host` checks, no CORS — and
 can now open a batch: it starts a run, answers the four questions a run asks, and
 stops one. It also serves the journal read-only, at `/recover`, which is the one
-screen that works on a node that is down. The file transport's outbound leg is
-built — a question's packet downloads as a binary `.psbt` named for its round and
-device — and the upload that returns it is next. Still missing are that upload,
-the countdown, the setup and bump screens and the five reports, signet, and the
-mainnet cold probe. So the safety model below is verified against LND source
+screen that works on a node that is down. **The file transport is built, both
+legs**: a question's packet downloads as a binary `.psbt` named for its round and
+device, and the signed one comes back by paste or by file — binary or base64,
+settled on BIP174's magic by `combine.Parse`, which is the one sniffer all three
+transports share. Still missing are mixing transports per device, the countdown,
+the setup and bump screens and the five reports, signet, and the mainnet cold
+probe. So the safety model below is verified against LND source
 *and* against a running node — but never yet against mainnet, which is what the
 cold probe is for.
 

@@ -75,6 +75,11 @@ form { margin: 1.5rem 0 0; max-width: %dch; }
 label { display: inline-block; }
 textarea { display: block; width: 100%%; box-sizing: border-box; font: inherit;
   white-space: pre-wrap; overflow-wrap: break-word; margin: .25rem 0 1rem; }
+/* Block, like the textarea it is the alternative to. Inline, the file picker
+   flowed into the button row and split the two choices across two lines, so
+   "This is the signed packet" and "cold1 cannot sign" stopped reading as the
+   pair they are. Found by rendering it. */
+input[type=file] { display: block; font: inherit; margin: .25rem 0 1.25rem; }
 button { font: inherit; padding: .4rem .9rem; margin: 0 .5rem .5rem 0; }
 h2 { font: inherit; font-weight: 600; margin: 2rem 0 .5rem; }
 </style>

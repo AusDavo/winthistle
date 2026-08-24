@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"html"
+	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -122,25 +123,110 @@ func (s *Server) answer(w http.ResponseWriter, r *http.Request) {
 	}
 
 	r.Body = http.MaxBytesReader(w, r.Body, maxAnswer)
-	if err := r.ParseForm(); err != nil {
-		s.refuseScreen(w, http.StatusBadRequest, "run "+id, prose.Para(
-			"That answer could not be read: "+err.Error()+". Nothing was recorded "+
-				"and the run is still asking — reload the run screen and answer again."))
+	a, why := readAnswer(r)
+	if why != "" {
+		s.refuseRunScreen(w, http.StatusBadRequest, id, prose.Para(why))
 		return
 	}
 
 	// Whatever came back, verbatim. A choice this question did not offer arrives
 	// as no choice at all, and the seam's own adapter decides what that means:
 	// nothing here fabricates a verdict out of a malformed form.
-	err := run.Reply(r.PostForm.Get("question"), Answer{
-		Choice: r.PostForm.Get("choice"),
-		Text:   strings.TrimSpace(r.PostForm.Get("reply")),
-	})
+	err := run.Reply(r.PostForm.Get("question"), a)
 	if errors.Is(err, ErrStaleQuestion) {
-		s.refuseScreen(w, http.StatusConflict, "run "+id, staleAnswer())
+		s.refuseRunScreen(w, http.StatusConflict, id, staleAnswer())
 		return
 	}
 	http.Redirect(w, r, "/runs/"+id, http.StatusSeeOther)
+}
+
+// refuseRunScreen is a refusal about a run, carrying the way back to it.
+//
+// Three refusals named the run screen and none of them could reach it: the nav
+// carries overview, doctor and recover, so "go back to the run" was an
+// instruction with nothing behind it — on pages an operator lands on precisely
+// when they have lost their place, after a back button, a second tab or a form
+// this handler would not take. Found by rendering the upload leg's refusal; the
+// two older ones had it too.
+func (s *Server) refuseRunScreen(w http.ResponseWriter, code int, id, text string) {
+	w.WriteHeader(code)
+	body := screen("run "+id, "", text)
+	body += fmt.Sprintf("<p><a href=\"%s\">back to run %s</a></p>\n",
+		runPath(id), html.EscapeString(id))
+	serve(w, body)
+}
+
+// readAnswer turns the posted form into an Answer, or returns the sentence to
+// refuse it with.
+//
+// Two encodings arrive here and the split is deliberate. A question that asks
+// for a packet back renders a multipart form, because it carries a file input;
+// the three that ask only for a decision stay urlencoded, so the parsing path
+// under the blunt-abandon confirmation — the one prompt in this product where a
+// human authorises something that could lose funds if the premise were wrong —
+// is the path it always had.
+//
+// Nothing an operator uploads reaches the disk. http.MaxBytesReader has already
+// capped the body at maxAnswer, and ParseMultipartForm is given the same number
+// as its in-memory budget, so the body cannot exceed the budget and no part can
+// spill to a temp file. That is arithmetic rather than a policy: raise one of the
+// two and a signed PSBT starts being written to /tmp.
+func readAnswer(r *http.Request) (Answer, string) {
+	const unreadable = "That answer could not be read: "
+	const retry = ". Nothing was recorded and the run is still asking — reload " +
+		"the run screen and answer again."
+
+	ct := r.Header.Get("Content-Type")
+	if !strings.HasPrefix(ct, "multipart/form-data") {
+		if err := r.ParseForm(); err != nil {
+			return Answer{}, unreadable + err.Error() + retry
+		}
+		return Answer{
+			Choice: r.PostForm.Get("choice"),
+			Text:   strings.TrimSpace(r.PostForm.Get("reply")),
+		}, ""
+	}
+
+	if err := r.ParseMultipartForm(maxAnswer); err != nil {
+		return Answer{}, unreadable + err.Error() + retry
+	}
+	a := Answer{
+		Choice: r.PostForm.Get("choice"),
+		Text:   strings.TrimSpace(r.PostForm.Get("reply")),
+	}
+
+	file, header, err := r.FormFile("upload")
+	switch {
+	case errors.Is(err, http.ErrMissingFile):
+		// Nothing chosen, which is the ordinary case: the operator pasted.
+		return a, ""
+	case err != nil:
+		return Answer{}, unreadable + err.Error() + retry
+	}
+	defer file.Close()
+
+	body, err := io.ReadAll(file)
+	if err != nil {
+		return Answer{}, "That file could not be read: " + err.Error() + retry
+	}
+	if len(body) == 0 {
+		return Answer{}, "That file is empty, so there is no packet in it" + retry
+	}
+	if a.Text != "" {
+		// Two packets, and choosing between them here would be a second place a
+		// verdict is decided. The operator did two things and only they know
+		// which one they meant.
+		return Answer{}, "That form came back with a packet pasted and a file " +
+			"chosen as well, and those are two different packets. Choosing " +
+			"between them here would decide something only you can: nothing was " +
+			"recorded, and the run is still asking. Open the run screen again and " +
+			"give it one of them — paste the base64, or pick the file, not both."
+	}
+	a.Upload = body
+	if header != nil {
+		a.UploadName = header.Filename
+	}
+	return a, ""
 }
 
 // abortScreen is the confirmation in front of the abort control.
@@ -240,8 +326,15 @@ func (s *Server) abortRefusal(id string) error {
 // round needs — and a form is chrome in the same way the nav is.
 func questionForm(runID string, q *Question) string {
 	var b strings.Builder
-	fmt.Fprintf(&b, "\n<form method=\"post\" action=\"/runs/%s/answer\">\n",
-		html.EscapeString(runID))
+	// multipart only when there is a packet to send back, so the three
+	// decision-only questions post exactly what they always posted. See
+	// readAnswer: the blunt-abandon confirmation keeps its parsing path.
+	enc := ""
+	if q.Reply != "" {
+		enc = ` enctype="multipart/form-data"`
+	}
+	fmt.Fprintf(&b, "\n<form method=\"post\" action=\"/runs/%s/answer\"%s>\n",
+		html.EscapeString(runID), enc)
 	fmt.Fprintf(&b, "<input type=\"hidden\" name=\"question\" value=\"%s\">\n",
 		html.EscapeString(q.ID))
 
@@ -270,6 +363,13 @@ func questionForm(runID string, q *Question) string {
 		fmt.Fprintf(&b, "<p><label for=\"reply\">%s</label></p>\n",
 			html.EscapeString(q.Reply))
 		b.WriteString("<textarea id=\"reply\" name=\"reply\" rows=\"6\"></textarea>\n")
+		// The return leg's other half. "or" rather than "and": readAnswer
+		// refuses a form carrying both, because two packets is the operator
+		// having done two things and this is not the place to pick one.
+		b.WriteString("<p><label for=\"upload\">or choose the signed .psbt file " +
+			"the wallet wrote — binary or base64, either is read</label></p>\n")
+		b.WriteString("<input id=\"upload\" name=\"upload\" type=\"file\" " +
+			"accept=\".psbt,application/octet-stream,text/plain\">\n")
 	}
 	for _, c := range q.Choices {
 		fmt.Fprintf(&b, "<button type=\"submit\" name=\"choice\" value=\"%s\">%s</button>\n",
@@ -357,9 +457,9 @@ func alreadyRunning(err error, live *Run) string {
 func staleAnswer() string {
 	return prose.Para("That answer is to a question this run is no longer " +
 		"asking. Nothing was recorded and nothing was decided by it — a reload, a " +
-		"back button or a second tab is the usual cause. Go back to the run: if it " +
-		"is still waiting on something, the question it is waiting on is the one " +
-		"on that screen.")
+		"back button or a second tab is the usual cause. The link below goes back " +
+		"to the run: if it is still waiting on something, the question it is " +
+		"waiting on is the one on that screen.")
 }
 
 func abortWarning(id string, already bool) string {

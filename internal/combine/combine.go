@@ -60,6 +60,7 @@ package combine
 
 import (
 	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"sort"
@@ -162,6 +163,49 @@ type Merged struct {
 	// Contributors are the labels that added at least one signature, in the
 	// order they were supplied.
 	Contributors []string
+}
+
+// magic is BIP174's five bytes, and it is what settles binary-or-base64 without
+// guessing. A base64 PSBT begins "cHNidP8", which is these bytes encoded, so the
+// two forms cannot be confused by looking at the front of them.
+var magic = []byte{0x70, 0x73, 0x62, 0x74, 0xff}
+
+// Parse reads a PSBT that arrived as either base64 text or raw bytes.
+//
+// Three transports need this and they need the same answer. A wallet writes
+// whichever form it writes — Sparrow writes binary .psbt files, Core writes
+// base64 — and an operator moving a file by hand should not have to know which
+// one this build wanted. internal/signers' file handshake needed it first, a
+// browser upload needs it now, and it lives here because this is the package
+// that owns what a PSBT is. Two sniffers in two packages could disagree about
+// one file, which is the kind of disagreement that surfaces as a device being
+// blamed for something a transport did.
+func Parse(body []byte) ([]byte, error) {
+	trimmed := bytes.TrimSpace(body)
+	if len(trimmed) == 0 {
+		return nil, fmt.Errorf("it is empty")
+	}
+	if bytes.HasPrefix(trimmed, magic) {
+		return trimmed, nil
+	}
+	raw, err := ParseBase64(string(trimmed))
+	if err != nil {
+		// Not base64 either. Say what was actually there rather than repeating
+		// base64's complaint, which is about padding and tells nobody anything.
+		if _, decErr := base64.StdEncoding.DecodeString(string(trimmed)); decErr != nil {
+			return nil, fmt.Errorf("it is neither base64 nor a PSBT: it starts %q",
+				firstBytes(trimmed))
+		}
+		return nil, err
+	}
+	return raw, nil
+}
+
+func firstBytes(b []byte) string {
+	if len(b) > 24 {
+		b = b[:24]
+	}
+	return string(b)
 }
 
 // ParseBase64 decodes a base64 PSBT, for the transport a browser upload uses.

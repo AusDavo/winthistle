@@ -1,9 +1,12 @@
 package server
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
+	"mime/multipart"
 	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"testing"
@@ -359,5 +362,249 @@ func TestTwoUnwritableLabelsStillDownloadUnderTwoNames(t *testing.T) {
 			t.Errorf("%q and %q both download as %q", was, label, name)
 		}
 		seen[name] = label
+	}
+}
+
+// multipartAnswer builds the request a browser sends when the operator chooses a
+// file. Not a hand-rolled body: mime/multipart writes what a browser writes, and
+// a test that invents the encoding is a test asserting its own assumption — which
+// is how the Origin header got a whole handoff section.
+//
+// The headers are the ones Chrome was measured sending on a same-origin form
+// POST: an opaque origin, and Sec-Fetch-Site: same-origin. See guard_test.go.
+func multipartAnswer(t *testing.T, s *Server, path string,
+	fields map[string]string, filename string, file []byte) *http.Request {
+
+	t.Helper()
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	for k, v := range fields {
+		if err := mw.WriteField(k, v); err != nil {
+			t.Fatalf("WriteField %s: %v", k, err)
+		}
+	}
+	if filename != "" {
+		part, err := mw.CreateFormFile("upload", filename)
+		if err != nil {
+			t.Fatalf("CreateFormFile: %v", err)
+		}
+		if _, err := part.Write(file); err != nil {
+			t.Fatalf("writing the file part: %v", err)
+		}
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatalf("closing the writer: %v", err)
+	}
+
+	r := httptest.NewRequest(http.MethodPost, path, &body)
+	r.Host = "127.0.0.1:7420"
+	r.Header.Set("Content-Type", mw.FormDataContentType())
+	r.Header.Set("Origin", opaqueOrigin)
+	r.Header.Set("Sec-Fetch-Site", "same-origin")
+	r.Header.Set("Sec-Fetch-Mode", "navigate")
+	r.AddCookie(&http.Cookie{Name: cookieName, Value: s.token})
+	return r
+}
+
+// TestAnUploadedPacketReachesTheSeamVerbatim is the return leg, and "verbatim" is
+// the property: this package does not know whether the bytes are a binary PSBT or
+// base64 text, and it must not guess. combine.Parse settles that, on
+// internal/webrun's side of the boundary.
+func TestAnUploadedPacketReachesTheSeamVerbatim(t *testing.T) {
+	raw, err := base64.StdEncoding.DecodeString("cHNidP8BAAA=")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		file []byte
+	}{
+		{"a binary .psbt, as Sparrow writes", raw},
+		{"base64 in a file, as Core writes", []byte("cHNidP8BAAA=\n")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := testServer(t)
+			run := s.Runs.add("run-1")
+
+			got := make(chan Answer, 1)
+			go func() {
+				a, _ := run.Ask(context.Background(), Question{
+					Prompt:   "sign this",
+					Payload:  "cHNidP8BAAA=",
+					Reply:    "paste what cold1 gave back",
+					Choices:  []Choice{{Value: "signed", Label: "signed"}},
+					Deadline: time.Now().Add(time.Minute),
+				})
+				got <- a
+			}()
+			q := awaitPending(t, run)
+
+			w := serveIt(s, multipartAnswer(t, s, "/runs/run-1/answer",
+				map[string]string{"question": q.ID, "choice": "signed", "reply": ""},
+				"batch-cold1.psbt", tc.file))
+			if w.Code != http.StatusSeeOther {
+				t.Fatalf("the upload is %d, not 303:\n%s", w.Code, w.Body.String())
+			}
+
+			a := <-got
+			if a.Choice != "signed" {
+				t.Errorf("the choice is %q", a.Choice)
+			}
+			if string(a.Upload) != string(tc.file) {
+				t.Errorf("the seam got %q, not the file's bytes %q", a.Upload, tc.file)
+			}
+			if a.UploadName != "batch-cold1.psbt" {
+				t.Errorf("the file name is %q", a.UploadName)
+			}
+			if a.Text != "" {
+				t.Errorf("Text is %q for an upload", a.Text)
+			}
+		})
+	}
+}
+
+// TestAPastedPacketAndAnUploadedOneAreRefusedTogether.
+//
+// Two packets is the operator having done two things, and picking one here would
+// be a second place a verdict is decided — the same rule Question.Choices carries
+// about never rewriting an answer. Nothing is recorded and the run is still
+// asking, so the cost of the refusal is one more form.
+func TestAPastedPacketAndAnUploadedOneAreRefusedTogether(t *testing.T) {
+	s := testServer(t)
+	run := s.Runs.add("run-1")
+
+	go run.Ask(context.Background(), Question{
+		Prompt:   "sign this",
+		Payload:  "cHNidP8BAAA=",
+		Reply:    "paste what cold1 gave back",
+		Choices:  []Choice{{Value: "signed", Label: "signed"}},
+		Deadline: time.Now().Add(time.Minute),
+	})
+	q := awaitPending(t, run)
+
+	w := serveIt(s, multipartAnswer(t, s, "/runs/run-1/answer",
+		map[string]string{"question": q.ID, "choice": "signed", "reply": "cHNidP8BAAA="},
+		"batch-cold1.psbt", []byte("cHNidP8BAQE=")))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("a form with both is %d, not 400", w.Code)
+	}
+	body := w.Body.String()
+	if got := pre(t, body); !strings.Contains(got, "two different packets") {
+		t.Errorf("the refusal does not say why:\n%s", got)
+	}
+	// No markdown in a <pre>. An emphasis marker renders as an asterisk here,
+	// which reads as noise in the middle of a sentence an operator is trying to
+	// act on. Found by rendering it.
+	if strings.Contains(pre(t, body), "*") {
+		t.Errorf("the refusal carries a markdown marker verbatim:\n%s", pre(t, body))
+	}
+	// And the way back, which all three refusals in this path lacked.
+	if !strings.Contains(body, `href="/runs/run-1"`) {
+		t.Errorf("the refusal has no link back to the run:\n%s", body)
+	}
+	// And the run is still asking, which is what makes the refusal cheap.
+	if run.Pending() == nil {
+		t.Error("the question was consumed by a refused form")
+	}
+}
+
+// TestAnEmptyFileIsRefusedRatherThanAnswered. A file input the operator opened
+// and cancelled out of can post a zero-length part. That is not an answer, and
+// handing the seam an empty packet would blame a device for a file picker.
+func TestAnEmptyFileIsRefusedRatherThanAnswered(t *testing.T) {
+	s := testServer(t)
+	run := s.Runs.add("run-1")
+
+	go run.Ask(context.Background(), Question{
+		Prompt:   "sign this",
+		Payload:  "cHNidP8BAAA=",
+		Reply:    "paste what cold1 gave back",
+		Choices:  []Choice{{Value: "signed", Label: "signed"}},
+		Deadline: time.Now().Add(time.Minute),
+	})
+	q := awaitPending(t, run)
+
+	w := serveIt(s, multipartAnswer(t, s, "/runs/run-1/answer",
+		map[string]string{"question": q.ID, "choice": "signed", "reply": ""},
+		"batch-cold1.psbt", nil))
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("an empty file is %d, not 400", w.Code)
+	}
+	if run.Pending() == nil {
+		t.Error("the question was consumed by an empty file")
+	}
+}
+
+// TestAMultipartFormWithNoFileIsStillAPaste is the ordinary case: the form is
+// multipart because it *can* carry a file, and most of the time it does not.
+func TestAMultipartFormWithNoFileIsStillAPaste(t *testing.T) {
+	s := testServer(t)
+	run := s.Runs.add("run-1")
+
+	got := make(chan Answer, 1)
+	go func() {
+		a, _ := run.Ask(context.Background(), Question{
+			Prompt:   "sign this",
+			Payload:  "cHNidP8BAAA=",
+			Reply:    "paste what cold1 gave back",
+			Choices:  []Choice{{Value: "signed", Label: "signed"}},
+			Deadline: time.Now().Add(time.Minute),
+		})
+		got <- a
+	}()
+	q := awaitPending(t, run)
+
+	w := serveIt(s, multipartAnswer(t, s, "/runs/run-1/answer",
+		map[string]string{"question": q.ID, "choice": "signed", "reply": "  cHNidP8BAAA=  "},
+		"", nil))
+	if w.Code != http.StatusSeeOther {
+		t.Fatalf("a multipart paste is %d, not 303:\n%s", w.Code, w.Body.String())
+	}
+	a := <-got
+	if a.Text != "cHNidP8BAAA=" {
+		t.Errorf("the pasted text is %q, so multipart lost the trim", a.Text)
+	}
+	if len(a.Upload) != 0 {
+		t.Errorf("Upload is %q with no file chosen", a.Upload)
+	}
+}
+
+// TestADecisionFormStaysUrlencoded is the split readAnswer depends on.
+//
+// The three decision-only questions carry no file input, so their form is the
+// form it always was — including the blunt-abandon confirmation, which is the one
+// prompt in this product where a human authorises something that could lose funds
+// if the premise were wrong. A new parsing path under that prompt is not
+// something to acquire as a side effect of adding a file picker elsewhere.
+func TestADecisionFormStaysUrlencoded(t *testing.T) {
+	s := testServer(t)
+
+	asking(t, s, "run-1", Question{
+		Prompt:  "Abandon this channel with i_know_what_i_am_doing?",
+		Choices: []Choice{{Value: "no", Label: "No"}, {Value: "yes", Label: "Yes"}},
+	})
+	body := serveIt(s, get(t, s, "/runs/run-1")).Body.String()
+	if strings.Contains(body, "multipart/form-data") {
+		t.Error("the confirmation form is multipart, so it no longer posts what " +
+			"every other test of it posts")
+	}
+	if strings.Contains(body, `type="file"`) {
+		t.Error("the confirmation offers a file input")
+	}
+
+	// And the signing form, which does carry one, is multipart.
+	asking(t, s, "run-2", Question{
+		Prompt:  "sign this",
+		Payload: "cHNidP8BAAA=",
+		Reply:   "paste what cold1 gave back",
+		Choices: []Choice{{Value: "signed", Label: "signed"}},
+	})
+	signing := serveIt(s, get(t, s, "/runs/run-2")).Body.String()
+	if !strings.Contains(signing, `enctype="multipart/form-data"`) {
+		t.Error("the signing form is not multipart, so the file input cannot send")
+	}
+	if !strings.Contains(signing, `name="upload" type="file"`) {
+		t.Errorf("the signing form has no file input:\n%s", signing)
 	}
 }

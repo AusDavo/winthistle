@@ -408,13 +408,28 @@ func Signer(r *server.Run, req SignRequest) rehearsal.Signer {
 			return combine.Part{}, fmt.Errorf("%s cannot sign, so the round is over. "+
 				"Nothing is published and nothing is at risk", req.Label)
 		}
-		if a.Choice != ChoiceSigned || a.Text == "" {
+		if a.Choice != ChoiceSigned || (a.Text == "" && len(a.Upload) == 0) {
 			return combine.Part{}, fmt.Errorf("%s: the form came back with no packet "+
 				"in it, so there is nothing to combine", req.Label)
 		}
-		raw, err := combine.ParseBase64(a.Text)
+
+		// Pasted or uploaded, one function reads both. combine.Parse settles
+		// binary-or-base64 on BIP174's five-byte magic, so a wallet that writes
+		// a binary .psbt and one that writes base64 are both read without asking
+		// the operator which theirs does — the same tolerance internal/signers'
+		// file handshake has always had, in the package that owns what a PSBT is
+		// rather than in a second copy here.
+		body, where := []byte(a.Text), "the pasted packet"
+		if len(a.Upload) > 0 {
+			body, where = a.Upload, "the uploaded file"
+			if a.UploadName != "" {
+				where = a.UploadName
+			}
+		}
+		raw, err := combine.Parse(body)
 		if err != nil {
-			return combine.Part{}, fmt.Errorf("%s: %w", req.Label, err)
+			return combine.Part{}, fmt.Errorf("%s: %s is not a PSBT this build can "+
+				"read: %w", req.Label, where, err)
 		}
 		return combine.Part{Label: req.Label, PSBT: raw}, nil
 	}

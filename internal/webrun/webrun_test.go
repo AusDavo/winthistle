@@ -316,7 +316,12 @@ func TestASignerWithNoPacketIsRefused(t *testing.T) {
 		{"declined", ChoiceCannot, "", "cannot sign"},
 		{"an empty field", ChoiceSigned, "", "no packet"},
 		{"no choice at all", "", "cHNidP8BAAA=", "no packet"},
-		{"not a psbt", ChoiceSigned, "not base64 at all", "not a base64 PSBT"},
+		// The message changed when the upload leg landed and both halves of the
+		// transport started going through combine.Parse: it names what was
+		// actually in the field rather than repeating base64's complaint about
+		// padding, which told nobody anything. That is the message
+		// internal/signers' file handshake already gave.
+		{"not a psbt", ChoiceSigned, "not base64 at all", "neither base64 nor a PSBT"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			r := aRun(t)

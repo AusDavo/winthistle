@@ -35,7 +35,6 @@ package signers
 import (
 	"bytes"
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -52,11 +51,6 @@ import (
 
 // DefaultPoll is how often the file handshake looks for the signed file.
 const DefaultPoll = 2 * time.Second
-
-// magic is a PSBT's five-byte prefix, "psbt" and 0xff. It is how a file written
-// by Sparrow (binary) is told from one written by Core (base64) without asking
-// the operator which their wallet does.
-var magic = []byte{0x70, 0x73, 0x62, 0x74, 0xff}
 
 // Options is everything the transports need that is not in the config.
 type Options struct {
@@ -219,33 +213,9 @@ func (s *Set) handshake(ctx context.Context, round, label, psbtB64 string) (comb
 
 // decode reads a PSBT that arrived as either base64 text or raw bytes.
 //
-// Sparrow writes binary .psbt files and Core writes base64, and an operator
-// moving files by hand should not have to know which this tool wanted. The
-// five-byte magic settles it without guessing.
-func decode(body []byte) ([]byte, error) {
-	trimmed := bytes.TrimSpace(body)
-	if len(trimmed) == 0 {
-		return nil, fmt.Errorf("it is empty")
-	}
-	if bytes.HasPrefix(trimmed, magic) {
-		return trimmed, nil
-	}
-	raw, err := combine.ParseBase64(string(trimmed))
-	if err != nil {
-		// Not base64 either. Say what was actually there rather than repeating
-		// base64's complaint, which is about padding and tells nobody anything.
-		if _, decErr := base64.StdEncoding.DecodeString(string(trimmed)); decErr != nil {
-			return nil, fmt.Errorf("it is neither base64 nor a PSBT: it starts %q",
-				firstBytes(trimmed))
-		}
-		return nil, err
-	}
-	return raw, nil
-}
-
-func firstBytes(b []byte) string {
-	if len(b) > 24 {
-		b = b[:24]
-	}
-	return string(b)
-}
+// It is combine.Parse, and it moved there when the browser upload needed the
+// same tolerance: three transports read files a wallet wrote, and two sniffers
+// could disagree about one file. The wrapper stays because this package's
+// callers read better with it, and because the file handshake is where the
+// tolerance was first needed.
+func decode(body []byte) ([]byte, error) { return combine.Parse(body) }

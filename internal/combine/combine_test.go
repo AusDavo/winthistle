@@ -744,3 +744,87 @@ func report(v *plan.Verification) string {
 	}
 	return v.Report()
 }
+
+// TestParseReadsEitherEncoding is the tolerance three transports share.
+//
+// It moved here from internal/signers when the browser upload needed it: the file
+// handshake reads a file a wallet wrote, and so does a browser upload, and two
+// sniffers in two packages could disagree about one file. A disagreement there
+// surfaces as a device being blamed for something a transport did, which is the
+// worst place in this product to be wrong about who is at fault.
+//
+// The fixture is the real one — a serialised P2WSH packet, not a five-byte
+// prefix — so "it parsed" means the round trip preserved a packet rather than
+// that the magic matched.
+func TestParseReadsEitherEncoding(t *testing.T) {
+	w := newWallet(t, 2, 2)
+	b := newBatch(t, w)
+
+	b64, err := parse(t, b.base).B64Encode()
+	if err != nil {
+		t.Fatalf("B64Encode: %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		in   []byte
+	}{
+		{"binary, as Sparrow writes it", b.base},
+		{"base64, as Core writes it", []byte(b64)},
+		{"base64 with the trailing newline a file has", []byte(b64 + "\n")},
+		{"base64 with leading whitespace, as a paste carries", []byte("  " + b64 + "  ")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := combine.Parse(tc.in)
+			if err != nil {
+				t.Fatalf("Parse: %v", err)
+			}
+			if !bytes.Equal(got, b.base) {
+				t.Errorf("Parse returned %d bytes, not the packet's %d",
+					len(got), len(b.base))
+			}
+		})
+	}
+}
+
+// TestParseSaysWhatWasActuallyThere.
+//
+// The refusal an operator reads has to name the file's contents, not base64's
+// complaint about padding — "illegal base64 data at input byte 3" tells nobody
+// whether they picked the wrong file, exported the wrong format, or hit a
+// truncated write. This is the message internal/signers' file handshake already
+// gave, and it is now what a browser upload gives too.
+func TestParseSaysWhatWasActuallyThere(t *testing.T) {
+	for _, tc := range []struct {
+		name, in, want string
+	}{
+		{"empty", "", "it is empty"},
+		{"whitespace only", "  \n\t ", "it is empty"},
+		{"not base64 at all", "not base64 at all", "neither base64 nor a PSBT"},
+		{"a wallet's error page", "<html>Sign in</html>", "neither base64 nor a PSBT"},
+		// Valid base64 that is not a PSBT: the message must not claim it is not
+		// base64, because it is — the packet is what is wrong with it.
+		{"base64 of something else", "aGVsbG8gd29ybGQ=", "PSBT"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, err := combine.Parse([]byte(tc.in))
+			if err == nil {
+				t.Fatal("it parsed")
+			}
+			if !strings.Contains(err.Error(), tc.want) {
+				t.Errorf("Parse(%q) said %q, which does not say %q",
+					tc.in, err, tc.want)
+			}
+		})
+	}
+
+	// The one that would be most misleading if it were wrong: valid base64 of
+	// something else must not be reported as bad base64.
+	_, err := combine.Parse([]byte("aGVsbG8gd29ybGQ="))
+	if err == nil {
+		t.Fatal("base64 of a non-PSBT parsed")
+	}
+	if strings.Contains(err.Error(), "neither base64 nor a PSBT") {
+		t.Errorf("valid base64 of a non-PSBT is reported as not being base64: %v", err)
+	}
+}

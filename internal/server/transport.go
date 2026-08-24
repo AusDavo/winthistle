@@ -65,11 +65,7 @@ func (s *Server) downloadPayload(w http.ResponseWriter, r *http.Request) {
 		// to reload it: a browser that followed a stale link is on a page whose
 		// nav has overview, doctor and recover on it and no route back to the
 		// one screen being named. Found by rendering it.
-		w.WriteHeader(http.StatusConflict)
-		body := screen("run "+id, "", stalePayload(q))
-		body += fmt.Sprintf("<p><a href=\"%s\">back to run %s</a></p>\n",
-			runPath(id), html.EscapeString(id))
-		serve(w, body)
+		s.refuseRunScreen(w, http.StatusConflict, id, stalePayload(q))
 		return
 	}
 	if q.Payload == "" {
@@ -167,14 +163,14 @@ func stalePayload(live *Question) string {
 	if live == nil {
 		b.WriteString("\n")
 		b.WriteString(prose.Para(
-			"This run is not waiting on anything at the moment. The run screen " +
-				"is where it says what it is doing."))
+			"This run is not waiting on anything at the moment. The link below " +
+				"goes to the run screen, which says what it is doing."))
 		return b.String()
 	}
 	b.WriteString("\n")
 	b.WriteString(prose.Para(
 		"It is asking something else now. Take the packet from the run screen " +
-			"instead of from this link."))
+			"instead of from this link — it is below."))
 	return b.String()
 }
 

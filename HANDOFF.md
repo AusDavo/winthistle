@@ -36,9 +36,9 @@ every form in the UI unusable.** See "The bug the first render found" below —
 `Origin: null` — and note the correction it carries: a browser *is* installed on
 this machine, and the previous two handoffs said otherwise.
 
-What is missing is the file transport's return leg — the download is built, and
-an upload is what still has to come back — the setup and bump screens, plus
-signet and the mainnet cold probe. **The countdown is built**; see the review
+What is missing is transport selection per device — the file transport itself is
+built, both legs — the setup and bump screens, plus signet and the mainnet cold
+probe. **The countdown is built**; see the review
 section below. **In-house animated QR is out of scope as of 2026-08-24**, by the
 owner's decision, and it is out of scope rather than unbuilt: see "The QR decision
 and the file transport" below.
@@ -2352,12 +2352,76 @@ click downloads without navigating, so the question survives it; the 409 renders
 in the pane and its link returns to the run. Defects 2 and 3 above were both
 invisible to a passing suite.
 
-**Still to do here:** the upload, which is the return leg and its own commit. It
-accepts both forms — binary or base64 — because an operator moving files by hand
-should not have to know which one their wallet wrote, and `signers.decode`
-(`signers.go:225`) is the tolerance to reuse: it settles it on the five-byte
-magic rather than by guessing. `maxAnswer` (`control.go:52`, 1 MiB) already bounds
-a posted form and is the bound to keep.
+### The upload: multipart, and one sniffer for three transports
+
+The return leg is a file input beside the paste field, so the operator gives the
+run one packet either way and presses the same button. Four things are worth
+knowing about it.
+
+**The tolerance moved into `internal/combine`.** `signers.decode` was the
+both-forms reader — binary or base64, settled on BIP174's five-byte magic rather
+than by guessing — and it is now `combine.Parse`, with `signers.decode` a one-line
+wrapper over it. The reason is not tidiness: three transports read a file a wallet
+wrote, and two sniffers in two packages could disagree about one file. A
+disagreement there surfaces as a *device* being blamed for something a
+*transport* did, which is the worst place in this product to be wrong about who
+is at fault. `TestParseReadsEitherEncoding` and
+`TestParseSaysWhatWasActuallyThere` are in `internal/combine` now, and the second
+pins the property that valid base64 of a non-PSBT is not reported as bad base64.
+
+**`internal/server` still does not know what a PSBT is.** `Answer.Upload` is the
+file's bytes verbatim and `internal/webrun` runs them through `combine.Parse`,
+which is the same division the download's filename has from the other direction:
+the server moves bytes, and the package that already holds every other fact about
+a PSBT decides what they are.
+
+**Only the signing form is multipart.** `enctype` is set when `Question.Reply` is
+non-empty, so the three decision-only questions post exactly what they always
+posted — including the blunt-abandon confirmation, and a new parsing path under
+*that* prompt is not something to acquire as a side effect of adding a file picker
+elsewhere. `TestADecisionFormStaysUrlencoded`.
+
+**No uploaded packet reaches the disk, and it is arithmetic rather than policy.**
+`http.MaxBytesReader` caps the body at `maxAnswer` (1 MiB) and
+`ParseMultipartForm` is given the same number as its in-memory budget, so the body
+cannot exceed the budget and no part can spill to a temp file. Raise one of the
+two without the other and a signed PSBT starts being written to `/tmp`.
+
+And one refusal that is a decision rather than a validation: **a form carrying a
+paste *and* a file is refused**, not resolved. Two packets is the operator having
+done two things, and picking one here would be a second place a verdict is
+decided — the rule `Question.Choices` already carries. Nothing is recorded and the
+question stays pending, so the refusal costs one more form rather than a round.
+
+### Three more defects, all three from rendering the upload
+
+1. **The file input flowed into the button row.** Inline by default, so
+   "Choose File" sat beside "This is the signed packet" and pushed "cold1 cannot
+   sign" onto its own line — the two *choices* stopped reading as the pair they
+   are, on the screen where one of them ends a signing round. It is `display:
+   block` now, like the textarea it is the alternative to.
+2. **`*and*` rendered as asterisks.** The refusal is served inside a `<pre>`, so
+   a markdown emphasis marker is just punctuation in the middle of a sentence
+   someone is trying to act on. There is no markdown anywhere in this UI and the
+   copy should not imply there is.
+3. **Three refusals named the run screen and none could reach it** — the
+   both-set refusal, the unreadable-form refusal, and `staleAnswer`, which is
+   pre-existing and is the one an operator meets after a back button or a second
+   tab, exactly when they have lost their place. The nav carries overview, doctor
+   and recover. `Server.refuseRunScreen` is the one helper they all use now, and
+   the stale *download* refusal uses it too.
+
+Verified in Chrome with a real file picker: a binary `.psbt` chosen from disk
+arrives at the seam as its own 86 bytes with its filename, `Answer.Text` empty; a
+paste in the same multipart form arrives trimmed with `Upload` nil; and a form
+carrying both is refused, after which the question is *still pending* and the same
+file answers it. That last one is the property that makes the refusal cheap, and
+it is worth re-checking by hand if this path is ever touched.
+
+**Still to do here:** mixing transports per device. A browser-driven run uses the
+browser for every device even when a `[[signer]]` block names a working command,
+and `Set.signer` already branches on `d.Command` — so the shape exists on the CLI
+side and what is missing is the choice reaching a browser-driven round.
 
 ## The four seams, and the five things that were actually hard
 
@@ -2937,12 +3001,12 @@ reproducible from this description in a few minutes, and the durable half of it 
       install-browser chrome-for-testing` fetches the headless shell the MCP
       wants. What has *not* been driven in a browser yet is `doctor` under a slow
       node, and the screens that do not exist.
-   4. **The transports.** The **download is done** — `GET
-      /runs/{id}/payload/{question}`, a binary `.psbt` named for its round and
-      device; see "The QR decision and the file transport". What is left is the
-      **upload**, and then mixing transports. Animated QR was the third item here
-      and is out of scope as of 2026-08-24, held open in the triage rather than
-      rejected. They go *around* the existing `server.Question`
+   4. **The transports.** The **file transport is done, both legs** — `GET
+      /runs/{id}/payload/{question}` out, a multipart file input back; see "The
+      QR decision and the file transport". What is left is **mixing transports
+      per device**. Animated QR was the third item here and is out of scope as of
+      2026-08-24, held open in the triage rather than rejected. They go *around*
+      the existing `server.Question`
       rather than beside it: `Payload` and `Reply` are already the seam, and what
       is missing is more ways to move the same two strings. `internal/signers`
       has two working transports (a command on stdin/stdout, and a file

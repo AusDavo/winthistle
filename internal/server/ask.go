@@ -187,6 +187,22 @@ type Answer struct {
 
 	// Text is the free-text field, when the question asked for one.
 	Text string
+
+	// Upload is the bytes of a file the operator chose instead of pasting, or
+	// nil. Verbatim: this package does not know whether they are a binary PSBT
+	// or base64 text, and it must not guess — combine.Parse settles that on
+	// BIP174's five-byte magic, on internal/webrun's side of the boundary,
+	// which is where every other fact about what a PSBT is already lives.
+	//
+	// Text and Upload are never both set. The handler refuses a form carrying
+	// both rather than preferring one, because two packets arriving together is
+	// an operator who did two things, and choosing between them silently is
+	// exactly the sort of second verdict Choices' comment forbids.
+	Upload []byte
+
+	// UploadName is what the browser called the file, for an error that has to
+	// name it. Never used to open anything.
+	UploadName string
 }
 
 // Ask puts a question in front of whoever is attached and blocks until it is
