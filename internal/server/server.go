@@ -13,11 +13,17 @@
 // bitcoind's JSON-RPC client, which is a client, so the security shape below had
 // no precedent to follow and is the part that had to be right first.
 //
-// It now serves the three screens and the three unsafe methods that let an
-// operator open a batch from a browser: start a run, answer the four questions a
-// run asks, and stop one. What it cannot do is publish — see the guard on
-// decision 1 — and what it does not do yet is the transports, the countdown and
-// the remaining screens.
+// It now serves five screens and the three unsafe methods that let an operator
+// open a batch from a browser: start a run, answer the four questions a run
+// asks, and stop one. What it cannot do is publish — see the guard on decision 1
+// — and what it does not do yet is the transports, the countdown and the
+// remaining screens.
+//
+// The two newest screens are the journal's, under /recover, and they are the
+// only ones that work on a node that is down. They are also read-only, on
+// purpose: recover.go is where that decision and its guards are written down,
+// along with what keeps a journal row from being read as a run that is
+// happening.
 //
 // # The three decisions, and the guard each one needs
 //
@@ -136,6 +142,7 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/config"
+	"github.com/AusDavo/winthistle/internal/prose"
 )
 
 // Options is what the server needs that is not the configuration file.
@@ -246,6 +253,14 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.index)
 	s.mux.HandleFunc("GET /doctor", s.doctor)
 	s.mux.HandleFunc("GET /runs/{id}", s.attach)
+
+	// The journal, read-only. There is no POST under /recover and there is not
+	// meant to be: an abort of a journalled run asks abort.Confirmation once per
+	// channel and a browser answers those through a Run, which a journalled run
+	// does not have. See recover.go. The method patterns are what make a POST
+	// here a 405 rather than a handler somebody has to remember not to write.
+	s.mux.HandleFunc("GET /recover", s.recoverList)
+	s.mux.HandleFunc("GET /recover/{id}", s.recoverOne)
 
 	// The unsafe methods. See control.go: the guard in front of them already
 	// refuses one that cannot say where it came from, and neither of the two
@@ -376,17 +391,25 @@ func (s *Server) waitForRuns(out io.Writer) {
 	fmt.Fprint(out, stillUnwinding(live.ID))
 }
 
+// The two lines Ctrl-C prints, and they are the only operator copy in this
+// package that goes to a terminal rather than through screen().
+//
+// Wrapped, like everything else. They were not, and they came out at 185 and 377
+// columns — printed at the one moment an operator is reading hardest, while a
+// batch with n shims open is coming apart under them. The same defect the
+// transcript had, in the one place no page test was ever going to look:
+// TestTheServersOwnCopyFitsThePane measures them now.
 func unwinding(id string) string {
-	return fmt.Sprintf("Run %s is going, so this is taking it apart before it "+
-		"exits: cancelling the shims, abandoning what reached pending, releasing "+
-		"Core's coin locks. Waiting up to %s.\n\n", id, UnwindGrace)
+	return prose.Para(fmt.Sprintf("Run %s is going, so this is taking it apart "+
+		"before it exits: cancelling the shims, abandoning what reached pending, "+
+		"releasing Core's coin locks. Waiting up to %s.", id, UnwindGrace)) + "\n"
 }
 
 func stillUnwinding(id string) string {
-	return fmt.Sprintf("Run %s has not finished coming apart after %s, and this "+
-		"is exiting anyway rather than holding the terminal indefinitely. Nothing "+
-		"was published — that is what the armed window is defined by — but shims "+
-		"or coin locks may be left. `winthistle recover %s` is safe to run as "+
-		"many times as it takes, and `winthistle doctor` lists the locks.\n",
-		id, UnwindGrace, id)
+	return prose.Para(fmt.Sprintf("Run %s has not finished coming apart after %s, "+
+		"and this is exiting anyway rather than holding the terminal "+
+		"indefinitely. Nothing was published — that is what the armed window is "+
+		"defined by — but shims or coin locks may be left. `winthistle recover %s` "+
+		"is safe to run as many times as it takes, and `winthistle doctor` lists "+
+		"the locks.", id, UnwindGrace, id))
 }

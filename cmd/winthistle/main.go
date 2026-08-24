@@ -502,18 +502,19 @@ func recoverCmd(ctx context.Context, args []string) error {
 		}
 		defer j.Close()
 
-		runs, err := run.List(ctx, j, os.Stdout)
+		// Runs and then the CPFP children, and the pairing is inside run.Unfinished
+		// rather than here: they are not the same thing and they are not aborted
+		// the same way, but a screen that listed one and not the other would be
+		// telling somebody their node is clean when a coin of theirs is locked.
+		// The web UI's /recover calls the same function for the same reason.
+		runs, err := run.Unfinished(ctx, j, os.Stdout)
 		if err != nil {
 			return err
 		}
 		if len(runs) > 0 {
 			fmt.Printf("\nTake one apart with: winthistle recover %s\n", runs[0].ID)
 		}
-		// The children too. They are not runs and they are not aborted the same
-		// way, but they are the other thing in this journal that can be left
-		// half-done, and a screen that listed one and not the other would be
-		// telling somebody their node is clean when a coin of theirs is locked.
-		return bump.List(ctx, j, os.Stdout)
+		return nil
 	}
 
 	d, closeAll, err := connect(ctx, cfg, "")

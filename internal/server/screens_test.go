@@ -112,10 +112,13 @@ func TestTheRunScreenGoesThroughTheChokepoint(t *testing.T) {
 // working is worse than one that never asked. Every screen is one <style> block
 // and text.
 func TestNoScreenFetchesAnything(t *testing.T) {
-	s := testServer(t)
+	s, _ := journalling(t)
 	s.Runs.add("a-run")
 
-	for _, path := range []string{"/", "/runs/a-run", "/runs/no-such-run"} {
+	for _, path := range []string{
+		"/", "/runs/a-run", "/runs/no-such-run",
+		"/recover", "/recover/20260824-1930", "/recover/no-such-run",
+	} {
 		body := serveIt(s, get(t, s, path)).Body.String()
 		for _, forbidden := range []string{
 			"<script", "<link", "<img", "http://", "https://", "//fonts.",

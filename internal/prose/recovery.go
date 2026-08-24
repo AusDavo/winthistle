@@ -45,34 +45,80 @@ func RecoveryList(runs []*journal.Run, now time.Time) string {
 	}
 
 	var b strings.Builder
+	// "Unless something is driving one", rather than "they stopped". The journal
+	// records what a run wrote, not whether it is still writing: a run is in here
+	// from the moment its streams open until it is published or aborted, so a
+	// batch being armed right now is in this list beside three that died in
+	// August. Saying they stopped was a claim the journal cannot make, and it was
+	// read next to a live run the first time this screen reached a browser.
 	b.WriteString(Para(fmt.Sprintf(
-		"%d unfinished run%s in the journal. %s stopped somewhere %s should not "+
-			"have, and %s waiting for a decision.",
-		len(runs), Plural(len(runs)), theyThey(len(runs)), theyLower(len(runs)),
+		"%d unfinished run%s in the journal: neither published nor aborted. "+
+			"Unless something is driving one right now, %s stopped somewhere %s "+
+			"should not have and %s waiting for a decision.",
+		len(runs), Plural(len(runs)), theyLower(len(runs)), theyLower(len(runs)),
 		IsAre(len(runs)))))
 	b.WriteString("\n")
 
+	width := idColumn(runs)
 	for _, r := range runs {
-		b.WriteString(fmt.Sprintf("  %-14s %-11s %s\n", r.ID, r.State,
-			ageOf(r.UpdatedAt, now)))
-		b.WriteString(fmt.Sprintf("  %-14s %s\n", "",
-			channelBreakdown(r)))
+		b.WriteString(fmt.Sprintf("  %-*s  %-11s %s\n", width, r.ID,
+			stateColumn(r.State), ageOf(r.UpdatedAt, now)))
+		// The details of the row, all at one small indent. A txid is 64
+		// characters and cannot be wrapped or abbreviated — it is the string the
+		// operator pastes into Core — so the layout gives way to it rather than
+		// the other way round, and the breakdown sits beside it rather than in a
+		// column of its own.
+		b.WriteString(channelBreakdown(r, rowIndent))
 		if r.TxID != "" {
-			// On its own line at a small indent. A txid is 64 characters and
-			// cannot be wrapped or abbreviated — it is the string the operator
-			// pastes into Core — so the layout gives way to it rather than the
-			// other way round.
-			b.WriteString("    " + r.TxID + "\n")
+			b.WriteString(rowIndent + r.TxID + "\n")
 		}
 	}
 
-	if any(runs, mayBePublic) {
+	if pub := idsWhere(runs, mayBePublic); len(pub) > 0 {
 		b.WriteString("\n")
-		b.WriteString(Para(
-			"At least one of these reached the publish call. That run must not be " +
-				"aborted — see below."))
+		b.WriteString(Para(fmt.Sprintf(
+			"%d of these reached the publish call: %s. A run in that state must "+
+				"not be aborted, and nothing in this tool will abort one — its "+
+				"funding transaction may be in a mempool or already in a block, and "+
+				"abandoning a pending channel whose funding transaction then "+
+				"confirms strands its funds with no force-close path. Read that run "+
+				"on its own for what to do instead, which begins with looking for "+
+				"the txid rather than touching anything.",
+			len(pub), strings.Join(pub, ", "))))
 	}
 	return b.String()
+}
+
+// rowIndent is where a run's details sit under its own line in the list.
+//
+// Four spaces, and deliberately not a column under the state. It used to be
+// seventeen — two spaces plus a fourteen-wide id field plus one — which stopped
+// being right the day NewRunID started producing twenty-two characters: the
+// state column moved right and the details stayed put, so the second line of
+// every row lined up with the middle of the id above it. A browser is where that
+// was finally seen.
+const rowIndent = "    "
+
+// idColumn is how wide the id column is: the widest id in the list, so the
+// state column lines up across rows.
+//
+// Measured rather than pinned, because a journal id is whatever is on disk —
+// NewRunID's twenty-two characters for both front doors, and whatever
+// `winthistle run --id` was given otherwise. Clamped, because one hand-picked id
+// must not pad every other row off the pane; a longer id simply pushes its own
+// line out, the way a txid does.
+func idColumn(runs []*journal.Run) int {
+	const clamp = 24
+	width := 0
+	for _, r := range runs {
+		if n := len([]rune(r.ID)); n > width {
+			width = n
+		}
+	}
+	if width > clamp {
+		return clamp
+	}
+	return width
 }
 
 // Recovery is the screen for one unfinished run: what it is, and what an abort
@@ -88,7 +134,7 @@ func Recovery(r *journal.Run, now time.Time) string {
 
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("Run %s — %s, last touched %s.\n\n",
-		r.ID, r.State, ageOf(r.UpdatedAt, now)))
+		r.ID, stateColumn(r.State), ageOf(r.UpdatedAt, now)))
 
 	if mayBePublic(r) {
 		return b.String() + recoveryPublished(r)
@@ -224,7 +270,9 @@ func recoveryPlan(r *journal.Run, pending, shims []journal.Channel) string {
 				"default of one will refuse the next open with \"Number of pending " +
 				"channels exceed maximum\". And the abandon will almost certainly " +
 				"ask you to authorise LND's blunt flag — that is expected on this " +
-				"path, not a warning sign. See below."))
+				"path, not a warning sign. It asks once per channel, naming that " +
+				"channel and quoting LND's own refusal, and it says there what the " +
+				"flag gives up and what has already been checked on your behalf."))
 		b.WriteString("\n")
 		b.WriteString(Para(
 			"Nothing was broadcast, so nothing was spent. The cost of this abort " +
@@ -401,12 +449,33 @@ func stateMeans(s journal.State) string {
 	case journal.StateAborting:
 		return "An abort of this run was started and did not finish. What follows " +
 			"is what is left, not what there was."
+	case "":
+		// Unreachable through this journal — see stateColumn — and written down
+		// anyway, because the default branch below would render it as a sentence
+		// with the subject missing. A blank state must not read as a run that
+		// never started: the channel list underneath is the only fact here.
+		return "The journal has no state at all for this run, which should not be " +
+			"possible: the column is NOT NULL and every writer sets it. Read the " +
+			"channels below as the only fact on this screen, and do not read the " +
+			"blank as a run that never got anywhere."
 	default:
 		return fmt.Sprintf("The journal has this run as %s.", s)
 	}
 }
 
-func channelBreakdown(r *journal.Run) string {
+// channelBreakdown is the per-state counts under one run in the list, wrapped.
+//
+// It breaks between items and never inside one. "12 abandoned" split across a
+// line break reads as a count of twelve of something unnamed followed by a state
+// with no number, and this line exists to say exactly which channels are on
+// which side of the abort.
+//
+// It has to wrap at all because a run in aborting with a partial abort behind it
+// can carry channels in all five states at once — the normal shape of a bad
+// night, and the shape RecoveryOutcome tells the operator to expect. Even at one
+// channel per state that came out at 83 columns against a 78-column pane, and on
+// a batch of a few dozen at 88.
+func channelBreakdown(r *journal.Run, indent string) string {
 	counts := map[journal.ChannelState]int{}
 	for _, c := range r.Channels {
 		counts[c.State]++
@@ -421,9 +490,43 @@ func channelBreakdown(r *journal.Run) string {
 		}
 	}
 	if len(parts) == 0 {
-		return "no channels"
+		// Not a blank line. A run with no channels journalled is a run that
+		// stopped before Begin wrote any, and saying so beats an empty column
+		// that reads as a row the renderer gave up on.
+		return indent + "no channels\n"
 	}
-	return strings.Join(parts, ", ")
+
+	var b strings.Builder
+	line := indent
+	for i, part := range parts {
+		if i < len(parts)-1 {
+			part += ","
+		}
+		switch {
+		case line == indent:
+			line += part
+		case len([]rune(line))+1+len([]rune(part)) > PaneWidth:
+			b.WriteString(line + "\n")
+			line = indent + part
+		default:
+			line += " " + part
+		}
+	}
+	b.WriteString(line + "\n")
+	return b.String()
+}
+
+// stateColumn keeps a blank column from reading as a state.
+//
+// The runs table has state NOT NULL and every writer sets it, so this should be
+// unreachable — which is the reason to render it as something rather than as
+// eleven spaces. A row whose state column is empty would otherwise be the one
+// row on the screen that says nothing at all about where its run got to.
+func stateColumn(s journal.State) string {
+	if s == "" {
+		return "(no state)"
+	}
+	return string(s)
 }
 
 func channelTable(r *journal.Run) string {
@@ -480,13 +583,16 @@ func mayBePublic(r *journal.Run) bool {
 	return r.State == journal.StatePublishing || r.State == journal.StatePublished
 }
 
-func any(runs []*journal.Run, pred func(*journal.Run) bool) bool {
+// idsWhere names the runs a warning is about, rather than saying "at least one
+// of these" and leaving the reader to work out which.
+func idsWhere(runs []*journal.Run, pred func(*journal.Run) bool) []string {
+	var out []string
 	for _, r := range runs {
 		if pred(r) {
-			return true
+			out = append(out, r.ID)
 		}
 	}
-	return false
+	return out
 }
 
 func ageOf(t time.Time, now time.Time) string {
@@ -526,13 +632,6 @@ func shortKey(pubkey string) string {
 		return pubkey
 	}
 	return pubkey[:16] + "…"
-}
-
-func theyThey(n int) string {
-	if n == 1 {
-		return "It"
-	}
-	return "They"
 }
 
 func theyLower(n int) string {

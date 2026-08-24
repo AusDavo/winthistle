@@ -229,8 +229,47 @@ type Launcher interface {
 	// refused with journal.ErrMayBePublished, which is the same refusal
 	// run.RecoverOne makes, because abandoning a pending channel whose funding
 	// transaction later confirms strands its funds with no force-close path.
+	//
+	// Both controls that could act on a run ask it, and the read-only recovery
+	// screen asks it too — not to decide whether to act, since it never acts,
+	// but to decide whether to point the operator at a command that would.
 	AbortRefusal(ctx context.Context, runID string) error
+
+	// Unfinished is the journal's recovery screen: the runs that stopped, and
+	// then the CPFP children left half-done, as one piece of text — plus the ids
+	// of the runs in it.
+	//
+	// Text and not rows, for decision 3's reason. prose.RecoveryList and
+	// prose.Recovery are the highest-stakes copy in the product and they have
+	// the overrun tests over them; a data type this package could render would
+	// be a second rendering of that copy, measured by nothing, drifting from the
+	// one `winthistle recover` prints. The ids are the exception and they are
+	// not copy: they are what a link needs, and they are the same strings
+	// PathValue already hands this package.
+	//
+	// The pairing of runs with children is the launcher's, and behind it
+	// run.Unfinished is the only exported way to get either — a screen that
+	// listed the runs and not the children would tell somebody their node is
+	// clean while a coin of theirs is locked.
+	Unfinished(ctx context.Context) (text string, ids []string, err error)
+
+	// Journalled is one journalled run's recovery screen, as text, and
+	// ErrNoJournalledRun when the journal has no such run.
+	//
+	// Read-only, like Unfinished, and for the same reason nothing beside it
+	// aborts: see recover.go.
+	Journalled(ctx context.Context, runID string) (string, error)
 }
+
+// ErrNoJournalledRun is the journal having no such run, as this package is
+// allowed to hear it.
+//
+// journal.ErrNoRun is the real sentinel and internal/server may not name it —
+// the import ban — so the launcher translates. A sentinel rather than a bare
+// error because the difference between "no such run" and "the journal could not
+// be read" is the difference between a 404 and a page that must not pretend it
+// looked.
+var ErrNoJournalledRun = errors.New("the journal has no such run")
 
 // StartRequest is what the operator chose on the form. The batch itself is the
 // launcher's, from `winthistle serve --batch`.

@@ -41,6 +41,7 @@ type link struct {
 var nav = []link{
 	{"/", "overview"},
 	{"/doctor", "doctor"},
+	{"/recover", "recover"},
 }
 
 // page is the shell: one <style> block, no script, no fetched asset.
@@ -115,9 +116,10 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 	if len(runs) == 0 {
 		b.WriteString("<pre>" + html.EscapeString(prose.Para(
 			"Nothing has run in this process yet. A run started from the command "+
-				"line with `winthistle run --batch FILE` is not in this list either "+
-				"— the registry is per process, and `winthistle recover` is what "+
-				"reads the journal that outlives one.")) + "</pre>\n")
+				"line with `winthistle run --batch FILE` is not in this list either: "+
+				"this list is the registry, which is per process, and the journal is "+
+				"what outlives one. The journal is on the recover screen.")) +
+			"</pre>\n")
 	} else {
 		b.WriteString("<ul>\n")
 		for _, run := range runs {
@@ -223,12 +225,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	run := s.Runs.Get(id)
 	if run == nil {
-		w.WriteHeader(http.StatusNotFound)
-		serve(w, screen("run", "", prose.Para(fmt.Sprintf(
-			"There is no run called %q in this process. A run is in the registry "+
-				"only while the winthistle that started it is still running; a run "+
-				"from an earlier process is in the journal instead, and "+
-				"`winthistle recover` is what reads that.", id))))
+		s.noSuchRun(w, id)
 		return
 	}
 

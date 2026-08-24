@@ -1906,7 +1906,7 @@ a precedent to follow. That is why **the security shape was the deliverable of
 the first slice and the screen was only what proved the shape carries a screen.**
 
 `winthistle serve` binds `[server] bind`, prints one URL with a token in it, and
-serves seven routes:
+serves nine routes:
 
 | | |
 |---|---|
@@ -1917,6 +1917,8 @@ serves seven routes:
 | `POST /runs/{id}/answer` | one answer to the one question the run is asking |
 | `GET /runs/{id}/abort` | what stopping costs, and then the button — or the refusal, for a run that reached the publish call |
 | `POST /runs/{id}/abort` | cancel the run's context, which is what Ctrl-C does |
+| `GET /recover` | the journal: the runs that stopped, and the CPFP children left half-done. Read-only, and the only screen that works on a node that is down |
+| `GET /recover/{id}` | one journalled run, and what an abort would do to it. Read-only |
 
 The three unsafe methods are the first in this repository, and the guard in front
 of all seven was written before there was anything to guard: it refuses an unsafe
@@ -2426,10 +2428,193 @@ And one test was measuring the wrong thing: `internal/doctor`'s pane check count
 now, like every other pane test in the repository. A byte count is worse than no
 check, because it is the kind of wrongness that gets fixed by widening the pane.
 
-### Every defect these three slices found, and the guard on each
+## The journal's own screens, and the four decisions behind them
 
-Kept as a table because the prose above is spread over three sections and a defect
-described in prose is a defect that comes back. **Nine found, nine with a
+`prose.RecoveryList` was the last of the four recovery screens with no route at
+all. It has one now — `GET /recover` — with `prose.Recovery` under `GET
+/recover/{id}` beside it.
+
+It was the one to do first for a reason that is also the constraint on it: **it
+needs nothing but the journal**, so it is the screen an operator reads on a node
+that is down. Nothing in `internal/server/recover.go` or in the two launcher
+methods behind it dials LND or Core, and
+`TestTheRecoveryScreensDoNotNeedANode` builds a launcher whose configuration
+names neither and renders both screens through it.
+
+### Decision 1 · A journalled run is not a live run, and the screen says which
+
+`Registry` holds the runs this process is driving; the journal holds runs that
+stopped, possibly from a process that is gone. **They overlap**, and not
+marginally: a run started from this UI writes its journal row when the funding
+streams open and stays in `Unfinished` until it is published or aborted, so for
+most of its life it is in both. An operator who reads a journal row as "this is
+running" waits for something that is not happening.
+
+The screen lives at its own path rather than folded into `GET /`, because two
+lists of run ids on one page is the blur rather than a fix for it. What separates
+them is three things:
+
+- **Two paths and two vocabularies.** The registry's runs are on the overview
+  under "Runs" and at `/runs/{id}`. The journal's are under `/recover`, and the
+  screen's own first line is "the run journal".
+- **A paragraph above the rows, written by the process rather than by `prose`.**
+  `journalNote` names the live run — there is at most one — and says whether its
+  row is below, and that the row is a snapshot rather than a view. It cannot live
+  in `prose`, because `prose.RecoveryList` is shared with `winthistle recover`,
+  which has no registry.
+- **The empty list, which is the case worth building the rest for.**
+  `journal.Begin` has not written anything in the first seconds of a run, so the
+  journal can be empty while a batch is being armed — and `prose.RecoveryList`
+  renders "No unfinished runs. Nothing to recover." over it. That sentence is
+  true about the journal and false about the node. It is the same failure mode as
+  listing runs without listing the CPFP children, and it now says so:
+  `TestAnEmptyJournalDoesNotClaimACleanNodeWhileARunIsGoing`.
+
+Both branches were rendered against a real run in a browser, not only asserted.
+
+### Decision 2 · `GET /runs/{id}` does not fall back to the journal
+
+It still 404s. A fallback is the obvious convenience and it makes one URL mean
+two things: a live run, with a transcript, a pending question and a control that
+stops it — or a journal row with none of those. Which one an operator gets would
+depend on a fact they cannot see from the URL, and it is exactly the fact that
+decides whether waiting is reasonable.
+
+**What it costs is real and is worth naming.** An operator who bookmarks a run
+screen and comes back after a restart gets a 404 rather than the record. What
+they get instead is a 404 that says where the record is and links to it, and the
+copy on that page now describes what a journal row is and is not.
+`TestRunsIDDoesNotFallBackToTheJournal` puts the run in the journal and requires
+the 404 anyway.
+
+### Decision 3 · The UI lists, and refuses to abort
+
+`run.RecoverOne` would be the fourth unsafe method in this repository and the
+first that abandons channels on a run this process never started. It is not
+here, and the reason is mechanical rather than cautious: it asks
+`abort.Confirmation` **once per channel** — a func per channel, so that a yes
+about one channel cannot authorise the next — and a browser answers those through
+`server.Run.Ask`, which needs a `Run`. A journalled run has none.
+
+Inventing one is the move to refuse. A synthetic registry entry for a run this
+process is not driving would put a journal row on `/runs/{id}` with a question
+and an abort control on it, which is decision 1's blur, at the moment an operator
+can least afford it.
+
+So the screen ships the listing and points at `winthistle recover ID`, which
+already exists, already asks per channel, and is already tested on both shapes of
+a bad night. **There is no `POST` route under `/recover`**, so a control someone
+adds later is a 405 from the mux rather than a handler nobody reviewed —
+`TestTheJournalScreenOffersNoAbort` asserts both the absent form and the 405.
+
+What the screen *does* still ask is whether a run may be aborted **at all**,
+because that decides whether to name that command or warn against it. The answer
+comes from `journal.Run.AbortTarget` through `Launcher.AbortRefusal` — the same
+function `run.RecoverOne` refuses on and the same one the live abort control
+asks. `internal/server` cannot hold a second copy of that rule; it may not import
+`internal/journal`.
+
+### Decision 4 · The launcher returns rendered text, plus the ids
+
+Two methods: `Unfinished(ctx) (text string, ids []string, err error)` and
+`Journalled(ctx, runID) (string, error)`.
+
+Text rather than a data type the server could render, for decision 3's reason.
+`prose.RecoveryList` and `prose.Recovery` are the highest-stakes copy in the
+product and the overrun tests are over them; a `[]server.JournalRun` the server
+rendered would be a second rendering of that copy, measured by nothing, drifting
+from the one `winthistle recover` prints. The ids are the exception because they
+are not copy: a link needs them, `prose` does not render links, and they are the
+same strings `PathValue` already hands the package.
+
+`journal.ErrNoRun` becomes `server.ErrNoJournalledRun` on the way across, because
+the ban means the server cannot name the real sentinel. It is a translation and
+not a second decision — the difference between "no such run" and "the journal
+could not be read" is the difference between a 404 and a page that must not
+pretend it looked, and both are kept.
+
+### The pairing has one function now instead of two conventions
+
+`winthistle recover` with no argument listed the runs and then the CPFP children,
+and the reason is not symmetry: Core leaves locked outputs out of `listunspent`,
+so an unfinished child looks exactly like change that was already spent. A screen
+that listed only the runs would tell somebody their node is clean while a coin of
+theirs is locked.
+
+That pairing was a comment in `recoverCmd`. It is now **`run.Unfinished`**, which
+writes both halves, and `run.List` is unexported as `listRuns`. An exported
+function that lists the runs and not the children is a trap: it reads like the
+whole answer, it is the obvious thing for a third front door to call, and what it
+leaves out is invisible from the screen it produces. Both front doors call the
+one function; `TestTheRecoveryListPairsRunsWithTheirChildren` seeds a journal
+whose only unfinished thing is a child and requires it on the web screen.
+
+### The trap, and how it was avoided
+
+`TestOnlyTheDoctorScreenReadsTheRequestContext` requires every `r.Context()` in
+`internal/server` to be inside the `doctor` handler. Both new handlers take their
+context from `Server.base` with a timeout instead, which is what the abort
+control's journal read does. The allowlist was **not** widened.
+
+The reason it is right rather than merely required: a browser that gives up
+mid-read must not change what a screen says. On the abort control that turns a
+refusal into a permission; here it would turn "the journal has these three runs"
+into "the journal could not be read", which is the same class of mistake with a
+smaller blast radius and no reason to prefer it. `journalReadTimeout` is 30
+seconds and is deliberately not `abortCheckTimeout`: that one bounds a refusal,
+where an unanswered question is a no, and this one bounds a screen, where an
+unanswered question is an error page.
+
+`doctorMu` is not taken. It serialises the pre-flight so two of them cannot open
+the journal twice; these handlers open it, read, and close, which
+`Launcher.AbortRefusal` has done since the last slice.
+
+### What rendering it found — seven defects, none of them cosmetic
+
+Six were in `internal/prose` and had been shipping in `winthistle recover` all
+along; the browser is only where they were finally looked at.
+
+1. **`prose.RecoveryList` had no pane test at all**, alone among the recovery
+   screens — `TestTheRecoveryScreensStayInThePane` covered `Recovery` and
+   `BluntConfirmation` and not the list. It was **83 columns at one channel per
+   state and 88 on a batch of a few dozen**, because a half-aborted run carries
+   channels in all five states and the counts went out on one unwrapped line.
+   That is the same defect `internal/plan` shipped, for the same reason.
+2. **The columns did not line up.** The id field was `%-14s` and `NewRunID`
+   produces 22 characters, so two ids of different lengths put the state column
+   in two different places — and every row's detail line sat at column 17, which
+   is *inside* the id above it rather than under anything. `bump.List` had the
+   same field and the same two faults. Both now measure the widest id, clamp it
+   so one hand-picked `--id` cannot pad every other row off the pane, and put the
+   details at a four-space indent beside the txid.
+3. **Two screens pointed at sections they did not have.** The list said an
+   unabortable run was explained "see below" and that paragraph was the last
+   thing on the screen; the abort plan said the blunt-flag prompt was described
+   "see below" and it is described in `BluntConfirmation`, which appears only
+   when the abort runs. Both survivable in a terminal, where the next command's
+   output follows. Both read as broken the moment a page ends.
+4. **The list asserted that every run in it had stopped.** "They stopped
+   somewhere they should not have" — read next to a run that was arming at that
+   moment. The journal knows a run is neither published nor aborted; it does not
+   know whether something is driving one. The sentence is conditional now.
+5. **And then said "…right now, They stopped…"** — `theyThey` returned a capital
+   because that clause used to open the paragraph. A test asserting the new
+   clause passed while the screen read wrong.
+6. **`unwinding` and `stillUnwinding` went to the terminal at 185 and 377
+   columns.** The two lines Ctrl-C prints while a batch with *n* shims open comes
+   apart underneath, and the only operator copy in `internal/server` that does
+   not go through `screen()` — so no page test was ever going to look at it.
+   `internal/server` had no pane test of its own copy, which is the same gap
+   `internal/plan` had.
+7. **An empty `journal.State` rendered as a sentence with its subject missing** —
+   "The journal has this run as ." — and as eleven blank columns in the list.
+   Unreachable through this journal, `state` being `NOT NULL`, which is exactly
+   why it rendered whatever the last person assumed.
+
+### Every defect these four slices found, and the guard on each
+
+Kept as a table because the prose above is spread over four sections and a defect
+described in prose is a defect that comes back. **Sixteen found, sixteen with a
 mechanical guard.** Five of them had only prose for a while, which is how the
 list came to be written.
 
@@ -2444,6 +2629,13 @@ list came to be written.
 | A 79-character line in the plan verification, whose width grew with the vsize's digit count | rendering, because `internal/plan` had no pane test | `TestTheReportsFitThePane` and `TestTheEstimatedSizeNoteFitsWhateverTheSizeIs` |
 | Two lines written to the transcript unwrapped — the armed-window failure at 251 characters, and `psbt_verify` | measuring a rendered transcript | `assertFitsThePane` over a whole real transcript in the browser-driven cold probe |
 | `internal/doctor`'s pane test counted bytes, so every em dash read as three columns | writing the neighbouring test | the test itself, now counting runes |
+| `prose.RecoveryList` had no pane test and ran to 88 columns: a half-aborted run carries channels in all five states and the counts went out unwrapped | giving it a route, then measuring it | `TestTheRecoveryScreensStayInThePane` over both list shapes, and `TestTheBreakdownNeverBreaksACountAwayFromItsState` |
+| The list's id field was `%-14s` and a run id is 22, so unequal ids put the state column in two places and every detail line sat *inside* the id above it. `bump.List` had both faults too | rendering it in a browser | `TestTheListColumnsLineUp`, with ids of different lengths and a 90-character one |
+| Two screens said "see below" where nothing below said it — the list's publish warning was the last paragraph, and the blunt-flag note points at `BluntConfirmation`, a different screen | rendering them as pages that end | `TestNoScreenPointsBelowItself` |
+| The list asserted "They stopped somewhere they should not have" about a run that was arming at that moment | reading it beside a live run in a browser | the conditional clause, asserted in `TestRecoveryListSaysWhenSomethingMustNotBeTouched` |
+| …and then read "…right now, They stopped…", because `theyThey` capitalised for a position the clause no longer had | the next render, after a test on the new clause passed | the same test, which now refuses a capital after a comma |
+| `unwinding` and `stillUnwinding` printed 185 and 377 columns to the terminal, while a batch with *n* shims open came apart underneath | writing `internal/server`'s first pane test | `TestTheServersOwnCopyFitsThePane`, over every copy function in the package |
+| An empty `journal.State` rendered as "The journal has this run as ." and as a blank column | auditing zero values before rendering | `TestABlankStateIsNotRenderedAsAVerdict` |
 
 Three patterns are worth more than the list:
 
@@ -2454,9 +2646,18 @@ Three patterns are worth more than the list:
 - **When a report renders a verdict, check that the zero value is not a verdict.**
   `Accepted bool` meant both "Core refused" and "we never asked", and the report
   read the second as the first.
-- **A defect fixed with prose is a defect with no guard.** Five of the nine sat
-  in HANDOFF and in a commit message with nothing enforcing them. Prose says what
-  happened; a test says it will not happen again.
+- **A defect fixed with prose is a defect with no guard.** Five of the first nine
+  sat in HANDOFF and in a commit message with nothing enforcing them. Prose says
+  what happened; a test says it will not happen again.
+- **The screen with no pane test is the one that is over the pane.** It was
+  `internal/plan`, then `prose.RecoveryList`, then `internal/server`'s own copy —
+  three for three. Every package that renders operator text has one now, and the
+  two that print to a terminal rather than to a page are the ones to check first,
+  because no page test will ever look at them.
+- **An assertion that passes is not a screen that reads.** The capital in
+  "…right now, They stopped…" shipped past a test written for that exact
+  sentence, in the same session, minutes after the sentence was written. Render
+  it.
 
 ### What this slice does not do
 
@@ -2496,10 +2697,10 @@ reproducible from this description in a few minutes, and the durable half of it 
    2. ~~An explicit abort control on the run screen~~ — done, as a link to a
       screen that says what stopping costs, refused for a run that reached the
       publish call.
-   3. ~~Render it in a browser~~ — done, and it was worth doing first: it found
-      a guard bug that made every form in the UI unusable, and two render
-      defects, one of which was a safety affordance. See "The bug the first
-      render found". A browser is installed here; `npx @playwright/mcp
+   3. ~~Render it in a browser~~ — done, and it keeps paying: three rendering
+      sessions have now produced twelve defects between them, including a guard
+      bug that made every form in the UI unusable and four false statements in
+      operator copy. A browser is installed here; `npx @playwright/mcp
       install-browser chrome-for-testing` fetches the headless shell the MCP
       wants. What has *not* been driven in a browser yet is `doctor` under a slow
       node, and the screens that do not exist.
@@ -2521,7 +2722,10 @@ reproducible from this description in a few minutes, and the durable half of it 
       on: `arm.Streams.Opened` is when the last stream came up, and
       `server.Question.Deadline` is the *gate*, which is a different clock and
       must not be relabelled as this one.
-   6. **The remaining screens, and the two seams still waiting for a POST.** The
+   6. ~~The recovery screens~~ — done. `GET /recover` and `GET /recover/{id}`,
+      read-only, needing nothing but the journal. Four decisions with guards, and
+      seven defects out of rendering it; see "The journal's own screens".
+   7. **The remaining screens, and the two seams still waiting for a POST.** The
       setup screen would give `setup.Ask` its route and the bump screen would
       give `bump.Approve` its own; both adapters are built and unit tested and
       neither has a caller, which is the one place written-but-uncalled code is
@@ -2529,12 +2733,13 @@ reproducible from this description in a few minutes, and the durable half of it 
       document and the settlement report. Verbatim in a `<pre>` is v1 for every
       one of them.
 
-      **`prose.RecoveryList` is the one to do first.** Three of the four recovery
-      screens already reach a browser inside a run's transcript, and that one does
-      not reach it at all — it is the list of runs that stopped, it needs nothing
-      but the journal, and it is therefore the screen an operator reads on a node
-      that is down. `run.List` and `run.Show` are the functions; both take a
-      journal and an `io.Writer`, so neither needs a run in the registry.
+      **Two things the recovery slice leaves for whoever does these.** First,
+      `run.RecoverOne` still has no route and that is decision 3 rather than an
+      omission — an abort of a journalled run asks per channel and a browser
+      needs a `Run` to ask through. If a later slice wants it, the thing to
+      change is that, not the screen. Second, every one of these screens needs a
+      pane test in the package that renders it before it gets a route: three
+      screens in a row have shipped over the pane because nobody measured them.
 
    Still true before the first browser-driven armed window on anything that
    matters: the startup-token cookie is not port-scoped (see "Watch out for").
@@ -2554,6 +2759,12 @@ reproducible from this description in a few minutes, and the durable half of it 
    would have found.
 
 Done since the last handoff, all from the previous list:
+
+- **The journal's two screens** — item 1.6's first half. `GET /recover` and `GET
+  /recover/{id}`, the four decisions behind them, `run.Unfinished` so the runs
+  and the CPFP children can no longer be listed apart, and seven defects with a
+  guard each. Everything on them comes off the journal, so they are the screens
+  that work on a node that is down.
 
 - **The four callback seams and the `POST` that starts a run** — items 1.1 and
   1.2. `internal/server`'s `ask.go` and `control.go`, `internal/webrun`, the
@@ -2588,9 +2799,21 @@ Done since the last handoff, all from the previous list:
 
 - **A browser is installed on this machine.** Two handoffs said there was not,
   and that claim was never checked; `which chromium google-chrome firefox` finds
-  three. Render before believing a page works. Two rendering sessions have now
-  produced five defects between them, four of which no test would have caught,
-  and one of which was a false statement in operator copy.
+  three. Render before believing a page works. Three rendering sessions have now
+  produced twelve defects between them, most of which no test would have caught,
+  and four of which were false statements in operator copy.
+
+- **`go test ./...` has a second way to fail now, and it is not regtest.**
+  `internal/webrun`'s `TestTheRoundsDeadlineIsSharedByEveryDevice` races two
+  goroutines against a two-second poll, and under twenty package binaries
+  competing for the CPU it lost once and reported "the seam never asked
+  anything". It passes standalone and under `make check`. Same rule, second
+  reason: `-p 1`, always.
+
+- **`git checkout <file>` discards unstaged work, and this repository is worked
+  on with everything unstaged.** One `git checkout internal/prose/recovery.go`,
+  used to undo a two-line experiment, threw away six reapplied edits and cost
+  fifteen minutes. Copy the file to the scratchpad and copy it back.
 
 - **A `bool` that means "it failed" cannot also mean "we never tried".**
   `rehearsal.Measurement.Accepted` was both, and the report read the second as the

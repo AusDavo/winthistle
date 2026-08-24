@@ -30,18 +30,23 @@ func List(ctx context.Context, j *journal.Journal, w io.Writer) error {
 
 	fmt.Fprintf(w, "\n%d unfinished CPFP child%s.\n\n", len(bumps),
 		childrenSuffix(len(bumps)))
+	width := idColumn(bumps)
 	for _, b := range bumps {
-		fmt.Fprintf(w, "  %-14s bump %-3d %-11s target %.2f sat/vB\n",
-			b.RunID, b.Seq, b.State, b.Plan.TargetSatPerVB)
-		fmt.Fprintf(w, "  %-14s parent\n", "")
-		fmt.Fprintf(w, "    %s\n", b.Plan.ParentTxID)
+		fmt.Fprintf(w, "  %-*s  bump %-3d %-11s target %.2f sat/vB\n",
+			width, b.RunID, b.Seq, b.State, b.Plan.TargetSatPerVB)
+		// Everything under a row sits at one small indent rather than in a
+		// column of its own. The column was fourteen wide and a run id is
+		// twenty-two, so it lined up with the middle of the id above it — the
+		// same defect the run list had, found the same way, in a browser.
+		fmt.Fprintf(w, "%sparent\n", rowIndent)
+		fmt.Fprintf(w, "%s  %s\n", rowIndent, b.Plan.ParentTxID)
 		if b.ChildTxID != "" {
-			fmt.Fprintf(w, "  %-14s child\n", "")
-			fmt.Fprintf(w, "    %s\n", b.ChildTxID)
+			fmt.Fprintf(w, "%schild\n", rowIndent)
+			fmt.Fprintf(w, "%s  %s\n", rowIndent, b.ChildTxID)
 		}
 		if held := heldLocks(b); held > 0 {
-			fmt.Fprintf(w, "  %-14s %d coin lock%s still held on the batch's change\n",
-				"", held, prose.Plural(held))
+			fmt.Fprintf(w, "%s%d coin lock%s still held on the batch's change\n",
+				rowIndent, held, prose.Plural(held))
 		}
 	}
 
@@ -120,6 +125,26 @@ func Give(ctx context.Context, d Deps, runID string) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+// rowIndent is where a child's details sit under its own line, and idColumn is
+// how wide the run-id column is. Both are the run list's, for the same reasons:
+// see prose.RecoveryList. The two screens are printed one after the other and an
+// operator reads them as one page, so they line up the same way.
+const rowIndent = "    "
+
+func idColumn(bumps []*journal.Bump) int {
+	const clamp = 24
+	width := 0
+	for _, b := range bumps {
+		if n := len([]rune(b.RunID)); n > width {
+			width = n
+		}
+	}
+	if width > clamp {
+		return clamp
+	}
+	return width
 }
 
 func heldLocks(b *journal.Bump) int {

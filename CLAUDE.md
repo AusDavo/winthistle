@@ -10,8 +10,10 @@ Full spec: `docs/design.html`. State and build order: `HANDOFF.md`.
 `winthistle serve` carries the security shape `docs/design.html` asks for —
 loopback bind, a startup token, strict `Origin` and `Host` checks, no CORS — and
 can now open a batch: it starts a run, answers the four questions a run asks, and
-stops one. Still missing are the transports (file up/down, animated QR), the
-countdown, the remaining screens, signet, and the mainnet cold probe. So the
+stops one. It also serves the journal read-only, at `/recover`, which is the one
+screen that works on a node that is down. Still missing are the transports (file
+up/down, animated QR), the countdown, the setup and bump screens and the five
+reports, signet, and the mainnet cold probe. So the
 safety model below is verified against LND source *and* against a running node —
 but never yet against mainnet, which is what the cold probe is for.
 

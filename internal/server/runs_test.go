@@ -97,15 +97,61 @@ func TestAFinishedRunSaysSoAndKeepsItsTranscript(t *testing.T) {
 
 // TestARunFromAnEarlierProcessIsNotHere says the thing an operator will
 // otherwise conclude for themselves and get wrong. The registry is per process;
-// the journal is what outlives one, and `winthistle recover` is what reads it.
+// the journal is what outlives one, and it has its own screen.
 func TestARunFromAnEarlierProcessIsNotHere(t *testing.T) {
 	s := testServer(t)
 	w := serveIt(s, get(t, s, "/runs/from-yesterday"))
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("an unknown run got %d, want 404", w.Code)
 	}
-	if got := pre(t, w.Body.String()); !strings.Contains(got, "winthistle recover") {
+	if got := pre(t, w.Body.String()); !strings.Contains(got, "/recover/from-yesterday") {
 		t.Errorf("the refusal does not say where the run actually is:\n%s", got)
+	}
+	if body := w.Body.String(); !strings.Contains(body, `href="/recover/from-yesterday"`) {
+		t.Errorf("the refusal does not link the journal screen:\n%s", body)
+	}
+}
+
+// TestRunsIDDoesNotFallBackToTheJournal is decision 2 on this URL, and it is a
+// refusal rather than an omission.
+//
+// A fallback is the obvious convenience and it is the wrong one: /runs/{id}
+// would then mean two different things — a live run, with a transcript, a
+// pending question and a control that stops it, or a journal row with none of
+// those — and which one an operator got would depend on a fact they cannot see
+// from the URL. That distinction is exactly what decides whether waiting is
+// reasonable, so it gets two paths.
+//
+// The cost is real and is worth naming: an operator who bookmarks a run screen
+// and comes back after a restart gets a 404 rather than the record. What they
+// get instead is a 404 that says where the record is, and a link to it.
+func TestRunsIDDoesNotFallBackToTheJournal(t *testing.T) {
+	l := &stubLauncher{
+		ids:        []string{"from-yesterday"},
+		unfinished: "1 unfinished run in the journal.\n",
+		journalled: map[string]string{
+			"from-yesterday": "Run from-yesterday — armed, last touched 9h ago.\n",
+		},
+	}
+	s := launching(t, l)
+
+	// The journal has it, and this URL still does not.
+	w := serveIt(s, get(t, s, "/runs/from-yesterday"))
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("a journalled run on /runs/{id} got %d, want 404", w.Code)
+	}
+	if got := pre(t, w.Body.String()); strings.Contains(got, "last touched") {
+		t.Errorf("/runs/{id} rendered the journal row, so one URL now means two "+
+			"things:\n%s", got)
+	}
+
+	// And the journal's own path does have it.
+	j := serveIt(s, get(t, s, "/recover/from-yesterday"))
+	if j.Code != http.StatusOK {
+		t.Fatalf("the journal screen got %d", j.Code)
+	}
+	if got := pre(t, j.Body.String()); !strings.Contains(got, "last touched") {
+		t.Errorf("the journal screen does not render the row:\n%s", got)
 	}
 }
 

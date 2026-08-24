@@ -3,6 +3,7 @@ package server
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/url"
 	"strings"
@@ -27,6 +28,14 @@ type stubLauncher struct {
 	// run's context, is what lets Start return.
 	block chan struct{}
 	err   error
+
+	// The journal, as the two read-only screens see it. unfinished is what the
+	// list renders, ids are the runs in it, and journalled maps one run id to its
+	// own screen. journalErr is a journal that cannot be read at all.
+	unfinished string
+	ids        []string
+	journalled map[string]string
+	journalErr error
 }
 
 func (l *stubLauncher) Batch() string { return l.batch }
@@ -51,6 +60,24 @@ func (l *stubLauncher) Start(ctx context.Context, r *Run, req StartRequest) erro
 }
 
 func (l *stubLauncher) AbortRefusal(context.Context, string) error { return l.refusal }
+
+func (l *stubLauncher) Unfinished(context.Context) (string, []string, error) {
+	if l.journalErr != nil {
+		return "", nil, l.journalErr
+	}
+	return l.unfinished, l.ids, nil
+}
+
+func (l *stubLauncher) Journalled(_ context.Context, id string) (string, error) {
+	if l.journalErr != nil {
+		return "", l.journalErr
+	}
+	text, ok := l.journalled[id]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrNoJournalledRun, id)
+	}
+	return text, nil
+}
 
 func (l *stubLauncher) runCtx(t *testing.T) context.Context {
 	t.Helper()

@@ -200,6 +200,73 @@ func (l *Launcher) AbortRefusal(ctx context.Context, runID string) error {
 	return err
 }
 
+// Unfinished is the journal's recovery screen, for GET /recover.
+//
+// It opens the journal itself rather than holding one open from New, for the
+// reason Start does not dial LND from New: `winthistle serve` has to work on a
+// machine where nothing else does, and a journal held open across a whole
+// serving session would be a write lock held against `winthistle recover` in
+// another terminal — which is the tool an operator reaches for when the UI is
+// the thing that looks wrong.
+//
+// run.Unfinished writes both halves — the runs and then the CPFP children — and
+// that pairing is enforced by there being no exported way to get one without the
+// other. A screen that listed the runs and not the children would tell somebody
+// their node is clean while a coin of theirs is locked.
+//
+// Nothing here dials LND or Core, and it must stay that way: this is the screen
+// an operator reads on a node that is down.
+func (l *Launcher) Unfinished(ctx context.Context) (string, []string, error) {
+	j, err := journal.Open(ctx, l.cfg.Server.Journal)
+	if err != nil {
+		return "", nil, fmt.Errorf("the run journal at %s could not be opened: %w",
+			l.cfg.Server.Journal, err)
+	}
+	defer j.Close()
+
+	var b strings.Builder
+	runs, err := run.Unfinished(ctx, j, &b)
+	if err != nil {
+		return "", nil, err
+	}
+	ids := make([]string, 0, len(runs))
+	for _, r := range runs {
+		ids = append(ids, r.ID)
+	}
+	return b.String(), ids, nil
+}
+
+// Journalled is one run's recovery screen, for GET /recover/{id}.
+//
+// run.Show rather than run.RecoverOne, and the difference is the whole of
+// decision 3 on that screen: Show reads the journal and renders it, RecoverOne
+// abandons channels. The web UI gets the first and not the second — see
+// internal/server/recover.go for why, and note that this method could not
+// produce the second anyway: RecoverOne needs run.Deps, which means LND and
+// Core, and this is the one screen that has to work without either.
+//
+// journal.ErrNoRun becomes server.ErrNoJournalledRun because internal/server may
+// not name the journal's sentinel. It is a translation and not a re-decision:
+// the two mean the same thing, and the reason for the second one existing is the
+// import ban rather than any difference in the fact.
+func (l *Launcher) Journalled(ctx context.Context, runID string) (string, error) {
+	j, err := journal.Open(ctx, l.cfg.Server.Journal)
+	if err != nil {
+		return "", fmt.Errorf("the run journal at %s could not be opened: %w",
+			l.cfg.Server.Journal, err)
+	}
+	defer j.Close()
+
+	var b strings.Builder
+	if _, err := run.Show(ctx, j, &b, runID); err != nil {
+		if errors.Is(err, journal.ErrNoRun) {
+			return "", fmt.Errorf("%w: %s", server.ErrNoJournalledRun, runID)
+		}
+		return "", err
+	}
+	return b.String(), nil
+}
+
 // Signers is run.Signers over the browser: the labels and the count come from
 // the configuration, and the packet goes out through the page.
 //

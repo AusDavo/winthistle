@@ -159,26 +159,246 @@ func TestRecoveryListSaysWhenSomethingMustNotBeTouched(t *testing.T) {
 	}
 	got := RecoveryList(runs, time.Now())
 	mustContain(t, got, "2 unfinished runs")
+	// The journal knows a run is neither published nor aborted. It does not know
+	// whether one is being driven right now — an arming run is in this list for
+	// its whole life — so the screen must not assert that they stopped.
+	mustContain(t, got, "Unless something is driving one right now, they stopped")
+	// A capital in the middle of a sentence. theyThey returned "They" because
+	// that clause used to open the paragraph, and moving it left "…right now,
+	// They stopped…" on the screen — which a passing test for the new clause did
+	// not notice and a browser did.
+	if strings.Contains(got, ", They ") || strings.Contains(got, ", It ") {
+		t.Errorf("a sentence restarts mid-clause with a capital:\n%s", got)
+	}
+	if strings.Contains(strings.Join(strings.Fields(got), " "),
+		"journal. They stopped") {
+		t.Errorf("the list asserts every run stopped, which it cannot know:\n%s", got)
+	}
 	mustContain(t, got, "must not be aborted")
+	// It names which one, and it does not point at a section that is not there.
+	// "see below" was what it said, and there is no below: the run's own screen
+	// is where the explanation lives, on both front doors.
+	mustContain(t, got, "1 of these reached the publish call: run-1")
+	if strings.Contains(got, "see below") {
+		t.Errorf("the list points at a section it does not have:\n%s", got)
+	}
 
 	if got := RecoveryList(nil, time.Now()); !strings.Contains(got, "Nothing to recover") {
 		t.Errorf("empty list: %q", got)
 	}
 }
 
+// No screen may point at a section it does not have.
+//
+// Two did. The list said an unabortable run was explained "see below" and
+// nothing below explained it — that paragraph was the last thing on the screen.
+// The abort plan said the blunt-flag prompt was described "see below" and it is
+// described in BluntConfirmation, which is a different screen shown only when
+// the abort actually runs. Both were survivable in a terminal, where the next
+// command's output follows; both read as broken copy the moment a browser
+// rendered them as a page that ends.
+//
+// The rule, because "see below" is legitimate where there is a below —
+// recoveryPlan's "Not free — see below" is followed by the paragraphs that price
+// it: a screen may point below itself only if at least two more paragraphs
+// follow. One is a closing remark, and a promise answered by a closing remark is
+// the shape both defects had.
+func TestNoScreenPointsBelowItself(t *testing.T) {
+	screens := map[string]string{
+		"list": RecoveryList([]*journal.Run{
+			run(journal.StatePublishing, channel(journal.ChanPending, true)),
+		}, time.Now()),
+		"armed":        Recovery(run(journal.StateArmed, channel(journal.ChanPending, true)), time.Now()),
+		"half-aborted": Recovery(halfAborted(2), time.Now()),
+		"published": Recovery(run(journal.StatePublished,
+			channel(journal.ChanPending, true)), time.Now()),
+	}
+	for name, text := range screens {
+		for _, phrase := range []string{"see below", "See below"} {
+			i := strings.Index(text, phrase)
+			if i < 0 {
+				continue
+			}
+			after := 0
+			for _, para := range strings.Split(text[i:], "\n\n") {
+				if strings.TrimSpace(para) != "" {
+					after++
+				}
+			}
+			// The paragraph containing the phrase counts as one of them.
+			if after < 3 {
+				t.Errorf("%s says %q and then ends within %d paragraph(s). What it "+
+					"points at has to be on the same screen:\n%s",
+					name, phrase, after-1, text)
+			}
+		}
+	}
+}
+
+// The columns have to line up, because the second line of a row is read as
+// belonging to the first.
+//
+// The id field was fourteen wide and NewRunID produces twenty-two, so two things
+// were wrong at once and only a browser showed either. Rows with ids of
+// different lengths did not line up with each other, because the short ones were
+// padded to fourteen and the long ones ran past it. And every row's detail line
+// sat at column seventeen, which was inside the id above it rather than under
+// anything — a column that lines up with nothing reads as a rendering fault.
+func TestTheListColumnsLineUp(t *testing.T) {
+	runs := []*journal.Run{
+		run(journal.StateArming, channel(journal.ChanShimRegistered, false)),
+		halfAborted(2),
+	}
+	// Deliberately different lengths. `winthistle run --id` takes whatever it is
+	// given, so a journal holds both shapes, and equal-length ids would let a
+	// fixed-width field pass this test for the wrong reason.
+	runs[0].ID = "probe"
+	runs[0].TxID = ""
+
+	text := RecoveryList(runs, time.Now())
+	lines := strings.Split(text, "\n")
+
+	var states []int
+	for _, line := range lines {
+		for _, state := range []string{"arming", "aborting"} {
+			if i := strings.Index(line, state); i > 0 {
+				states = append(states, i)
+			}
+		}
+	}
+	if len(states) != 2 {
+		t.Fatalf("expected two state columns, found %d in:\n%s", len(states), text)
+	}
+	if states[0] != states[1] {
+		t.Errorf("the state column is at %d on one row and %d on the next, so two "+
+			"ids of different lengths do not line up:\n%s",
+			states[0], states[1], text)
+	}
+
+	// And the detail lines sit before the ids rather than inside them.
+	for i, line := range lines {
+		trimmed := strings.TrimLeft(line, " ")
+		if trimmed == "" || !strings.HasPrefix(line, " ") {
+			continue
+		}
+		indent := len(line) - len(trimmed)
+		if strings.Contains(line, "arming") || strings.Contains(line, "aborting") {
+			continue // a row's own line
+		}
+		if indent > 2 && indent < states[0] {
+			// Between the start of the id and the start of the state: in the
+			// middle of the id above it.
+			if indent >= len("  ")+len(runs[0].ID) {
+				t.Errorf("line %d is indented %d, which lands inside the id above "+
+					"it rather than under a column:\n%s", i+1, indent, text)
+			}
+		}
+	}
+
+	// And one hand-picked id does not pad every other row out with it.
+	runs[0].ID = strings.Repeat("x", 90)
+	for i, line := range strings.Split(RecoveryList(runs, time.Now()), "\n") {
+		if strings.Contains(line, "aborting") && len([]rune(line)) > PaneWidth {
+			t.Errorf("one long id pushed an unrelated row to %d columns (line %d):\n%s",
+				len([]rune(line)), i+1, line)
+		}
+	}
+}
+
+// A count and the state it counts must never end up on opposite sides of a line
+// break. "12" alone at the end of one line and "abandoned" at the start of the
+// next is a count of twelve of something unnamed followed by a state with no
+// number, on the one line whose whole job is to say which channels are on which
+// side of the abort.
+func TestTheBreakdownNeverBreaksACountAwayFromItsState(t *testing.T) {
+	got := RecoveryList([]*journal.Run{halfAborted(12)}, time.Now())
+	for i, line := range strings.Split(got, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		if last := fields[len(fields)-1]; last == "12" || last == "12," {
+			t.Errorf("line %d ends with a bare count, so its state is on the next "+
+				"line:\n%s", i+1, got)
+		}
+	}
+}
+
+// The zero value of State is not a verdict, and the two screens that render it
+// must not let a blank read as "this run never got anywhere".
+//
+// It should be unreachable — runs.state is NOT NULL and every writer sets it —
+// which is exactly why it is worth pinning: an unreachable case renders whatever
+// the last person assumed, and the default branch here used to produce a
+// sentence with its subject missing.
+func TestABlankStateIsNotRenderedAsAVerdict(t *testing.T) {
+	r := run("", channel(journal.ChanPending, true))
+
+	list := RecoveryList([]*journal.Run{r}, time.Now())
+	mustContain(t, list, "(no state)")
+
+	one := Recovery(r, time.Now())
+	mustContain(t, one, "(no state)")
+	mustContain(t, one, "no state at all for this run")
+	if strings.Contains(one, "has this run as .") {
+		t.Errorf("the blank state rendered as a sentence with its subject "+
+			"missing:\n%s", one)
+	}
+	// And it must still price the abort off the channels, which are the only
+	// fact on the screen when the run's own state says nothing.
+	mustContain(t, one, "Abandon 1 channel")
+}
+
+// halfAborted is the shape of a bad night: an abort that ran partway, so the
+// same run carries channels on both sides of it and in every state at once.
+//
+// It is the widest row RecoveryList can produce, and it is not a hypothetical —
+// RecoveryOutcome tells the operator to expect exactly this shape and to run the
+// recovery again.
+func halfAborted(perState int) *journal.Run {
+	r := run(journal.StateAborting)
+	r.ID = "20260824-193012-9f3a1c"
+	for _, st := range []journal.ChannelState{
+		journal.ChanShimRegistered, journal.ChanVerified, journal.ChanPending,
+		journal.ChanAbandoned, journal.ChanCancelled,
+	} {
+		for i := 0; i < perState; i++ {
+			r.Channels = append(r.Channels, channel(st, st == journal.ChanPending))
+		}
+	}
+	return r
+}
+
 // Every recovery screen is read in the same pane as the reserve and plan
 // reports, so it wraps to the same column. A screen that overruns is a hazard
 // rather than a blemish: the figures stop lining up with the prose.
+//
+// RecoveryList was missing from this map until it got a route in the web UI, and
+// it was ten columns over the pane when it was added: a half-aborted run carries
+// channels in all five states at once and the counts went out on one unwrapped
+// line. Same defect internal/plan shipped, for the same reason — the screen
+// nobody measured. Every screen this file renders is in here now, including the
+// list's empty and no-channel shapes.
 func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 	screens := map[string]string{
 		"arming": Recovery(run(journal.StateArming, channel(journal.ChanShimRegistered, false)), time.Now()),
 		"armed":  Recovery(run(journal.StateArmed, channel(journal.ChanPending, true)), time.Now()),
 		"published": Recovery(run(journal.StatePublished,
 			channel(journal.ChanPending, true)), time.Now()),
+		"half-aborted": Recovery(halfAborted(12), time.Now()),
 		"blunt": BluntConfirmation(abort.BluntRequest{
 			Channel:   lnd.ChannelPoint{TxID: fakeTxID, Index: 0},
 			Rejection: "not externally funded or not pending",
 		}),
+		"list": RecoveryList([]*journal.Run{
+			run(journal.StateArming, channel(journal.ChanShimRegistered, false)),
+			halfAborted(12),
+			run(journal.StatePublishing, channel(journal.ChanPending, true)),
+		}, time.Now()),
+		"list, one channel each": RecoveryList([]*journal.Run{halfAborted(1)}, time.Now()),
+		"empty list":             RecoveryList(nil, time.Now()),
+		"list of a run with no channels": RecoveryList(
+			[]*journal.Run{run(journal.StateArming)}, time.Now()),
 	}
 	for name, text := range screens {
 		for i, line := range strings.Split(text, "\n") {

@@ -290,13 +290,30 @@ func (s *Server) refuseScreen(w http.ResponseWriter, code int, title, text strin
 	serve(w, screen(title, "", text))
 }
 
+// noSuchRun is /runs/{id} for an id this process is not driving, and it is
+// decision 2 on that URL: it does not fall back to the journal.
+//
+// A fallback would make one URL mean two things — one with a live transcript, a
+// pending question and an abort control, one with none of those — and the
+// difference between them is the difference between a run that is happening and
+// a record of one that stopped. That is precisely what an operator reads wrong
+// under pressure. So this is a 404 that says where the other thing is, and the
+// journal has its own path.
 func (s *Server) noSuchRun(w http.ResponseWriter, id string) {
 	w.WriteHeader(http.StatusNotFound)
-	serve(w, screen("run", "", prose.Para(fmt.Sprintf(
-		"There is no run called %q in this process, so there is nothing to answer "+
-			"or to stop. A run is in the registry only while the winthistle that "+
-			"started it is still running; a run from an earlier process is in the "+
-			"journal instead, and `winthistle recover` is what reads that.", id))))
+	var b strings.Builder
+	b.WriteString(screen("run", "", prose.Para(fmt.Sprintf(
+		"There is no run called %q in this process, so there is nothing here to "+
+			"attach to, answer or stop. A run is in the registry only while the "+
+			"winthistle that started it is still running.", id))+"\n"+
+		prose.Para("A run from an earlier process is in the journal instead, "+
+			"which is a separate screen because it is a separate thing: a journal "+
+			"row is a record read off disk, with no transcript, no question and no "+
+			"control that stops anything. If this run is in there, it is at "+
+			"/recover/"+id+".")))
+	fmt.Fprintf(&b, "<p><a href=\"%s\">look for %s in the journal</a></p>\n",
+		recoverPath(id), html.EscapeString(id))
+	serve(w, b.String())
 }
 
 func noBatch() string {
