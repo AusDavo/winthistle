@@ -160,6 +160,45 @@ func (j *Journal) MarkPending(ctx context.Context, runID string,
 		return fmt.Errorf("run %s: channel %s reached pending with no funding outpoint", runID, id)
 	}
 	return j.tx(ctx, func(tx *sql.Tx) error {
+		// What is already on disk for this channel, before writing over it.
+		//
+		// A repeat of the same receipt is harmless and stays harmless: the write
+		// is idempotent, and arming counts channels in the pending state rather
+		// than receipts, so n receipts for one channel can never stand in for
+		// n channels.
+		//
+		// A receipt naming a *different* outpoint is not a repeat. The
+		// journalled outpoint is what an abort abandons, so accepting the second
+		// one would silently point the teardown at a channel this run may not
+		// own — and abandoning the wrong pending channel is the worst thing in
+		// this package's reach. There is also no legitimate route here: LND
+		// commits to the funding outpoint at psbt_verify, and only signatures
+		// may be added afterwards (I-3).
+		var was string
+		var hadTxID sql.NullString
+		var hadIndex sql.NullInt64
+		err := tx.QueryRowContext(ctx,
+			`SELECT state, funding_txid, funding_index FROM channels
+			 WHERE run_id = ? AND pending_chan_id = ?`,
+			runID, id.String()).Scan(&was, &hadTxID, &hadIndex)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %s has no channel %s: %w", runID, id, ErrNoRun)
+		}
+		if err != nil {
+			return fmt.Errorf("reading channel %s of run %s: %w", id, runID, err)
+		}
+		if hadTxID.Valid && hadTxID.String != "" {
+			had := lnd.ChannelPoint{
+				TxID: hadTxID.String, Index: uint32(hadIndex.Int64),
+			}
+			if had != cp {
+				return fmt.Errorf("run %s, channel %s: already journalled at %s "+
+					"and this receipt says %s. That outpoint is what an abort "+
+					"abandons, so it is not overwritten: %w",
+					runID, id, had, cp, ErrOutpointMoved)
+			}
+		}
+
 		res, err := tx.ExecContext(ctx,
 			`UPDATE channels SET state = ?, funding_txid = ?, funding_index = ?
 			 WHERE run_id = ? AND pending_chan_id = ?`,

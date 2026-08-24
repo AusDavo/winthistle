@@ -366,6 +366,16 @@ var (
 	// force-close path, so an abort is refused outright.
 	ErrMayBePublished = errors.New("the run reached the publish call — it must not be aborted")
 
+	// ErrOutpointMoved means a second chan_pending receipt for a channel already
+	// journalled as pending named a different funding outpoint.
+	//
+	// It is refused rather than reconciled. The journalled outpoint is the one an
+	// abort abandons, and LND commits to the funding outpoint at psbt_verify, so
+	// there is no route by which the second answer is the true one — only routes
+	// by which accepting it makes the teardown abandon the wrong channel.
+	ErrOutpointMoved = errors.New("a receipt named a different funding outpoint " +
+		"for a channel already journalled as pending")
+
 	// ErrNoBump means the journal has no such CPFP child.
 	ErrNoBump = errors.New("no such bump in the journal")
 
