@@ -3084,6 +3084,27 @@ Done since the last handoff, all from the previous list:
 
 ## Watch out for
 
+- **`docs/design.html` is published as an artifact, and editing the file does not
+  update the published page.** The two drifted five statements apart before
+  anyone checked, across several slices, and the published page is the only copy
+  an outside reader sees — the reviewer who wrote `docs/review-2026-08.md` worked
+  from public documents alone. Five statements it was still making: that
+  `replaceable: false` protects against RBF and should be surfaced as a UI
+  toggle; that assisted single-sig is gated before the mode is selectable (that
+  gate was never built — see the residual table); that a download hands the PSBT
+  to Sparrow, as the only path; that animated QR was coming; and that a camera is
+  a prerequisite. It was also missing "A batch that never confirms" and the
+  seven-state recovery table entirely, which are the two sections an operator
+  would most need under pressure.
+
+  **So: any slice that changes `docs/design.html` republishes it in the same
+  slice.** The artifact URL is not in this repository — `/artifacts` in Claude
+  Code lists it, or ask the owner. Two things about doing it: the tool refuses a
+  publish from a session that has not read the live version, which is the
+  safeguard against clobbering and not an obstacle to route around; and *diff*
+  the live source against the local file rather than assuming the local one is
+  ahead. That diff is what found the five.
+
 - **`Ctrl-C` on `winthistle serve` now cancels a run in flight, and it used to
   say it did not.** That row of decision 2's table changed in the seams slice and
   the reasoning is with it: a run left alive while the process exits is killed
