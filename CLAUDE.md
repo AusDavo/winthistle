@@ -326,7 +326,10 @@ abort path*.
   what CI uses.
 - **signet** — integration realism, and the only cheap way to test the
   descriptor-import **rescan** (regtest has no history; the rescan path needs an
-  unpruned node, and signet's chain is small).
+  unpruned node, and signet's chain is small). **Core only**: the rescan and the
+  prune-horizon pre-flight are the only two things regtest cannot reach, and
+  neither involves LND — `setup.Deps` has no LND field. So this is one unpruned
+  bitcoind and one pruned one, not a signet deployment.
 - **mainnet cold probe** — commissioning only, per `docs/design.html`. Proves
   this node, these peers, these devices. No signet/regtest substitute for it.
 

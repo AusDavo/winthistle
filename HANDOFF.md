@@ -3250,20 +3250,58 @@ to no peer and pays no fee.
 
    Still true before the first browser-driven armed window on anything that
    matters: the startup-token cookie is not port-scoped (see "Watch out for").
-2. **Signet, for the two things regtest cannot reach.** The descriptor-import
+2. **The adversarial harness**, which is not on this list because it is on the
+   other one. With item 1 closed, the next work comes off
+   `docs/review-2026-08-triage.md`'s "Recommended order, revised", where every
+   entry has shipped except finding 3: the scenarios that have no test. It
+   belongs before the cold probe rather than after, for the reason the build
+   order is inverted at all — the probe terminates through the abort path, and
+   these are the failures that path exists for.
+
+   Two things to know before starting it. Its scenario table is **partly stale**:
+   the duplicate/non-member receipt row reads "absent" and
+   `internal/journal/receipts_test.go` now covers all three cases `MarkPending`
+   guards, so auditing the table is part of the slice rather than a preamble.
+   And `internal/arm`'s publish test is the only test here that publishes and
+   must stay so — a mempool-rejection test asserts the *refusal*, which is a
+   transaction Core will reject rather than one it will relay.
+3. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
    `internal/coldwallet/coldwallet_regtest_test.go`. `winthistle doctor` reports
    the prune horizon against the birthday and has never had one to report.
-3. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
+
+   **This does not need hardware this machine lacks, and this file used to imply
+   it did.** Nobody had checked. Both untested paths are **Core-only** —
+   `setup.Deps` has no LND field at all, and the prune check is `doctor` reading
+   `getblockchaininfo` — so there is no signet LND, no channels, no coins and no
+   peers in it. It is one unpruned bitcoind for the rescan and a pruned one so
+   `PrunedPastBirthday` has something to fire on, on the same
+   `polarlightning/bitcoind` image `regtest/` already runs. Put it in a `signet/`
+   directory *beside* `regtest/` rather than as a service inside its compose
+   file: a second chain inside the harness is a second chain inside everything
+   `regtestenv.Start` and `-p 1` are written around. Gate the tests behind an env
+   var that skips cleanly, the way `WINTHISTLE_SLOW=1` gates
+   `TestWhoOwnsTheTenMinuteClock`, so `make test` stays green without a signet
+   node. The only unavoidable cost is wall-clock IBD, and no figure for it should
+   go in this file until one has been measured.
+
+   One of the three tests is worth naming because it is the one most likely to be
+   "fixed": a **too-late birthday finds nothing and is otherwise
+   indistinguishable from a correct one**. That is not a defect — it is exactly
+   the indistinguishability the round-trip address check exists to cover, and
+   pinning it is what stops a later slice turning the birthday into a promise it
+   cannot keep.
+4. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-4. **Nothing new at this level.** What remains is items 1 to 3. Two of them still
-   need something this machine does not have — a signet node, or mainnet coins —
-   and the third does not: the browser turned out to be installed all along, and
-   the two handoffs that said otherwise cost a guard bug that a single click
-   would have found.
+5. **Nothing new at this level.** What remains is items 2 to 4, in that order,
+   and only the last of them needs something this machine does not have — mainnet
+   coins and real peers. Two claims on this list have now been wrong the same
+   way: that no browser was installed, which cost a guard bug a single click
+   would have found, and that signet needed absent hardware. Both survived
+   several handoffs because nobody checked. Check before writing "we cannot".
 
 Done since the last handoff, all from the previous list:
 
