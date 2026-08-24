@@ -28,6 +28,16 @@ func (p *Plan) Document() string {
 		"including its value, so a rounded amount is a channel that never opens."))
 	b.WriteString("\n")
 
+	// Only when there is an alias to be misled by.
+	if anyAlias(p.Channels) {
+		b.WriteString(prose.Para("Peer names below come from this node's gossip " +
+			"graph and are whatever each node says about itself: not unique, not " +
+			"verified by anybody, and two nodes may claim the same one. The key " +
+			"beside each name is the identifier. The name is there to make the key " +
+			"readable, not to stand in for it."))
+		b.WriteString("\n")
+	}
+
 	// The address goes on its own line. A bech32 P2WSH address is 62 characters
 	// and a taproot one 62 too, so anything sharing a line with one overruns the
 	// pane — and this is copy the operator reads character by character.
@@ -123,6 +133,15 @@ func (p *Plan) Document() string {
 		}
 	}
 	return b.String()
+}
+
+func anyAlias(chans []Channel) bool {
+	for _, ch := range chans {
+		if ch.Alias != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // policyLines is the forwarding policy shown beside a channel's amount.

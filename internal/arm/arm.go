@@ -55,6 +55,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/coldwallet"
@@ -263,6 +264,15 @@ type Blueprint struct {
 	TopUp  *plan.TopUp
 	Change plan.Change
 	Inputs plan.Inputs
+
+	// Aliases maps a peer's pubkey, lowercased, to the alias Phase 0 read out of
+	// the gossip graph. Missing entries are ordinary and render as the key alone.
+	//
+	// It arrives here rather than on Channel or Stream because it is not part of
+	// opening a channel: nothing in the funding flow, the verifier or the journal
+	// consults it, and a wrong alias can only ever make a sheet less legible. The
+	// things that decide something travel on Stream.
+	Aliases map[string]string
 }
 
 // Plan fills the blueprint in with what LND asked for.
@@ -277,6 +287,7 @@ func (s *Streams) Plan(b Blueprint) (*plan.Plan, error) {
 	for _, st := range s.All {
 		p.Channels = append(p.Channels, plan.Channel{
 			Peer:          st.Peer,
+			Alias:         b.Aliases[strings.ToLower(st.Peer)],
 			PendingChanID: st.PendingChanID.String(),
 			Address:       st.FundingAddress,
 			AmountSat:     st.FundingAmount,

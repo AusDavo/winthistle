@@ -66,6 +66,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
@@ -283,6 +284,10 @@ type prepared struct {
 	finding reserve.Finding
 	topUp   *plan.TopUp
 	probes  []peers.Probe
+
+	// facts is Phase 0's peer pre-flight, kept because the batch plan renders
+	// each peer's alias beside its key and the graph was already asked once.
+	facts []peers.Facts
 }
 
 func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
@@ -326,6 +331,7 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	if err != nil {
 		return p, fmt.Errorf("the peer pre-flight: %w", err)
 	}
+	p.facts = facts
 	for _, f := range facts {
 		fmt.Fprint(d.Out, f.Report())
 		if !f.Usable() {
@@ -493,10 +499,11 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	}
 
 	batchPlan, err := streams.Plan(arm.Blueprint{
-		Chain:  p.chain,
-		Fee:    p.rate.Fee(),
-		TopUp:  p.topUp,
-		Change: plan.Change{Address: p.change},
+		Chain:   p.chain,
+		Fee:     p.rate.Fee(),
+		TopUp:   p.topUp,
+		Aliases: aliases(p.facts),
+		Change:  plan.Change{Address: p.change},
 		Inputs: plan.Inputs{
 			MinConfirmations: o.Config.Limits.MinConfirmations(),
 			Allowed:          allowed(p.coins),
@@ -737,6 +744,21 @@ func releaseFence(ctx context.Context, d Deps, fenced []bitcoind.Outpoint) {
 		fmt.Fprintf(d.Out, "released %d fenced coin lock%s\n", len(freed),
 			prose.Plural(len(freed)))
 	}
+}
+
+// aliases indexes Phase 0's peer facts by key, for the plan's labels.
+//
+// Phase 0 asked the graph once; this is that answer carried forward rather than
+// a second lookup inside the armed window, where every RPC is on the peers'
+// clock.
+func aliases(facts []peers.Facts) map[string]string {
+	out := make(map[string]string, len(facts))
+	for _, f := range facts {
+		if f.Alias != "" {
+			out[strings.ToLower(f.Want.Pubkey)] = f.Alias
+		}
+	}
+	return out
 }
 
 func allowed(c coldwallet.Coins) []plan.Outpoint {

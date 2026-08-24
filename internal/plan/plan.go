@@ -99,6 +99,21 @@ type Channel struct {
 	Peer          string
 	PendingChanID string
 
+	// Alias is the peer's self-declared name from LND's gossip graph, carried
+	// for the operator's eyes and nothing else.
+	//
+	// It never replaces the pubkey in any label, and that is not a style choice.
+	// An alias is whatever a node announces about itself: it is not unique, not
+	// verified by anybody, and two nodes may claim the same one. A sheet that
+	// said only "channel 1 to bitrefill" would be asking the operator to check
+	// an amount against a name that any node on the network can adopt. So the
+	// key stays, and the alias sits beside it as the thing that makes the key
+	// legible.
+	//
+	// Empty is ordinary: a peer the graph has not heard of, or one that has
+	// never set an alias, looks exactly like this.
+	Alias string
+
 	// Address and AmountSat are LND's own psbt_fund answer, and both are exact.
 	// LND compares its expected output with psbt.TxOutsEqual, which compares the
 	// value as well as the script, so a satoshi of rounding is a channel that
@@ -317,7 +332,7 @@ func (p *Plan) Outputs() ([]Named, error) {
 	for i, ch := range p.Channels {
 		label := fmt.Sprintf("channel %d", i+1)
 		if ch.Peer != "" {
-			label = fmt.Sprintf("channel %d to %s", i+1, shortPeer(ch.Peer))
+			label = fmt.Sprintf("channel %d to %s", i+1, ch.who())
 		}
 		script, err := ScriptFor(ch.Address, params)
 		if err != nil {
@@ -418,6 +433,15 @@ func (p *Plan) TotalOutSat() int64 {
 		total += p.TopUp.AmountSat
 	}
 	return total
+}
+
+// who names the peer as the operator should read it: the alias for legibility,
+// the key because the alias is not an identifier.
+func (c Channel) who() string {
+	if c.Alias == "" {
+		return shortPeer(c.Peer)
+	}
+	return fmt.Sprintf("%s (%s)", c.Alias, shortPeer(c.Peer))
 }
 
 func shortPeer(pubkey string) string {
