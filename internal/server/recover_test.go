@@ -322,6 +322,24 @@ func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 		"no such journalled run":    noSuchJournalledRun(live.ID),
 		"no journal":                noJournal(),
 		"journal unreadable":        journalUnreadable(refusal),
+
+		"peers, always":         peersAlways(),
+		"fees, always":          feesAlways(),
+		"reserve, always":       reserveAlways(),
+		"peers note, batch":     peersNote(live),
+		"peers note, bump":      peersNote(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"peers note, setup":     peersNote(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+		"peers note, nothing":   peersNote(nil),
+		"fees note, batch":      feesNote(live),
+		"fees note, bump":       feesNote(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"fees note, setup":      feesNote(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+		"reserve note, batch":   reserveNote(live),
+		"reserve note, bump":    reserveNote(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"reserve note, setup":   reserveNote(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+		"one announced channel": hypotheticalChannel(),
+		"no batch for a report": noBatchFor("the peers"),
+		"report failed":         reportFailed("the fee rate", refusal),
+		"no reports":            noReports("the anchor reserve"),
 	}
 	for name, text := range screens {
 		for i, line := range strings.Split(text, "\n") {

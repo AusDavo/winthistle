@@ -2982,6 +2982,117 @@ the pages need. The driver is not committed — it is a scratch script — but i
 reproducible from this description in a few minutes, and the durable half of it is
 `TestABrowsersFormPostIsAdmitted`.
 
+## The three report screens, and the two that are not screens
+
+The five `Report()` renderers item 1.7 was still missing turned out not to be
+five of a kind, and finding that out is most of what this slice produced.
+
+### They already reached a browser, which is what made the decision
+
+`run.Do` prints every one of the five to `d.Out`, and for a browser-driven run
+`internal/webrun` sets `d.Out = r` — the `*server.Run`, which is the transcript.
+So a run's copy of all five reports is already served, verbatim, in the `<pre>`
+at `/runs/{id}`. Nothing stores a `peers.Facts`, a `fees.Rate` or a
+`reserve.Finding` anywhere, and there is no settlement table in the journal.
+
+That settles "does a screen re-run the check, or view what a run produced": the
+second option does not exist. Viewing would mean either a second rendering of the
+transcript or a new store for values nothing else keeps, and neither is worth a
+route. So the three that can be reached standalone re-run, and the reasoning is
+in `internal/server/reports.go` rather than in a commit message.
+
+### Why re-running is cheap here and is not a second pre-flight
+
+Three things, and the middle one is the load-bearing one:
+
+- **They are read-only by construction.** `peers.Check`'s own comment says it
+  opens no funding stream, so it starts no clock and costs nothing to run again;
+  `fees.Estimate` is one `estimatesmartfee`; `reserve.Check` is a balance, a
+  lease total and three `RequiredReserve` calls.
+- **None of them opens the run journal.** That is what `doctorMu` actually
+  serialises — two concurrent pre-flights opening the journal twice and reporting
+  one failure in two places — so these take no share of it and a doctor screen
+  loaded beside a report screen collides over nothing. This is also why they do
+  not go through `run.Connect`, which opens the journal: a handle held behind a
+  screen an operator reloads is a write lock held against `winthistle recover` in
+  another terminal.
+- **They are not a second rendering.** `doctor` calls the same three checks and
+  prints `Summary()` plus its own verdict-and-fix lines; these print `Report()`,
+  which is the text `winthistle run` prints in Phase 0. Both renderings already
+  existed and both were already measured against the pane in their own packages.
+
+What separates them from `doctor` is the question. `doctor` answers "is anything
+wrong", one line per check with the command that fixes it. These answer "what are
+the figures I am about to commit to", asked at a different moment.
+
+### The one leg that would change the node, removed rather than guarded
+
+`peers.Check` dials a peer whose `Want` carries a host. `winthistle doctor`
+strips the hosts unless given `--connect`, and there is no `--connect` on a page,
+so `webrun.noHosts` strips them unconditionally before the call. Its own function
+so the rule can be tested without a node.
+
+**This is the screen's rule and not the whole UI's**, and the copy says so
+because a browser showed the version that did not: `winthistle serve --connect`
+sets `doctor.Options.Connect`, so the doctor screen in the same tab strip *will*
+dial. Copy claiming the connecting version lives only in a terminal would have
+been false about the screen next to it.
+
+### Three routes rather than one, on purpose
+
+Each report dials only what its own check needs — `/fees` is Core alone, `/peers`
+and `/reserve` are LND alone — so a report answers on a node that is half down.
+That is the same property `/recover` has for the journal, and it is worth more
+than one screen that needs everything.
+
+`/peers` refuses without a batch (`server.ErrNoBatch`, a sentinel because "there
+is no batch" is not a failure to look). `/fees` and `/reserve` answer anyway, and
+`/reserve` falls back to one announced channel the way `doctor` does, saying on
+the page which of the two questions it answered.
+
+### Why there is no plan screen and no settlement screen
+
+- **The plan document.** A `plan.Verification` comes from verifying a PSBT that
+  has already been built, and building one is coin selection against the cold
+  wallet — step 7, inside a run. A screen that built one to display would be the
+  thing the overview already refuses a second run for: a decoy over the coins a
+  batch is about to spend. One route, and the run is it.
+- **The settlement report.** `settle.Settle` is called with `members(armed, …)`,
+  so holding a `settle.Result` means holding an `*arm.Armed` — the type decision
+  1's import ban stops `internal/server` naming. It cannot come off the journal
+  either: there is no settlement table, and the journal has no migrations, so a
+  table added to serve a screen is schema this build would owe forever.
+
+Both already reach a browser through the transcript of the run that produced
+them. That is the finding rather than the gap.
+
+### What the browser found, again
+
+Six render passes had produced ~30 defects; this one produced four more, three of
+which no test could see:
+
+- **The same paragraph three times.** Every peer's `Report()` closes with the
+  identical four-line "nothing here is authoritative" caveat, and a page showing
+  three peers at once put those four lines in the reader's way three times in
+  forty. A rule between the reports fixes it without touching any report —
+  `webrun.peerRule`, at `prose.PaneWidth`.
+- **Two paragraphs both explaining I-4** on `/fees`, four lines apart, plus the
+  report's own third statement of it at the bottom. The standing note dropped it;
+  the live-run note kept it, because that one is aimed at an operator looking at
+  a higher number with a batch already going.
+- **Two paragraphs both opening on "this node's own on-chain wallet"** on
+  `/reserve` with no batch. Same cure: the second one now says only which
+  question was asked.
+- **"There is no RBF on this transaction"** with no transaction. `fees.Rate.Report()`
+  is written for Phase 0, where one is about to exist; on a standalone screen
+  "this transaction" named nothing, so the screen's standing note says which
+  transaction it would be. The report was not edited — that would have been wrong
+  for the run.
+
+The Kind trap was checked in a browser rather than only in a test: a live setup
+adds no paragraph to any of the three, because a setup opens no channel, connects
+to no peer and pays no fee.
+
 ## Next actions, in order
 
 1. **The rest of the UI.** The security shape, the three decisions with their
@@ -3026,12 +3137,14 @@ reproducible from this description in a few minutes, and the durable half of it 
    6. ~~The recovery screens~~ — done. `GET /recover` and `GET /recover/{id}`,
       read-only, needing nothing but the journal. Four decisions with guards, and
       seven defects out of rendering it; see "The journal's own screens".
-   7. **The remaining screens.** The setup and bump screens are **done** —
-      `GET`/`POST /setup` and `GET`/`POST /bump/{id}` — and with them all four
-      callback seams have a caller. **There is no written-but-uncalled code left
-      in this UI.** What remains here is the peer reports, the fee report, the
-      reserve report, the plan document and the settlement report. Verbatim in a
-      `<pre>` is v1 for every one of them.
+   7. ~~The remaining screens~~ — **done, and two of the five reports are
+      decisions rather than screens.** The setup and bump screens shipped first
+      and gave the last two callback seams their callers; **there is no
+      written-but-uncalled code left in this UI.** The reports finished the item:
+      `GET /peers`, `GET /fees` and `GET /reserve`, each re-running its own check
+      and serving the same `Report()` the command line prints, plus a written
+      finding that the plan document and the settlement report have exactly one
+      route each and already take it. See "The three report screens" below.
 
       **What the bump screen decided.** It hangs off `/recover/{id}` rather than
       living under it: /recover stays read-only with no POST route, and the link
@@ -3090,6 +3203,14 @@ reproducible from this description in a few minutes, and the durable half of it 
    would have found.
 
 Done since the last handoff, all from the previous list:
+
+- **The three report screens, and the two reports that are not screens** — the
+  rest of item 1.7. `GET /peers`, `GET /fees` and `GET /reserve`, each re-running
+  its own read-only check and serving the same `Report()` Phase 0 prints; a
+  `noHosts` strip so a screen never dials a peer; and the written finding that a
+  `plan.Verification` needs coin selection and a `settle.Result` needs an
+  `*arm.Armed`, so both have one route and the transcript already is it. See "The
+  three report screens" above.
 
 - **The journal's two screens** — item 1.6's first half. `GET /recover` and `GET
   /recover/{id}`, the four decisions behind them, `run.Unfinished` so the runs
@@ -3198,6 +3319,20 @@ Done since the last handoff, all from the previous list:
   token as protecting against local software. It protects against a *web page*:
   DNS rebinding, a cross-origin form post, a stray `fetch`. `internal/server`'s
   package comment says so in those words; keep it saying so.
+
+- **A report written for a run says things that are false on a screen of its
+  own.** `fees.Rate.Report()` closes on "there is no RBF on this transaction
+  (I-4)", which is exact in Phase 0 and names nothing at `/fees` with nothing
+  going. The cure is a note from the screen saying which transaction it would be,
+  never an edit to the report: the report is right where it is called from, and
+  editing it would break the caller that matters. Same shape as the pane rule
+  below — what the page owes a report is framing, not rewriting.
+
+- **`winthistle serve --connect` makes the doctor screen dial peers, and the
+  report screens still do not.** `doctor.Options.Connect` is the server's, so a
+  server started with that flag has one screen that connects and one that never
+  will. Copy on `/peers` says exactly that, and the earlier draft — which put the
+  connecting version in a terminal — was false about the tab next to it.
 
 - **A served report is regularly wider than the pane, and the page must not fix
   it.** `internal/doctor`'s own pane test uses a synthetic report, and a real one

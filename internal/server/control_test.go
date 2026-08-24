@@ -44,6 +44,13 @@ type stubLauncher struct {
 	// progress is what the attach screen's state block renders, per run id. A
 	// run absent from it has journalled nothing, which is ordinary.
 	progress map[string]string
+
+	// The three pre-flight reports, as the screens in reports.go see them.
+	// reportErr is a node that could not be asked; noPeerBatch is the server that
+	// was started without a batch, which the peer report refuses and the other
+	// two answer anyway.
+	peers, fees, reserve string
+	reportErr            error
 }
 
 func (l *stubLauncher) Batch() string  { return l.batch }
@@ -128,6 +135,30 @@ func (l *stubLauncher) Progress(_ context.Context, id string) (string, error) {
 		return "", fmt.Errorf("%w: %s", ErrNoJournalledRun, id)
 	}
 	return text, nil
+}
+
+func (l *stubLauncher) Peers(context.Context) (string, error) {
+	if l.reportErr != nil {
+		return "", l.reportErr
+	}
+	if l.batch == "" {
+		return "", ErrNoBatch
+	}
+	return l.peers, nil
+}
+
+func (l *stubLauncher) Fees(context.Context) (string, error) {
+	if l.reportErr != nil {
+		return "", l.reportErr
+	}
+	return l.fees, nil
+}
+
+func (l *stubLauncher) Reserve(context.Context) (string, error) {
+	if l.reportErr != nil {
+		return "", l.reportErr
+	}
+	return l.reserve, nil
 }
 
 func (l *stubLauncher) Journalled(_ context.Context, id string) (string, error) {

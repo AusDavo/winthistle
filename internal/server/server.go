@@ -13,11 +13,19 @@
 // bitcoind's JSON-RPC client, which is a client, so the security shape below had
 // no precedent to follow and is the part that had to be right first.
 //
-// It now serves seven screens and the six unsafe methods behind them: start a
+// It now serves ten screens and the six unsafe methods behind them: start a
 // batch, start a setup of the cold wallet, build a CPFP child of a batch that is
 // already public, answer the questions any of the three ask, and stop a batch.
 // What it cannot do is publish — see the guard on decision 1 — and what it does
-// not do yet is mixing transports per device and the five reports.
+// not do yet is mixing transports per device.
+//
+// Three of the newest screens are the pre-flight reports — /peers, /fees and
+// /reserve — which re-run their own check and render it with the same Report()
+// the command line prints. reports.go carries that decision and, with it, why the
+// plan document and the settlement report are not screens: one is produced by
+// coin selection inside a run and the other cannot be held by this package at
+// all. Both already reach a browser, in the transcript of the run that produced
+// them.
 //
 // All four callback seams now have a caller. setup.Ask arrived with the setup
 // screen (setup.go: the resume path only, because a path posted from a browser is
@@ -258,6 +266,19 @@ func New(cfg *config.Config, opts Options) (*Server, error) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.index)
 	s.mux.HandleFunc("GET /doctor", s.doctor)
+
+	// The three pre-flight reports that can be reached without a run, each
+	// rendered with the same Report() `winthistle run` prints in Phase 0. They
+	// re-run their check rather than replaying one — reports.go is where that
+	// decision is written down, along with why the plan document and the
+	// settlement report are not screens at all.
+	//
+	// Three routes rather than one, so a report answers on a node that is half
+	// down: the fee rate needs Core and not LND, the other two need LND and not
+	// Core.
+	s.mux.HandleFunc("GET /peers", s.peersScreen)
+	s.mux.HandleFunc("GET /fees", s.feesScreen)
+	s.mux.HandleFunc("GET /reserve", s.reserveScreen)
 
 	// The cold wallet's setup: the screen, and the POST that gives setup.Ask its
 	// first caller. It is the resume path only — no descriptor file crosses this

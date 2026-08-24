@@ -118,6 +118,7 @@ func TestNoScreenFetchesAnything(t *testing.T) {
 	for _, path := range []string{
 		"/", "/runs/a-run", "/runs/no-such-run",
 		"/recover", "/recover/20260824-1930", "/recover/no-such-run",
+		"/peers", "/fees", "/reserve",
 	} {
 		body := serveIt(s, get(t, s, path)).Body.String()
 		for _, forbidden := range []string{

@@ -20,9 +20,14 @@ false about the other two. **The file transport is built, both legs**: a
 question's packet downloads as a binary `.psbt` named for its round and device,
 and the signed one comes back by paste or by file — binary or base64, settled on
 BIP174's magic by `combine.Parse`, which is the one sniffer all three transports
-share. Still missing are mixing transports per device and the five reports,
-signet, and the mainnet cold probe. So the safety model below is verified
-against LND source
+share. **The five reports are done, and two of them are decisions rather than
+screens**: `/peers`, `/fees` and `/reserve` re-run their own check and render the
+same `Report()` the command line prints, while the plan document and the
+settlement report have exactly one route each and it is the run that produces
+them — the transcript, which this UI already serves verbatim.
+`internal/server/reports.go` carries both decisions. Still missing are mixing
+transports per device, signet, and the mainnet cold probe. So the safety model
+below is verified against LND source
 *and* against a running node — but never yet against mainnet, which is what the
 cold probe is for.
 

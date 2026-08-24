@@ -389,7 +389,63 @@ type Launcher interface {
 	// Read-only, like Unfinished, and for the same reason nothing beside it
 	// aborts: see recover.go.
 	Journalled(ctx context.Context, runID string) (string, error)
+
+	// The three pre-flight reports that can be reached without a run, as text.
+	//
+	// They are here for the reason Batch is: the launcher is the thing holding
+	// the batch file and the connection details, and a second reader of either
+	// would be a second thing to keep in step. They return the same Report()
+	// strings `winthistle run` prints in Phase 0, so decision 3's oracle covers
+	// them without a second rendering existing anywhere.
+	//
+	// Each dials only what its own check needs and closes it again — see
+	// internal/webrun. None of the three opens the run journal, which is what
+	// makes them safe to serve beside doctor rather than behind doctorMu: the
+	// thing doctorMu serialises is a second journal handle, and these have none.
+	//
+	// reports.go is where the decision behind them is written down: they re-run
+	// the check rather than replaying what a run produced, because nothing in
+	// this build stores a peers.Facts, a fees.Rate or a reserve.Finding — a run's
+	// copy of all three is transcript text, and it is already served.
+
+	// Peers is peers.Facts.Report() for every channel in the batch: the local
+	// graph's evidence about each peer, and what this node already has pending
+	// with it.
+	//
+	// It never connects to a peer. peers.Check will dial one whose Want carries a
+	// host, and a screen that did that would be a diagnostic changing the node —
+	// so the hosts are stripped before it is called, exactly as `winthistle
+	// doctor` strips them without --connect.
+	//
+	// ErrNoBatch when there is no batch: the peers are the batch's, and there is
+	// nothing to be about.
+	Peers(ctx context.Context) (string, error)
+
+	// Fees is fees.Rate.Report(): the rate a batch built right now would pay, and
+	// which of Core's estimate, the configured floor and this node's relay floor
+	// it came from.
+	//
+	// The one of the three that needs no batch and no LND. It is Core alone, and
+	// it answers on a node whose LND is down.
+	Fees(ctx context.Context) (string, error)
+
+	// Reserve is reserve.Finding.Report(): whether this node's own on-chain
+	// wallet clears the anchor reserve psbt_verify will demand, and whether it
+	// still clears it once the batch's channels exist.
+	//
+	// With no batch it answers for one announced channel rather than refusing,
+	// which is what doctor does with no --batch. That is a useful answer — the
+	// reserve is a fact about this node, not about the batch — and the screen
+	// says which question was asked.
+	Reserve(ctx context.Context) (string, error)
 }
+
+// ErrNoBatch is a report that is about a batch, asked of a server that has none.
+//
+// A sentinel rather than a bare error for ErrNoJournalledRun's reason: "there is
+// no batch" is not a failure to look, and the screen that hears it says what to
+// do rather than reporting that something went wrong.
+var ErrNoBatch = errors.New("this server was started without a batch")
 
 // ErrNoJournalledRun is the journal having no such run, as this package is
 // allowed to hear it.

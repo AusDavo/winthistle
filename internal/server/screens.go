@@ -40,10 +40,21 @@ type link struct {
 	Label string
 }
 
+// In the order an operator moves through them: what this is, whether anything is
+// wrong, the cold wallet's commissioning, then the three reports about the batch
+// and the node it would be opened against, then the journal.
+//
+// Every one of them is here rather than reachable only from another page. Copy
+// that names a screen the nav cannot reach has been found four times in this UI,
+// and the cure each time was a link — so a screen that ships gets its entry in
+// the same commit.
 var nav = []link{
 	{"/", "overview"},
 	{"/doctor", "doctor"},
 	{"/setup", "setup"},
+	{"/peers", "peers"},
+	{"/fees", "fees"},
+	{"/reserve", "reserve"},
 	{"/recover", "recover"},
 }
 
