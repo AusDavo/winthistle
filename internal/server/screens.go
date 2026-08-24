@@ -464,8 +464,27 @@ func title(r *Run) string {
 // Calling any of the other two a signing gate would name a mechanism that is not
 // running, and the bump one said it over the question about whether to build a
 // child at all, which signs nothing. Found by looking at the page.
+//
+// A batch has one question that is not a signing round either, and it said the
+// signing-gate sentence for several slices: the blunt-abandon confirmation, asked
+// during a teardown. Nothing is being signed then — the round is over and the
+// batch is being taken apart — and letting it pass does not cost one more signing
+// round, it costs an abort that has to be finished by hand, which is a different
+// thing to be told while authorising i_know_what_i_am_doing. What separates them
+// is Question.Reply: a signing question asks for a packet back and a decision
+// does not, which is the same distinction questionForm already draws to decide
+// the form's enctype. Found by looking at the page, on the run that mixed its
+// transports.
 func waitingOn(r *Run, q *Question) string {
 	left := q.Deadline.Sub(q.Asked).Round(time.Second)
+	if r.Kind == KindBatch && q.Reply == "" {
+		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+			"%s, which is %s from when it was asked. That is not a signing gate — "+
+			"the signing round is over and this batch is being taken apart. Letting "+
+			"it pass declines the escalation, which leaves an abort to be finished "+
+			"by hand rather than anything that was at risk.",
+			q.Deadline.Format(time.TimeOnly), left))
+	}
 	switch r.Kind {
 	case KindSetup:
 		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+

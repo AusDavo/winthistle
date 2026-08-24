@@ -253,11 +253,22 @@ func TestTheJournalScreensGoThroughTheChokepoint(t *testing.T) {
 //
 // Runes, not bytes. A byte count reads every em dash as three columns, which is
 // worse than no check because it gets fixed by widening the pane.
-// aQuestion is a pending question with the clock a screen renders, and nothing
-// else: waitingOn reads only Asked and Deadline.
+// aQuestion is a pending *decision* — a question with no packet to hand back,
+// which on a batch is the blunt-abandon confirmation and on a setup is the
+// address check. waitingOn reads Asked, Deadline and Reply, and nothing else.
 func aQuestion() *Question {
 	asked := time.Date(2026, 8, 24, 19, 30, 12, 0, time.UTC)
 	return &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute)}
+}
+
+// aSigningQuestion is the other kind, and Reply is the whole difference: a
+// signing round asks for a packet back and a decision does not. It is what
+// separates the copy that may call the clock a signing gate from the copy that
+// may not — see waitingOn.
+func aSigningQuestion() *Question {
+	q := aQuestion()
+	q.Reply = "paste what cold1 gave back, base64"
+	return q
 }
 
 func TestTheServersOwnCopyFitsThePane(t *testing.T) {
@@ -296,7 +307,8 @@ func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 		"bump busy":               bumpBusy(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
 		"bump refused":            bumpRefused(ErrRunInFlight, live),
 		"no bump":                 noBump(),
-		"waiting, batch":          waitingOn(live, aQuestion()),
+		"waiting, batch":          waitingOn(live, aSigningQuestion()),
+		"waiting, batch decision": waitingOn(live, aQuestion()),
 		"waiting, setup":          waitingOn(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}, aQuestion()),
 		"nothing to start, batch": nothingToStart(live),
 		"nothing to start, setup": nothingToStart(

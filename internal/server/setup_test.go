@@ -348,7 +348,24 @@ func TestTheSetupsClockIsNotCalledAGate(t *testing.T) {
 	mustSay(t, got, "Letting it pass records nothing at all")
 
 	batch := &Run{ID: "20260824-1930"}
-	if got := waitingOn(batch, q); !says(got, "signing gate") {
-		t.Errorf("a batch's clock stopped being the signing gate:\n%s", got)
+	signing := &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute),
+		Reply: "paste what cold1 gave back, base64"}
+	if got := waitingOn(batch, signing); !says(got, "signing gate") {
+		t.Errorf("a batch's signing round stopped being the signing gate:\n%s", got)
 	}
+
+	// And a batch's *other* question is not a signing round either. The
+	// blunt-abandon confirmation is asked during a teardown: nothing is being
+	// signed, and letting it pass declines the escalation rather than costing one
+	// more round. It said the signing-gate sentence for several slices, over the
+	// one prompt in this product where a human authorises something that could
+	// lose funds if the premise were wrong.
+	decision := &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute)}
+	got = waitingOn(batch, decision)
+	mustSay(t, got, "not a signing gate")
+	if says(got, "one more signing round") {
+		t.Errorf("the blunt-abandon confirmation says letting it pass costs a "+
+			"signing round, when what it costs is an abort finished by hand:\n%s", got)
+	}
+	mustSay(t, got, "finished by hand")
 }

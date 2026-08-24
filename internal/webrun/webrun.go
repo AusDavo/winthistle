@@ -83,6 +83,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/run"
 	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
+	"github.com/AusDavo/winthistle/internal/signers"
 )
 
 // The values a form posts back. Matched exactly, and anything else is no choice
@@ -170,8 +171,10 @@ func (l *Launcher) Start(ctx context.Context, r *server.Run, req server.StartReq
 			"cold-storage device to winthistle.toml — and exactly as many as the " +
 			"descriptor requires, because btcd's finalizer wants exactly m " +
 			"signatures and a 2-of-3 carrying three partials does not finalize. " +
-			"A browser-signed run needs the labels and the count; it does not need " +
-			"a command, because the packet goes out through the page")
+			"A browser-driven run needs the labels and the count; it does not need " +
+			"a command, because the packet goes out through the page for any device " +
+			"that has no command. A device that has one uses it, and is never asked " +
+			"here")
 	}
 
 	d, closeAll, err := run.Connect(ctx, l.cfg)
@@ -180,9 +183,14 @@ func (l *Launcher) Start(ctx context.Context, r *server.Run, req server.StartReq
 	}
 	defer closeAll()
 
+	sigs, err := newSigners(r, l.cfg, l.gate())
+	if err != nil {
+		return err
+	}
+
 	d.Out = r
 	d.Confirm = Confirmation(r, l.gate())
-	d.Signers = &Signers{run: r, cfg: l.cfg, gate: l.gate()}
+	d.Signers = sigs
 
 	_, err = run.Do(ctx, d, run.Options{
 		Config:            l.cfg,
@@ -276,9 +284,12 @@ func (l *Launcher) StartSetup(ctx context.Context, r *server.Run) error {
 // run.Connect is what opens them, so a browser-driven bump dials exactly the way
 // `winthistle bump` does.
 //
-// The signers are the browser's, and the round's name carries the bump's sequence
-// number — bump.RoundName — which matters for the file transport: a second bump
-// minutes after the first must not pick up the first one's signed file.
+// The signers are mixed exactly the way a batch's are — a device with a command
+// uses it, a device without one is asked on the page — and the round's name
+// carries the bump's sequence number, bump.RoundName. That name matters to both
+// transports for the same reason: a second bump minutes after the first must not
+// pick up the first one's signed file, whether that file is in a Downloads folder
+// or in the handshake directory.
 //
 // Approve is asked once, after the child is built and verified and before any
 // device is touched. An abandoned browser answers false, which releases the coin
@@ -304,13 +315,21 @@ func (l *Launcher) StartBump(ctx context.Context, r *server.Run,
 	}
 	defer closeAll()
 
+	// Built even for a build-only bump, which asks no device for anything: the
+	// refusal above already let that case through with no signers configured, and
+	// newSigners over an empty configuration is an empty mix rather than an error.
+	sigs, err := newSigners(r, l.cfg, l.gate())
+	if err != nil {
+		return err
+	}
+
 	_, err = bump.Do(ctx, bump.Deps{
 		LND:       d.LND.Lightning,
 		Publisher: d.LND.WalletKit,
 		Node:      d.Node,
 		Wallet:    d.Wallet,
 		Journal:   d.Journal,
-		Signers:   &Signers{run: r, cfg: l.cfg, gate: l.gate()},
+		Signers:   sigs,
 		Out:       r,
 		Approve:   Approve(r, l.gate()),
 	}, bump.Options{
@@ -466,7 +485,8 @@ func (l *Launcher) Progress(ctx context.Context, runID string) (string, error) {
 }
 
 // Signers is run.Signers over the browser: the labels and the count come from
-// the configuration, and the packet goes out through the page.
+// the configuration, and the packet goes out through the page for every device
+// that has no other way to be reached.
 //
 // The devices are the same devices `winthistle run` uses. What changes is the
 // transport: internal/signers has a command on stdin/stdout and a file handshake,
@@ -475,13 +495,82 @@ func (l *Launcher) Progress(ctx context.Context, runID string) (string, error) {
 // field to copy, and a .psbt download of the same bytes. Both are built from
 // Question.Payload, which is why there is no second copy of the packet anywhere.
 //
-// What this does not do yet is mix transports. A browser-driven run uses the
-// browser for every device, even when a [[signer]] block names a working command,
-// and choosing per device belongs with the rest of the transports.
+// # The rule, which is a decision rather than a fact
+//
+// A round is mixed, per device, and the rule is: **a device whose [[signer]]
+// block names a command signs through that command; a device with no command is
+// asked on the page.** internal/signers already branched that way — Set.signer
+// reads config.Signer.Command — so what newSigners does is give that branch its
+// second caller rather than a second implementation of it. There is no new
+// exported API here and no second copy of runCommand: byCommand holds a
+// one-device signers.Set per commanded device, built through signers.New, which
+// needs no Options.Dir because that requirement fires only for a signer with no
+// command.
+//
+// The file handshake is deliberately *not* in the mix. Its instructions are "put
+// this file at /some/path and wait", and on a browser-driven run the operator is
+// already at a page that can hand them the bytes and take them back — so a
+// no-command device is the page's, and Options.Out and Options.Dir never come
+// into it.
+//
+// A run where every device names a command asks the page nothing about signing at
+// all. That is correct rather than a hole: the page is still where the run is
+// started, watched and stopped, and the transcript says which device signed and
+// how long it took.
+//
+// # Why the choice may not be recomputed
+//
+// internal/signers' package comment carries the reason: the dress rehearsal's
+// measurement predicts the armed window only if the two rounds go through the
+// same transport. So the choice has to be per device and stable across rounds —
+// a device that took the command in the rehearsal and the page in the batch
+// would make the measured number a prediction about a round that never happened.
+// It is stable here by construction: byCommand is resolved once, from the
+// configuration, and Round indexes it rather than deciding again.
+//
+// One thing that follows and is not a bug: a command that takes four minutes
+// leaves the browser device asked after it with one minute of the gate. The
+// deadline bounds the round, not each device — see the package comment — and a
+// mixed round says so on the page.
 type Signers struct {
 	run  *server.Run
 	cfg  *config.Config
 	gate time.Duration
+
+	// byCommand is parallel to cfg.Signers: entry i is the command transport for
+	// cfg.Signers[i], or nil when that device is the page's. Parallel rather than
+	// a compacted list of the commanded ones, because Round walks cfg.Signers and
+	// two slices of different lengths, consumed in step, is exactly how a device
+	// ends up on the wrong transport.
+	byCommand []*signers.Set
+}
+
+// newSigners resolves each device's transport once, for the reason above.
+//
+// The error is spelled out rather than swallowed even though it is unreachable
+// today — signers.New refuses an empty set and a signer with no command and no
+// directory, and neither is possible with one signer that has a command. If a
+// later change makes it reachable, a run that dies here has published nothing,
+// which is the right end for a signer this build could not construct.
+func newSigners(r *server.Run, cfg *config.Config, gate time.Duration) (*Signers, error) {
+	s := &Signers{
+		run:       r,
+		cfg:       cfg,
+		gate:      gate,
+		byCommand: make([]*signers.Set, len(cfg.Signers)),
+	}
+	for i, d := range cfg.Signers {
+		if d.Command == "" {
+			continue
+		}
+		set, err := signers.New([]config.Signer{d}, signers.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("the command transport for signer %s: %w",
+				d.Label, err)
+		}
+		s.byCommand[i] = set
+	}
+	return s, nil
 }
 
 // Labels are the devices, in the order an operator would visit them.
@@ -495,25 +584,72 @@ func (s *Signers) Labels() []string {
 
 // Round is one signing round, and it stamps the round's deadline.
 //
-// One deadline for the whole round, shared by every device in it. See the
+// One deadline for the whole round, shared by every device in it — including the
+// ones signing by command, whose time comes out of the same budget. See the
 // package comment: m devices each given the gate's worth would let a round run
 // past the peers' window, which is the one thing the gate is carved out of.
+//
+// The round is in the configured order whatever the transports are, because that
+// order is the order an operator walks the safe in. Index and Of count every
+// device in the round rather than only the ones the page will see, so "device 3
+// of 4" means the third of four — and commandedLabels is what tells the prompt
+// why the numbering it shows has gaps in it.
 func (s *Signers) Round(name string) []rehearsal.Device {
 	deadline := time.Now().Add(s.gate)
-	labels := s.Labels()
+	commanded := s.commandedLabels()
 
-	out := make([]rehearsal.Device, 0, len(labels))
-	for i, label := range labels {
+	out := make([]rehearsal.Device, 0, len(s.cfg.Signers))
+	for i, d := range s.cfg.Signers {
+		if s.isCommanded(i) {
+			out = append(out, s.commandDevice(i, name))
+			continue
+		}
 		out = append(out, rehearsal.Device{
-			Label: label,
+			Label: d.Label,
 			Sign: Signer(s.run, SignRequest{
-				Round:    name,
-				Label:    label,
-				Index:    i + 1,
-				Of:       len(labels),
-				Deadline: deadline,
+				Round:     name,
+				Label:     d.Label,
+				Index:     i + 1,
+				Of:        len(s.cfg.Signers),
+				Deadline:  deadline,
+				ByCommand: commanded,
 			}),
 		})
+	}
+	return out
+}
+
+// isCommanded reports whether cfg.Signers[i] has a command transport, and it is
+// the one place that decides — both the round and the copy that explains the
+// round read it, so they cannot disagree about which devices the page will see.
+//
+// The bounds check is for a Signers built by hand, which the tests do: byCommand
+// is nil there and every device is the page's, the behaviour this had before
+// there was a choice.
+func (s *Signers) isCommanded(i int) bool {
+	return i < len(s.byCommand) && s.byCommand[i] != nil
+}
+
+// commandDevice is cfg.Signers[i]'s command transport for this round. Only call
+// it when isCommanded(i).
+//
+// The index is deliberate: each of these Sets holds exactly one signer and
+// signers.Set.Round returns one device per signer, so devices[0] is that device.
+// If that ever stops holding, this panics — which is the right end for it,
+// because the alternative is a device silently answered on the transport its
+// [[signer]] block did not ask for.
+func (s *Signers) commandDevice(i int, round string) rehearsal.Device {
+	return s.byCommand[i].Round(round)[0]
+}
+
+// commandedLabels names the devices the page will not be asked about, so the
+// prompt can say so. Nil when the round is all the page's.
+func (s *Signers) commandedLabels() []string {
+	var out []string
+	for i, d := range s.cfg.Signers {
+		if s.isCommanded(i) {
+			out = append(out, d.Label)
+		}
 	}
 	return out
 }
@@ -531,6 +667,16 @@ type SignRequest struct {
 
 	// Deadline is the round's, not this device's.
 	Deadline time.Time
+
+	// ByCommand names the devices in this round that sign through the command
+	// their [[signer]] block gives, and are therefore never asked here.
+	//
+	// It is on the request rather than derived in the prompt because the prompt
+	// is the only thing that can explain the gap it leaves: Index and Of count
+	// the whole round, so an operator asked for "device 2 of 3" and never for
+	// device 1 is owed a sentence saying where device 1 went. Empty means the
+	// round is all the page's, which is the ordinary case and says nothing.
+	ByCommand []string
 }
 
 // Signer is the rehearsal.Signer seam over the browser.
@@ -806,6 +952,13 @@ func short(cp lnd.ChannelPoint) string {
 // The round is matched on bump.RoundPrefix rather than on a literal, because the
 // name is composed in internal/bump and a string spelled in two packages is how
 // this copy ends up on the wrong round again.
+//
+// One paragraph is conditional on the round being mixed, and it is there because
+// the heading counts the whole round: an operator asked for "device 2 of 3" who
+// is never asked for device 1 would otherwise have to guess whether the page lost
+// it. It names the devices and says where they went. On an all-page round — the
+// ordinary one — it is not written at all, because a paragraph explaining an
+// absence that is not there is noise on the screen where noise costs most.
 func signPrompt(req SignRequest) string {
 	var b strings.Builder
 	switch {
@@ -837,6 +990,15 @@ func signPrompt(req SignRequest) string {
 	b.WriteString(prose.Para("Take the packet below to " + req.Label + ", sign it " +
 		"there, and paste back what it gives you."))
 	b.WriteString("\n")
+	if len(req.ByCommand) > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf("Not every device in this round is "+
+			"asked here. %s %s answered by the command winthistle.toml gives, on "+
+			"this machine, and this page never sees that packet — which is why the "+
+			"numbering above has a gap in it. The budget below is the whole round's, "+
+			"so time a command spends is time this question does not have.",
+			strings.Join(req.ByCommand, ", "), prose.IsAre(len(req.ByCommand)))))
+		b.WriteString("\n")
+	}
 	b.WriteString(prose.Para("Do not let the wallet finalize. This tool combines " +
 		"the partial signatures itself, and a packet that arrives already " +
 		"finalized is refused, naming the device: a finalized input is a complete " +

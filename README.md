@@ -8,11 +8,14 @@ web interface.
 >
 > The command line works: `setup`, `doctor`, `run`, `bump`, `recover`, `serve`.
 >
-> The web interface exists and can open a batch — it starts a run, answers the
-> four questions a run asks, and stops one — but it is not finished. Missing from
-> it: the file and animated-QR transports (the browser transport is one field out
-> and one field back), the countdown, and the setup and bump screens. `recover` is
-> still the only way to read what an earlier run left behind.
+> The web interface works: it starts a run, answers the four questions a run
+> asks, stops one, runs a setup and a bump, serves the journal read-only and
+> serves the three reports that can be re-run. The packet goes to a device by
+> read-only field, by `.psbt` download, or by the command that device's
+> `[[signer]]` block names — one round can use more than one of those, chosen per
+> device. In-house animated QR is deliberately out of scope: the contract is
+> BIP174, so a QR-only signer is reached through a desktop wallet that already
+> does the round trip.
 >
 > The central safety property below was verified by reading LND's source and
 > **has since been observed on regtest at *n* = 3**: three channels armed from one
@@ -129,7 +132,10 @@ come from LND's own local gossip graph for the same reason.
 **Signers.** Any wallet that round-trips BIP174 with your descriptor works —
 that is the whole contract. Configure one `[[signer]]` block per cold-storage
 device, with a command that reads a base64 PSBT on stdin and writes a signed one
-back; the web UI can instead hand you the base64 directly. Signers return
+back — or with no command, in which case the command line waits for a file and
+the web UI hands you the packet on the page. That choice is per device, so a
+device you have automated and a device you walk to can be in the same round.
+Signers return
 **partial** signatures and this app does the combining and finalizing, because no
 external party may ever hold a broadcastable copy of the funding transaction
 (I-2). Consequences worth knowing before you choose:

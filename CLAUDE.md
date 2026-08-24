@@ -25,8 +25,17 @@ screens**: `/peers`, `/fees` and `/reserve` re-run their own check and render th
 same `Report()` the command line prints, while the plan document and the
 settlement report have exactly one route each and it is the run that produces
 them — the transcript, which this UI already serves verbatim.
-`internal/server/reports.go` carries both decisions. Still missing are mixing
-transports per device, signet, and the mainnet cold probe. So the safety model
+`internal/server/reports.go` carries both decisions. **A browser-driven round now
+mixes its transports per device**, which finishes the UI: a device whose
+`[[signer]]` block names a command is answered by that command and never asked on
+the page, a device with no command is the page's, and the file handshake stays the
+CLI's answer for a no-command device — because on a browser-driven run the
+operator is already at a page that can hand them the bytes. The choice is read off
+the configuration once, per device, so the rehearsal and the batch go through the
+same transport, which is the only thing that makes the rehearsal's measurement a
+prediction. `internal/webrun`'s `Signers` carries the rule; there is no second
+copy of the command transport, only a one-device `signers.Set` per commanded
+device. Still missing are signet and the mainnet cold probe. So the safety model
 below is verified against LND source
 *and* against a running node — but never yet against mainnet, which is what the
 cold probe is for.

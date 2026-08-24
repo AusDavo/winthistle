@@ -2418,10 +2418,72 @@ carrying both is refused, after which the question is *still pending* and the sa
 file answers it. That last one is the property that makes the refusal cheap, and
 it is worth re-checking by hand if this path is ever touched.
 
-**Still to do here:** mixing transports per device. A browser-driven run uses the
-browser for every device even when a `[[signer]]` block names a working command,
-and `Set.signer` already branches on `d.Command` — so the shape exists on the CLI
-side and what is missing is the choice reaching a browser-driven round.
+### Mixing them per device, which finished item 1
+
+A browser-driven run used the browser for every device even when a `[[signer]]`
+block named a working command, so an operator who had automated one device was
+asked for it anyway. `Set.signer` already branched on `d.Command`, so the shape
+existed on the CLI side; what was missing was that branch reaching a
+browser-driven round. It does now, and six things about it are worth keeping.
+
+**The rule, which is a decision rather than a fact.** A device whose `[[signer]]`
+block names a command is answered by that command and is never asked on the page;
+a device with no command is the page's. The **file handshake is deliberately not
+in the mix**: its instructions are "put this file at /some/path and wait", and on
+a browser-driven run the operator is already at a page that can hand them the
+bytes and take them back. So `signers.Options.Dir` and `Options.Out` never come
+into it — which is also why nothing here had to decide what "put this file at X"
+would mean rendered into a `<pre>`.
+
+**No new exported API, and no second copy of `runCommand`.** `webrun.Signers`
+holds `byCommand []*signers.Set`, parallel to `cfg.Signers`, with a **one-device**
+`signers.Set` at each index whose block names a command and nil elsewhere.
+`signers.New([]config.Signer{d}, signers.Options{})` needs no `Dir`, because that
+requirement fires only for a signer with *no* command. Parallel rather than a
+compacted list consumed in step, because two slices of different lengths walked
+together is exactly how a device ends up on the wrong transport.
+
+**The invariant that was easy to break, and what holds it.**
+`internal/signers`' package comment states it: the rehearsal's measurement
+predicts the armed window *only if the two rounds go through the same transport*.
+So the choice is resolved once, in `newSigners`, off the configuration, and
+`Round` indexes it rather than deciding again — a rule that could answer
+differently the second time would make the measured number a prediction about a
+round that never happened, and the round it mispredicts is the one with *n* peers'
+clocks running. `TestTheTransportIsPerDeviceAndTheSameInBothRounds` drives both
+rounds and compares.
+
+**One paragraph of copy exists only because the round can be mixed.** `Index` and
+`Of` count the whole round, so an operator asked for "device 2 of 2" who is never
+asked for device 1 would have to guess whether the page lost it.
+`SignRequest.ByCommand` carries the labels and `signPrompt` writes one paragraph
+naming them; on an all-page round — the ordinary one — it is not written at all,
+because a paragraph explaining an absence that is not there is noise on the screen
+where noise costs most. What is **not** a bug: the round's deadline is the round's,
+so a command that takes four minutes leaves the browser device after it with one
+minute of the gate. That paragraph says so, and
+`TestTheRoundsDeadlineIsSharedByEveryDevice` is the guard.
+
+**What the browser proved.** A one-channel cold probe against the harness with
+`cold1` given a real `walletprocesspsbt` command and `cold2` left to the page. Both
+rounds behaved: the rehearsal report reads `cold1 453ms` / `cold2 1m21s`, so the
+mix is visible in the measurement rather than hidden by it; the batch round's
+transcript reads `cold1 signed (0s elapsed)` with no question in between, then
+asks for `cold2` as "device 2 of 2" and explains where device 1 went; the two
+partials combined and `testmempoolaccept` allowed the result; step 9 was withheld
+and the abort path took the batch apart.
+
+**What it also turned up, which is not about transports.** The clock sentence over
+a batch's pending question said "that is the 5m0s signing gate … letting it pass
+costs one more signing round" over the **blunt-abandon confirmation**, asked during
+a teardown when the signing round is over. Both clauses were false there, on the
+one prompt in this product where a human authorises something that could lose
+funds if the premise were wrong. `waitingOn` now branches on `Question.Reply` —
+non-empty means a packet is being asked for, which is the same distinction
+`questionForm` already draws to decide the form's `enctype` — and a batch's
+decision question says what letting it pass actually costs. One more false
+statement in operator copy found by looking at the page rather than by a test, and
+like every one before it, it was true when it was written.
 
 ## The four seams, and the five things that were actually hard
 
@@ -2964,7 +3026,9 @@ the animated QR this paragraph also named is out of scope as of 2026-08-24.) No 
 bump screen, so two of the four adapters have no POST yet. A browser-driven run
 uses the browser for every device: the `[[signer]]` blocks supply the labels and
 the count, not a command, and a signer with a working `hwi` command cannot yet be
-mixed in — that is transport selection, and it belongs with item 1.4.
+mixed in — that is transport selection, and it belongs with item 1.4. (Item 1.4 is
+done: a commanded device is answered by its command now. See "Mixing them per
+device" above.)
 
 Exercised against the live harness: the browser-driven cold probe above; `421` for
 a rebinding `Host`, `403` for a cross-origin fetch and for a missing token; and
@@ -3095,11 +3159,14 @@ to no peer and pays no fee.
 
 ## Next actions, in order
 
-1. **The rest of the UI.** The security shape, the three decisions with their
+1. ~~The rest of the UI~~ — **done.** Every sub-item below is struck through and
+   1.4 was the last of them. The security shape, the three decisions with their
    guards, the four callback seams and the abort control all exist — see "The
    server, and the three decisions with guards on them" and "The four seams"
-   above. Items 1.1 and 1.2 are done. What is left, in the order it unblocks
-   itself:
+   above. What remains for this UI is not on this list: it is whatever the next
+   browser session finds, plus `run.RecoverOne`'s route, which is decision 3
+   rather than an omission. Kept in full because each entry carries the decision
+   it made:
 
    1. ~~The four callback seams~~ — done, with the `POST` that starts a run.
    2. ~~An explicit abort control on the run screen~~ — done, as a link to a
@@ -3112,20 +3179,16 @@ to no peer and pays no fee.
       install-browser chrome-for-testing` fetches the headless shell the MCP
       wants. What has *not* been driven in a browser yet is `doctor` under a slow
       node, and the screens that do not exist.
-   4. **The transports.** The **file transport is done, both legs** — `GET
-      /runs/{id}/payload/{question}` out, a multipart file input back; see "The
-      QR decision and the file transport". What is left is **mixing transports
-      per device**. Animated QR was the third item here and is out of scope as of
-      2026-08-24, held open in the triage rather than rejected. They go *around*
-      the existing `server.Question`
-      rather than beside it: `Payload` and `Reply` are already the seam, and what
-      is missing is more ways to move the same two strings. `internal/signers`
-      has two working transports (a command on stdin/stdout, and a file
-      handshake keyed on the round name so a rehearsal signature cannot be
-      picked up as the batch's) and the browser is a third rather than a
-      replacement — **and mixing them is part of this item**, because a
-      browser-driven run currently uses the browser for every device even when a
-      `[[signer]]` block names a working command.
+   4. ~~The transports~~ — **done, and item 1 with it.** The file transport
+      shipped both legs (`GET /runs/{id}/payload/{question}` out, a multipart
+      file input back) and **mixing per device** finished it: a device whose
+      `[[signer]]` block names a command is answered by that command and never
+      asked on the page. Animated QR was the third item here and is out of scope
+      as of 2026-08-24, held open in the triage rather than rejected. They went
+      *around* the existing `server.Question` rather than beside it — `Payload`
+      and `Reply` were already the seam — and the mixing needed no new exported
+      API at all. See "The QR decision and the file transport", whose last two
+      sections are the mixing and what the browser proved about it.
    5. ~~The countdown~~ — done, and this entry was stale for a slice because it
       was never struck through: `prose.Progress` renders it on the attach screen,
       above the transcript, reaching the server through `Launcher.Progress`. See
@@ -3204,6 +3267,15 @@ to no peer and pays no fee.
 
 Done since the last handoff, all from the previous list:
 
+- **Mixing transports per device** — item 1.4's last half, and the last of item
+  1. `webrun.Signers` holds a one-device `signers.Set` per commanded device, the
+  rule is written where the code is, and the choice is resolved once so the
+  rehearsal and the batch cannot disagree. One paragraph of copy exists only
+  because a round can be mixed. See "The QR decision and the file transport".
+  Rendered as a mixed cold probe against the harness, which also turned up the
+  blunt-abandon confirmation's false clock — fixed in the same slice, in
+  `waitingOn`.
+
 - **The three report screens, and the two reports that are not screens** — the
   rest of item 1.7. `GET /peers`, `GET /fees` and `GET /reserve`, each re-running
   its own read-only check and serving the same `Report()` Phase 0 prints; a
@@ -3270,11 +3342,33 @@ Done since the last handoff, all from the previous list:
   `internal/server` had chosen a real `Origin`, which is why a `403` on every form
   in the UI shipped green. The helpers now send the measured headers and say why.
 
+- **A device's transport must not be recomputed between the rounds.** The
+  rehearsal's number predicts the armed window only because the two rounds go
+  through the same transport, so `webrun.newSigners` resolves the choice once, off
+  the configuration, and `Signers.Round` indexes it. If a later change makes that
+  choice depend on anything that can move — a flag on the form, a probe of whether
+  the command still exists, a fallback when it fails — that is the invariant
+  breaking rather than a nicety, and the measurement quietly stops meaning
+  anything. `TestTheTransportIsPerDeviceAndTheSameInBothRounds` is the guard.
+
 - **A browser is installed on this machine.** Two handoffs said there was not,
   and that claim was never checked; `which chromium google-chrome firefox` finds
   three. Render before believing a page works. Three rendering sessions have now
   produced twelve defects between them, most of which no test would have caught,
   and four of which were false statements in operator copy.
+
+- **`estimatesmartfee` can start answering on regtest, and one fees test has no
+  guard for it.** `TestOnRegtestWithNoFloorThereIsNoRate` asserts there is no rate
+  when nothing is configured, which holds only while Core has no estimate. Mine
+  enough blocks carrying fee-paying transactions — a browser render followed by
+  `make -C regtest mine N=2016` did it — and Core produces one for a while (1.11
+  sat/vB, observed once) before its estimator decays back to "Insufficient data".
+  The test then fails with "a rate of 1.11 sat/vB was produced with nothing behind
+  it", which reads exactly like the refusal having been lost. It is harness state:
+  re-run it. Note that its sibling above it,
+  `TestRegtestHasNoFeeEstimateAndTheFloorCarriesIt`, has the `t.Skipf` guard for
+  precisely this state and says so in its message; this one does not, and giving it
+  the same guard is the fix if it recurs.
 
 - **`go test ./...` has a second way to fail now, and it is not regtest.**
   `internal/webrun`'s `TestTheRoundsDeadlineIsSharedByEveryDevice` races two
@@ -3319,6 +3413,14 @@ Done since the last handoff, all from the previous list:
   token as protecting against local software. It protects against a *web page*:
   DNS rebinding, a cross-origin form post, a stray `fetch`. `internal/server`'s
   package comment says so in those words; keep it saying so.
+
+- **Not every question a batch asks is a signing round, and the clock sentence
+  used to assume it was.** `waitingOn` called the blunt-abandon confirmation's
+  deadline "the 5m0s signing gate" and said letting it pass cost "one more signing
+  round" — during a teardown, where the round is over and what it actually costs is
+  an abort finished by hand. It branches on `Question.Reply` now: non-empty means a
+  packet is being asked for. If a fourth kind of question is ever added to a batch,
+  that discriminator is what has to be revisited, not the copy.
 
 - **A report written for a run says things that are false on a screen of its
   own.** `fees.Rate.Report()` closes on "there is no RBF on this transaction

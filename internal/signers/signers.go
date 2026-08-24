@@ -3,10 +3,14 @@
 //
 // Two transports here, and a third that is not here: the browser's, which lives
 // in internal/webrun because it is answered over the HTTP seam rather than by a
-// process on this machine. It is currently one field out and one field back — the
-// file up/down and the animated QR the design asks for are still to come — and it
-// shares this package's rehearsal.Signer type for the reason given below. What
-// stays here is everything that does not need a person watching a page:
+// process on this machine. It moves the same packet three ways — a read-only
+// field to copy, a .psbt download of the same bytes, and a file input or a paste
+// back — and it shares this package's rehearsal.Signer type for the reason given
+// below. In-house animated QR is out of scope as of 2026-08-24, held open in
+// docs/review-2026-08-triage.md rather than rejected: the contract is BIP174, so
+// a QR-only signer is reached through a desktop wallet that already does the
+// round trip. What stays here is everything that does not need a person watching
+// a page:
 //
 //   - a command, which the operator names in winthistle.toml. It reads a base64
 //     PSBT on stdin and writes one on stdout. That is enough for the simulated
@@ -14,6 +18,24 @@
 //   - a file handshake, which is what an air-gapped device actually is: this
 //     writes a file, prints what to do with it, and waits for the signed one to
 //     appear. No socket, no daemon, no assumption about how it got across.
+//
+// # Mixing them, and where that choice is made
+//
+// The choice is per device rather than per run, and this package has always made
+// it that way: Set.signer branches on config.Signer.Command, so one [[signer]]
+// block naming a command and another naming none give one round two transports.
+//
+// A browser-driven run now makes the same choice — internal/webrun's Signers
+// builds a one-device Set here for every signer whose block names a command, and
+// the page is what answers for the rest. The file handshake is not in that mix
+// and that is deliberate: on a browser-driven run the operator is at the page,
+// which is a better place to be handed a packet than a directory they have to be
+// told the path of.
+//
+// Whatever the rule, it has to be read off the configuration rather than
+// recomputed, because of the measurement below: a device that took the command in
+// the rehearsal and the page in the batch would make the rehearsal's number a
+// prediction about a round that never happened.
 //
 // # What a signer is not allowed to hand back
 //

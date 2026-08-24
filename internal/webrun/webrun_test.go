@@ -14,11 +14,14 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
+	"github.com/AusDavo/winthistle/internal/bump"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
+	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/prose"
+	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
 )
@@ -593,6 +596,48 @@ func TestEveryPromptAndButtonFitsThePane(t *testing.T) {
 		}
 	})
 
+	// The signing prompt, in all three rounds and both mixes. It is the longest
+	// copy this package writes and the one an operator reads with n peers' clocks
+	// running, so it is the last place a wrapped line should turn up.
+	t.Run("the signing prompt", func(t *testing.T) {
+		for _, round := range []string{"rehearsal", "batch", bump.RoundName(2)} {
+			for _, byCommand := range [][]string{nil, {"cold1"}, {"cold1", "cold3"}} {
+				name := round + "/page only"
+				if len(byCommand) > 0 {
+					name = round + "/mixed with " + strings.Join(byCommand, " and ")
+				}
+				t.Run(name, func(t *testing.T) {
+					prompt := signPrompt(SignRequest{
+						Round: round, Label: "cold2", Index: 2, Of: 3,
+						Deadline:  time.Now().Add(testGate),
+						ByCommand: byCommand,
+					})
+					for i, line := range strings.Split(prompt, "\n") {
+						if n := len([]rune(line)); n > prose.PaneWidth {
+							t.Errorf("line %d is %d runes, past the %d-column pane:\n%s",
+								i+1, n, prose.PaneWidth, line)
+						}
+					}
+					// And the mixed paragraph is written exactly when the round is
+					// mixed. Said on an all-page round it explains an absence that is
+					// not there; left out of a mixed one it leaves a gap in the
+					// numbering with nothing to account for it.
+					says := strings.Contains(prompt, "Not every device in this round")
+					if says != (len(byCommand) > 0) {
+						t.Errorf("byCommand=%v but the transport paragraph is %v:\n%s",
+							byCommand, says, prompt)
+					}
+					for _, label := range byCommand {
+						if !strings.Contains(prompt, label) {
+							t.Errorf("the prompt does not name %s, which is a device "+
+								"the numbering skips:\n%s", label, prompt)
+						}
+					}
+				})
+			}
+		}
+	})
+
 	t.Run("the blunt-abandon buttons", func(t *testing.T) {
 		r := aRun(t)
 		go func() {
@@ -699,6 +744,231 @@ func TestTheDownloadNameSeparatesTheRoundsAndTheDevices(t *testing.T) {
 						round, label, q.PayloadFilename, want)
 				}
 			}
+		}
+	}
+}
+
+// aPSBT is a real PSBT, base64-encoded the way coldwallet.Built carries one: one
+// input, one output, no signatures.
+//
+// It has to parse rather than merely start with BIP174's magic, because both
+// transports run what they get back through combine.Parse and a packet that only
+// looks like a PSBT fails at the transport instead of at the device. Generated
+// with psbt.NewFromUnsignedTx over a bare wire.MsgTx; nothing here depends on
+// what is in it.
+const aPSBT = "cHNidP8BAFICAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" +
+	"AAD/////AegDAAAAAAAAFlFRUVFRUVFRUVFRUVFRUVFRUVFRUVEAAAAAAAAA"
+
+// signOnce drives one device to completion and reports whether the page was
+// asked anything on the way.
+//
+// That question — was the page asked at all — is the whole of what a transport
+// choice looks like from outside this package, which is why the mixing tests
+// assert on it rather than on a field. A command device returns a Part having
+// asked nothing; a page device asks exactly once and is answered here.
+func signOnce(t *testing.T, r *server.Run, dev rehearsal.Device) (combine.Part, *server.Question) {
+	t.Helper()
+
+	type result struct {
+		part combine.Part
+		err  error
+	}
+	done := make(chan result, 1)
+	go func() {
+		p, err := dev.Sign(context.Background(), aPSBT)
+		done <- result{p, err}
+	}()
+
+	// The bound is liveness rather than latency, exactly as answerAfter's is: a
+	// scheduler under load must not be mistaken for a device that never signed.
+	var asked *server.Question
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		select {
+		case got := <-done:
+			if got.err != nil {
+				t.Fatalf("%s did not sign: %v", dev.Label, got.err)
+			}
+			return got.part, asked
+		default:
+		}
+		if q := r.Pending(); q != nil && asked == nil {
+			asked = q
+			if err := r.Reply(q.ID, server.Answer{
+				Choice: ChoiceSigned, Text: aPSBT,
+			}); err != nil {
+				t.Fatalf("Reply: %v", err)
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%s neither signed nor asked anything", dev.Label)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// mixedConfig is one device with a command and one without, in that order.
+//
+// `cat` is a real signer as far as this package is concerned: internal/signers'
+// command transport writes a base64 PSBT on stdin and reads one off stdout, so a
+// command that echoes is a device that returns the packet it was given. That is
+// not a signature and internal/combine says so — "no device added a signature" —
+// but this package's job ends at the transport, and what is being tested is which
+// transport was used.
+func mixedConfig() *config.Config {
+	return &config.Config{Signers: []config.Signer{
+		{Label: "cold1", Command: "cat"},
+		{Label: "cold2"},
+	}}
+}
+
+// TestADeviceWithACommandIsNotAskedOnThePage is item 1.4's last half.
+//
+// A browser-driven run used to hand every device the browser transport even when
+// its [[signer]] block named a working command, so an operator who had automated
+// one device was asked for it anyway. The rule now — written where the code is,
+// on webrun.Signers — is that a command answers for the device that has one and
+// the page answers for the rest.
+//
+// Three properties, and the third is the one a browser found: the round is still
+// in the configured order, the commanded device asks nothing, and the question
+// the page *does* get says where the device it never mentioned went. Index and Of
+// count the whole round, so "device 2 of 2" with no device 1 is a gap an operator
+// would otherwise read as the page having lost one.
+func TestADeviceWithACommandIsNotAskedOnThePage(t *testing.T) {
+	r := aRun(t)
+	s, err := newSigners(r, mixedConfig(), testGate)
+	if err != nil {
+		t.Fatalf("newSigners: %v", err)
+	}
+
+	// Labels stay the full configured order whatever the transports are: that
+	// order is the order an operator walks the safe in.
+	if got := s.Labels(); len(got) != 2 || got[0] != "cold1" || got[1] != "cold2" {
+		t.Fatalf("Labels is %v, not the configured order", got)
+	}
+
+	devices := s.Round("batch")
+	if len(devices) != 2 {
+		t.Fatalf("the round has %d devices, not the two configured", len(devices))
+	}
+	if devices[0].Label != "cold1" || devices[1].Label != "cold2" {
+		t.Fatalf("the round is %s then %s, not the configured order",
+			devices[0].Label, devices[1].Label)
+	}
+
+	part, asked := signOnce(t, r, devices[0])
+	if asked != nil {
+		t.Errorf("cold1 names a command and was asked on the page anyway:\n%s",
+			asked.Prompt)
+	}
+	if part.Label != "cold1" {
+		t.Errorf("the command's part is labelled %q, not cold1", part.Label)
+	}
+
+	part, asked = signOnce(t, r, devices[1])
+	if asked == nil {
+		t.Fatal("cold2 has no command and no way to sign but the page, and the " +
+			"page was not asked")
+	}
+	if part.Label != "cold2" {
+		t.Errorf("the page's part is labelled %q, not cold2", part.Label)
+	}
+	if !strings.Contains(asked.Prompt, "device 2 of 2") {
+		t.Errorf("the question does not place cold2 in the round:\n%s", asked.Prompt)
+	}
+	if !strings.Contains(asked.Prompt, "cold1") {
+		t.Errorf("the question numbers cold2 second and never says what became of "+
+			"the first device, which reads as the page having lost one:\n%s",
+			asked.Prompt)
+	}
+}
+
+// TestTheTransportIsPerDeviceAndTheSameInBothRounds is the invariant this slice
+// was most able to break.
+//
+// internal/signers' package comment states it: the dress rehearsal's measurement
+// predicts the armed window only if the two rounds go through the same transport.
+// A rule that could answer differently the second time would make the measured
+// number a prediction about a round that never happened — and the round it
+// mispredicts is the one with n peers' clocks running.
+//
+// So the choice is read off the configuration once and indexed, never recomputed.
+// This drives both rounds and asserts the same device took the same transport in
+// each.
+func TestTheTransportIsPerDeviceAndTheSameInBothRounds(t *testing.T) {
+	r := aRun(t)
+	s, err := newSigners(r, mixedConfig(), testGate)
+	if err != nil {
+		t.Fatalf("newSigners: %v", err)
+	}
+
+	onThePage := map[string]map[string]bool{}
+	for _, round := range []string{"rehearsal", "batch"} {
+		onThePage[round] = map[string]bool{}
+		for _, dev := range s.Round(round) {
+			_, asked := signOnce(t, r, dev)
+			onThePage[round][dev.Label] = asked != nil
+		}
+	}
+
+	for _, label := range []string{"cold1", "cold2"} {
+		if onThePage["rehearsal"][label] != onThePage["batch"][label] {
+			t.Errorf("%s was on the page in one round and not the other "+
+				"(rehearsal: %v, batch: %v). The rehearsal measures a round; a "+
+				"device that changes transport between them makes that measurement "+
+				"a prediction about a round that never happened.",
+				label, onThePage["rehearsal"][label], onThePage["batch"][label])
+		}
+	}
+	if onThePage["batch"]["cold1"] {
+		t.Error("cold1 names a command and was asked on the page")
+	}
+	if !onThePage["batch"]["cold2"] {
+		t.Error("cold2 has no command and was not asked on the page")
+	}
+}
+
+// TestAnAllCommandRoundAsksThePageNothing, and TestAnAllPageRoundSaysNothing
+// About commands: the two ends of the rule, and the second is a copy guard.
+//
+// A round where every device names a command is a legitimate configuration and
+// the page is still where the run is started, watched and stopped — it just never
+// carries a packet. A round where none does is the ordinary case, and it must not
+// grow a paragraph explaining the absence of devices that are not absent.
+func TestAnAllCommandRoundAsksThePageNothing(t *testing.T) {
+	r := aRun(t)
+	s, err := newSigners(r, &config.Config{Signers: []config.Signer{
+		{Label: "cold1", Command: "cat"},
+		{Label: "cold2", Command: "cat"},
+	}}, testGate)
+	if err != nil {
+		t.Fatalf("newSigners: %v", err)
+	}
+	for _, dev := range s.Round("batch") {
+		if _, asked := signOnce(t, r, dev); asked != nil {
+			t.Errorf("%s names a command and was asked on the page:\n%s",
+				dev.Label, asked.Prompt)
+		}
+	}
+}
+
+func TestAnAllPageRoundSaysNothingAboutCommands(t *testing.T) {
+	r := aRun(t)
+	s, err := newSigners(r, &config.Config{Signers: []config.Signer{
+		{Label: "cold1"}, {Label: "cold2"},
+	}}, testGate)
+	if err != nil {
+		t.Fatalf("newSigners: %v", err)
+	}
+	for _, dev := range s.Round("batch") {
+		_, asked := signOnce(t, r, dev)
+		if asked == nil {
+			t.Fatalf("%s has no command and was not asked", dev.Label)
+		}
+		if strings.Contains(asked.Prompt, "Not every device in this round") {
+			t.Errorf("%s's question explains an absence on a round where every "+
+				"device is asked here:\n%s", dev.Label, asked.Prompt)
 		}
 	}
 }
