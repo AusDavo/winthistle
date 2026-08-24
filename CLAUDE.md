@@ -75,8 +75,21 @@ Signers return **partial** signatures; combining and finalizing happen in-app.
 No external party may ever hold a broadcastable transaction, or it could publish
 before the I-1 gate opens and defeat it from outside.
 
-Free for *m*-of-*n*. Impossible for single-sig, which therefore requires a
-genuinely air-gapped signer — enforce that in the UI, don't just document it.
+Free for *m*-of-*n*, and that is where the invariant is actually held: no single
+device ever holds enough signatures to broadcast.
+
+**Single-sig sits outside what this can enforce, and that is a decision rather
+than a gap.** A single-sig wallet that signs at all returns a complete
+transaction, so there is no partial-signature path to hold it up in — and
+"genuinely air-gapped" is a fact about a room, which no check in a program can
+establish. This clause used to end "enforce that in the UI, don't just document
+it", which asked for something unimplementable and then read, correctly, as an
+unmet requirement. It is the operator's call: single-sig runs work, nothing
+refuses one, and `README.md` says plainly that on single-sig the invariant rests
+on their setup rather than on a gate.
+
+That is a limit on I-2's reach, not a relaxation of it. Nothing here may hand a
+*multisig* signer enough to broadcast, and no mode may be added that does.
 
 ### I-3 · The TXID must not move after verification
 
