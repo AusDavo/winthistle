@@ -118,6 +118,22 @@ see "Held open" below.
    — and Phase 0's fee estimate uses the same client, so a dead one fails earlier
    and tests a different thing.
 
+**One decision is owed before the transports slice, and the triage got it
+wrong.** Review item 7 argues in-house QR "explicitly out of scope"; the triage
+originally accepted that as agreeing with this repo, on the grounds that
+`CLAUDE.md` lists animated QR as unbuilt. That conflated *unbuilt* with *not
+going to be built*. `CLAUDE.md`, this file's own missing list and item 4 of its
+build list, and `docs/design.html` all list animated QR — BBQr and
+`ur:crypto-psbt`, webcam capture on the return leg — as **planned**. So the review
+is arguing against a planned feature, not recording a settled one, and the triage
+entry is corrected to say so. Three coherent outcomes are written out there:
+keep the design's scope, take the review's middle (file transport plus
+display-only QR outbound, camera capture left to a browser), or take its
+conclusion and remove the QR paragraphs from the design rather than leaving them
+as an unbuilt promise. Whichever wins, the losing document changes in the same
+commit — an unbuilt feature promised in three places and argued out of scope in a
+fourth is exactly the drift this review turned out to be about.
+
 **Held open — set aside, not rejected.** Three ideas are deferred by David rather
 than settled, and a later pass must not quietly convert them into "no". A
 **pre-signed abort** (review item 5) is blocked on an invariant decision rather

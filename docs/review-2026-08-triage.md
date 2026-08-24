@@ -103,7 +103,7 @@ So item 1's acceptance clause "same checks available read-only via
 | 4 | **WRONG** (premise) | The web UI exists; `ratatui`/`crossterm` are Rust and this is Go; small real core survives |
 | 5 | **OPEN, held** | As specified it is a funding-transaction replacement authored by this repo, which the rejected list forbids — so it needs an invariant decision before a spec. Deliberately not closed; see *Held open* below |
 | 6 | **VALID** (6 of 8) | Real docs gaps; one bullet is wrong, one badly understates a stale claim |
-| 7 | **DONE** | Already out of scope and already agrees with `CLAUDE.md`; one docs sliver |
+| 7 | **CONFLICT** | It contradicts the design rather than agreeing with it — animated QR is planned, not out of scope. Needs a decision before the transports slice |
 | 8 | **WRONG** (artifact) / **DONE** (substance) | There is no run directory — it is SQLite — and "version it" is explicitly rejected by design |
 
 ---
@@ -346,13 +346,49 @@ and in one commit with `docs/design.html` — not arrived at via a spec.
 | Split the status blockquote | **VALID, and badly understated.** This is not a run-on to break in two: the clause is **false**. "the web interface described in the design does not exist yet" contradicts `internal/server`, and the command list omits `winthistle serve` entirely. Highest-value item in the document, and the reason the review under-reads the repo |
 | `print-macaroon-command` vs `make macaroon` | **VALID.** They are one door: the Makefile's `macaroon` target is literally `go run ./cmd/winthistle print-macaroon-command`. Cross-reference or drop one |
 
-### 7. In-house QR — **DONE**
+### 7. In-house QR — **CONFLICT with the design, and this entry had it backwards**
 
-Recorded as out of scope, and it agrees with the repo: nothing here does QR, and
-`CLAUDE.md` lists the transports (file up/down, animated QR) as unbuilt. The
-analysis is sound and no decision is needed.
+**Corrected 2026-08-24.** This entry previously read DONE, on the grounds that
+the review's "explicitly out of scope" agreed with the repo because "`CLAUDE.md`
+lists the transports (file up/down, animated QR) as unbuilt". That conflated
+*unbuilt* with *not going to be built*, which are opposites here. The three
+places that say what this build intends all list animated QR as **planned**:
 
-One sliver is **VALID** and belongs with item 6: state the contract, not the app
+- `CLAUDE.md`, in the status paragraph — "still missing are the transports (file
+  up/down, animated QR)"
+- `HANDOFF.md`, in the missing list and in item 4 of the build list — "animated
+  QR — BBQr and `ur:crypto-psbt` — with webcam capture on the return leg"
+- `docs/design.html` — "Base64 in and out, file download and upload, and animated
+  QR — BBQr and `ur:crypto-psbt` — with webcam capture on the return leg."
+
+So the review is not recording a settled decision, it is **arguing against a
+planned feature**, and it argues well: multipart is mandatory at 1–3 KB, which
+means BBQr *and* UR2.0 *and* SeedSigner's scheme, plus camera capture, frame
+reassembly and image dependencies — a large spend against "small enough to read
+end to end", to reimplement what Sparrow already does under more scrutiny. Its
+middle position is the interesting one: display-only QR is cheap (Unicode
+half-blocks, two modules per cell to cancel the cell aspect ratio) and covers the
+outbound half, while camera capture stays a browser problem.
+
+**This needs a decision before the transports slice starts, and it is not mine
+to make.** Three ways it can go, and each is coherent:
+
+1. **Keep the design's scope.** Build the file transport, then animated QR with
+   webcam capture. Most work, and it is what the design promised.
+2. **Take the review's middle.** File transport plus display-only QR outbound;
+   the return leg is a file or the operator's own bridge. Most of the value of QR
+   for the least surface, and it is honest about SeedSigner being the forcing case
+   it does not solve.
+3. **Take the review's conclusion.** File transport only, and the QR paragraphs
+   come *out* of `docs/design.html` and `CLAUDE.md` rather than sitting there as
+   an unbuilt promise.
+
+Whichever wins, the losing document has to change in the same commit. An unbuilt
+feature listed as planned in three places and argued out of scope in a fourth is
+the drift this whole review turned out to be about.
+
+One sliver is **VALID** regardless and belongs with item 6: state the contract,
+not the app
 — any wallet that round-trips BIP174 with the descriptor works. Naming Sparrow
 as the only path is wrong for SD-card signers and wrong for a headless
 deployment beside LND. Note this sits in slight tension with item 6's "which
@@ -420,6 +456,10 @@ scoped (4). What is left, cheapest-first:
 
 Not doing now, on the evidence above: 2b (built and tested), 8 as specified (no
 such artifact, and versioning is rejected by design).
+
+Needing a decision before the next slice, not work: **item 7**. The transports are
+next in the build order, and animated QR's scope is contradicted between the
+design and this review — see item 7 above for the three coherent ways it can go.
 
 ## Held open — set aside, not ruled out
 
