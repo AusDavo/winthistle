@@ -320,7 +320,11 @@ var registry = []Method{
 		Use:  InApp,
 		Ops:  []Op{{"offchain", "read"}},
 		Why: "abort.AbandonPending's own pending check — the protection it re-establishes " +
-			"before falling back to i_know_what_i_am_doing.",
+			"before falling back to i_know_what_i_am_doing. And peers.Check, which " +
+			"reads it for the opposite reason: a channel already pending with a " +
+			"batch peer spends the pending-channel slot step 2 needs, and a peer at " +
+			"LND's default of one has none left. Free to ask, and the alternative " +
+			"is learning it from accept_channel with the cold wallet out.",
 	},
 	{
 		Name: "/lnrpc.Lightning/UpdateChannelPolicy",

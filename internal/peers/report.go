@@ -21,9 +21,13 @@ func (f Facts) Summary() string {
 		return fmt.Sprintf("%s — %s, and not in this node's gossip graph",
 			name, f.Connection)
 	}
-	return fmt.Sprintf("%s — %s, %d channels, %s total, smallest %s",
+	line := fmt.Sprintf("%s — %s, %d channels, %s total, smallest %s",
 		name, f.Connection, f.NumChannels, prose.Sats(f.TotalCapacitySat),
 		prose.Sats(f.SmallestSat))
+	if n := len(f.Pending); n > 0 {
+		line += fmt.Sprintf(", %d already pending", n)
+	}
+	return line
 }
 
 // Report is the operator-facing text for one peer.
@@ -68,6 +72,10 @@ func (f Facts) Report() string {
 				"channels, looks exactly like this. It does mean there is no " +
 				"capacity evidence below, and the only way to learn what this " +
 				"peer accepts is to ask it — see the shim probe."))
+		// Last, not in the middle of the figures: this is interpretation, and
+		// for a peer the graph does not know it is the only interpretation there
+		// is.
+		b.WriteString(pendingSection(f))
 		return b.String()
 	}
 
@@ -99,6 +107,58 @@ func (f Facts) Report() string {
 				"accept_channel, and is published nowhere — so the figures above " +
 				"are the local graph's evidence and the probe is the answer."))
 	}
+	b.WriteString(pendingSection(f))
+	return b.String()
+}
+
+// pendingSection is what this node already has pending with the peer.
+//
+// It is the one figure in this report that is not evidence about somebody else's
+// policy — it is a fact about our own node, read for free. What it costs to
+// learn the hard way is a probe: a peer at its limit answers step 2 with
+// ErrMaxPendingChannels, which arrives as TooManyPending with the cold wallet
+// already out.
+func pendingSection(f Facts) string {
+	if !f.HasCompetingOpen() {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n")
+	b.WriteString(prose.Para(fmt.Sprintf(
+		"This node already has %d channel%s pending open with this peer, before "+
+			"the batch adds one. A peer running LND's default of one pending "+
+			"channel has no room left: handleFundingOpen counts its reservations "+
+			"for us plus its pending channels with us, and refuses past "+
+			"--maxpendingchannels. That refusal would arrive at step 2, on the "+
+			"peers' clock, with the cold wallet out.",
+		len(f.Pending), prose.Plural(len(f.Pending)))))
+	b.WriteString("\n")
+
+	for _, po := range f.Pending {
+		who := "the peer opened it"
+		if po.Ours {
+			who = "this node opened it"
+		}
+		if po.Private {
+			who += ", unannounced"
+		}
+		b.WriteString(fmt.Sprintf("  %s  (%s)\n", prose.Sats(po.CapacitySat), who))
+		// The outpoint on its own line at a small indent: 64 hex characters plus
+		// an index, and it is the string an operator pastes elsewhere.
+		b.WriteString("    " + po.ChannelPoint + "\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(prose.Para(
+		"This is a reason to look, not a refusal: --maxpendingchannels is the " +
+			"peer's own configuration and is published nowhere, so a peer that " +
+			"allows several will take this batch. Two things it cannot tell you. " +
+			"An empty answer is not proof of a free slot — AbandonChannel is " +
+			"local-only, so a channel this node abandoned is gone from this list " +
+			"while the peer still counts it, until 2016 blocks pass from its " +
+			"funding height. And one this node opened may be an earlier run of " +
+			"this tool that did not finish, which `winthistle recover` is for."))
 	return b.String()
 }
 

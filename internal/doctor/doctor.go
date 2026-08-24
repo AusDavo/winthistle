@@ -850,6 +850,23 @@ func checkPeers(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {
 				"answer costs one of the peer's pending-channel slots for eleven " +
 				"minutes.")
 		}
+		// Not in the switch above: a competing pending open is orthogonal to
+		// every case in it, and a peer can easily be both absent from the graph
+		// and already holding a channel from us.
+		if f.HasCompetingOpen() {
+			c.warn("    %d channel%s already pending open with this peer, before "+
+				"the batch adds one. Against a peer running LND's default of one "+
+				"pending channel there is no room left, and the refusal arrives at "+
+				"step 2 with the cold wallet out. Not a verdict: "+
+				"--maxpendingchannels is the peer's own and is published nowhere.",
+				len(f.Pending), prose.Plural(len(f.Pending)))
+			for _, po := range f.Pending {
+				c.say("      %s", po.ChannelPoint)
+			}
+			if anyOurs(f.Pending) {
+				c.fix("winthistle recover")
+			}
+		}
 	}
 	c.say("Nothing here is a verdict. The peer's minimum, its reserve and its " +
 		"accepted commitment type are enforced conversationally and published " +
@@ -963,6 +980,19 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 
 // pluralES is prose.Plural for a word that takes -es. "child" takes neither, so
 // this one carries the "ren" it needs.
+// anyOurs reports whether this node opened any of these pending channels, which
+// is what makes `winthistle recover` the right thing to suggest: a channel we
+// opened and did not finish is one this tool may be able to take apart, and one
+// the peer opened is not ours to touch.
+func anyOurs(pending []peers.PendingOpen) bool {
+	for _, po := range pending {
+		if po.Ours {
+			return true
+		}
+	}
+	return false
+}
+
 func pluralES(n int) string {
 	if n == 1 {
 		return ""

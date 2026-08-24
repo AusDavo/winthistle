@@ -116,6 +116,9 @@ type Client interface {
 
 	GetNodeInfo(ctx context.Context, in *lnrpc.NodeInfoRequest,
 		opts ...grpc.CallOption) (*lnrpc.NodeInfo, error)
+
+	PendingChannels(ctx context.Context, in *lnrpc.PendingChannelsRequest,
+		opts ...grpc.CallOption) (*lnrpc.PendingChannelsResponse, error)
 }
 
 // Want is one peer the batch means to open to.
@@ -173,6 +176,31 @@ func (c Connection) String() string {
 	}
 }
 
+// PendingOpen is a channel this node already has pending open with a peer the
+// batch means to open to.
+//
+// It is here because of what the peer does with it. handleFundingOpen counts its
+// live reservations for us *plus* its pending channels with no thaw height, and
+// refuses with ErrMaxPendingChannels once that count is at
+// --maxpendingchannels, whose default is 1. So one channel already pending with
+// a peer is, against a default peer, the whole of its budget for us — and the
+// batch's step 2 is refused on the clock, with the cold wallet out, for a reason
+// that was sitting in local state the entire time.
+type PendingOpen struct {
+	// ChannelPoint is the funding outpoint, as LND prints it.
+	ChannelPoint string
+
+	CapacitySat int64
+
+	// Ours is whether this node initiated the channel. Not a filter: the peer
+	// counts a pending channel against its limit whoever opened it. It is
+	// carried because it changes what the operator should do about it — one we
+	// opened may be an earlier run of this tool that did not finish.
+	Ours bool
+
+	Private bool
+}
+
 // Facts is everything the local graph and one connection attempt can say about
 // a peer. None of it is authoritative about what the peer will accept.
 type Facts struct {
@@ -204,6 +232,12 @@ type Facts struct {
 
 	Addresses  []string
 	LastUpdate time.Time
+
+	// Pending are the channels this node already has pending open with this
+	// peer, before the batch adds any. Free to read and, unlike everything else
+	// about what a peer will accept, not a proxy for anything — it is a fact
+	// about our own node. See HasCompetingOpen for what it is evidence of.
+	Pending []PendingOpen
 }
 
 // Usable reports whether this peer can be armed against at all: the key parses
@@ -218,6 +252,22 @@ func (f Facts) Usable() bool {
 func (f Facts) BelowSmallest() bool {
 	return f.InGraph && f.SmallestSat > 0 && f.Want.AmountSat < f.SmallestSat
 }
+
+// HasCompetingOpen reports whether this node already has a channel pending open
+// with this peer.
+//
+// A warning and never a refusal, for the same reason BelowSmallest is: the
+// peer's --maxpendingchannels is its own local configuration and is published
+// nowhere, so a peer that allows several will take this batch quite happily and
+// a hard gate here would refuse a batch that works.
+//
+// It has a blind spot worth stating, because it points the wrong way. This reads
+// *our* view of what is pending, and AbandonChannel is local-only — a channel
+// this node abandoned is gone from here while the peer still counts it, until
+// 2016 blocks pass from its funding height. So an empty answer is weaker than a
+// non-empty one: this can tell you that a slot is taken and cannot tell you that
+// one is free.
+func (f Facts) HasCompetingOpen() bool { return len(f.Pending) > 0 }
 
 // Check runs the free tiers for every peer: validate the key, connect if we are
 // not already, and read the local graph.
@@ -235,15 +285,21 @@ func Check(ctx context.Context, cli Client, wants []Want) ([]Facts, error) {
 	if err != nil {
 		return nil, err
 	}
+	pending, err := pendingByPeer(ctx, cli)
+	if err != nil {
+		return nil, err
+	}
 
 	out := make([]Facts, 0, len(wants))
 	for _, w := range wants {
-		out = append(out, check(ctx, cli, w, connected))
+		out = append(out, check(ctx, cli, w, connected, pending))
 	}
 	return out, nil
 }
 
-func check(ctx context.Context, cli Client, w Want, connected map[string]bool) Facts {
+func check(ctx context.Context, cli Client, w Want, connected map[string]bool,
+	pending map[string][]PendingOpen) Facts {
+
 	f := Facts{Want: w}
 
 	if err := ValidatePubkey(w.Pubkey); err != nil {
@@ -251,6 +307,10 @@ func check(ctx context.Context, cli Client, w Want, connected map[string]bool) F
 		return f
 	}
 	f.KeyOK = true
+	// Before the connection attempt and before the graph, because both of those
+	// have early returns and this fact is available for a peer that is neither
+	// reachable nor in the graph. It is about our node, not theirs.
+	f.Pending = pending[strings.ToLower(w.Pubkey)]
 
 	switch {
 	case connected[strings.ToLower(w.Pubkey)]:
@@ -335,6 +395,34 @@ func connectedSet(ctx context.Context, cli Client) (map[string]bool, error) {
 	out := make(map[string]bool, len(resp.GetPeers()))
 	for _, p := range resp.GetPeers() {
 		out[strings.ToLower(p.GetPubKey())] = true
+	}
+	return out, nil
+}
+
+// pendingByPeer groups this node's pending opens by the peer they are with.
+//
+// Asked once for the whole batch, like connectedSet, and for the same reason: n
+// identical answers to one question is n chances for them to disagree.
+//
+// Only pending_open_channels are counted. A channel that is pending *close* is
+// on its way out and does not hold an open slot, and one that is force-closing
+// is not pending open either — the same narrowing abort.isPendingOpen makes, for
+// the same reason.
+func pendingByPeer(ctx context.Context, cli Client) (map[string][]PendingOpen, error) {
+	resp, err := cli.PendingChannels(ctx, &lnrpc.PendingChannelsRequest{})
+	if err != nil {
+		return nil, fmt.Errorf("listing this node's pending channels: %w", err)
+	}
+	out := map[string][]PendingOpen{}
+	for _, p := range resp.GetPendingOpenChannels() {
+		ch := p.GetChannel()
+		key := strings.ToLower(ch.GetRemoteNodePub())
+		out[key] = append(out[key], PendingOpen{
+			ChannelPoint: ch.GetChannelPoint(),
+			CapacitySat:  ch.GetCapacity(),
+			Ours:         ch.GetInitiator() == lnrpc.Initiator_INITIATOR_LOCAL,
+			Private:      ch.GetPrivate(),
+		})
 	}
 	return out, nil
 }
