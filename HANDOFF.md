@@ -3026,13 +3026,31 @@ reproducible from this description in a few minutes, and the durable half of it 
    6. ~~The recovery screens~~ — done. `GET /recover` and `GET /recover/{id}`,
       read-only, needing nothing but the journal. Four decisions with guards, and
       seven defects out of rendering it; see "The journal's own screens".
-   7. **The remaining screens, and the two seams still waiting for a POST.** The
-      setup screen would give `setup.Ask` its route and the bump screen would
-      give `bump.Approve` its own; both adapters are built and unit tested and
-      neither has a caller, which is the one place written-but-uncalled code is
-      back. Then the peer reports, the fee report, the reserve report, the plan
-      document and the settlement report. Verbatim in a `<pre>` is v1 for every
-      one of them.
+   7. **The remaining screens, and the seam still waiting for a POST.** The
+      setup screen is **done** — `GET /setup`, `POST /setup`, and `setup.Ask`
+      has a caller for the first time. The bump screen would give
+      `bump.Approve` its own, and that adapter is still built, unit tested and
+      uncalled, which is the last of the written-but-uncalled code. Then the
+      peer reports, the fee report, the reserve report, the plan document and
+      the settlement report. Verbatim in a `<pre>` is v1 for every one of them.
+
+      **What the setup screen decided, since the next screen inherits it.**
+      Three things. First, it is `winthistle setup`'s **resume path only** and
+      nothing on the form could change that: a descriptor file needs a path, and
+      a path posted from a browser is a browser choosing which file this process
+      opens, imports and rescans against — so the install stays in the terminal
+      and the question, which is the half built to be asked twice, is what a
+      browser gets. Second, `server.Run` now carries a **`Kind`**, because a
+      setup goes in the same registry as a batch and almost every sentence a
+      screen says about a batch is false about a setup; four screens were saying
+      one of those sentences and a browser found all four. Third, it has **no
+      abort control**, and `/runs/{id}/abort` refuses for a run that is not a
+      batch: that control cancels an armed window with n shims, n pending
+      channels and Core's coin locks behind it, and a setup has two read-only
+      RPCs and a question. Its clock is not the gate either —
+      `webrun.AddressCheckWindow`, fifteen minutes, and it is not a safety bound
+      but how long the one-at-a-time slot is held while the operator is at a
+      safe.
 
       **Two things the recovery slice leaves for whoever does these.** First,
       `run.RecoverOne` still has no route and that is decision 3 rather than an

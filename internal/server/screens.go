@@ -43,6 +43,7 @@ type link struct {
 var nav = []link{
 	{"/", "overview"},
 	{"/doctor", "doctor"},
+	{"/setup", "setup"},
 	{"/recover", "recover"},
 }
 
@@ -138,9 +139,13 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 			case finished:
 				state = "finished"
 			}
-			fmt.Fprintf(&b, "<li><a href=\"/runs/%s\">%s</a> — started %s, %s</li>\n",
+			// What it is, as well as how it went. Two rows that differ only by id
+			// are two rows an operator cannot tell apart, and a setup and a batch
+			// are not remotely the same thing to attach to.
+			fmt.Fprintf(&b, "<li><a href=\"/runs/%s\">%s</a> — %s, started %s, %s</li>\n",
 				html.EscapeString(run.ID), html.EscapeString(run.ID),
-				run.Started.Format(time.RFC3339), html.EscapeString(state))
+				html.EscapeString(what(run)), run.Started.Format(time.RFC3339),
+				html.EscapeString(state))
 		}
 		b.WriteString("</ul>\n")
 	}
@@ -197,15 +202,42 @@ func (s *Server) startSection() string {
 	b.WriteString("<pre>" + html.EscapeString(s.opts.Launcher.Batch()) + "</pre>\n")
 
 	if live := s.Runs.Live(); live != nil {
-		b.WriteString("<pre>" + html.EscapeString(prose.Para(fmt.Sprintf(
-			"Run %s is going, so there is nothing to start. One at a time: there "+
-				"is one journal, one cold wallet and one armed window, and a second "+
-				"run's dress rehearsal would build a decoy over the coins this one "+
-				"is about to spend.", live.ID))) + "</pre>\n")
+		// Kind-aware, because the sentence underneath is about coin selection and
+		// only two batches collide over that. A setup reads descriptors and derives
+		// addresses; describing it as a decoy over these coins would be a false
+		// statement in operator copy on the first screen anybody sees.
+		b.WriteString("<pre>" + html.EscapeString(nothingToStart(live)) + "</pre>\n")
 		return b.String()
 	}
 	b.WriteString(startForm())
 	return b.String()
+}
+
+// what is one noun phrase for a run, for the list on the overview.
+//
+// Short on purpose: it sits inside a line that already carries an id, a
+// timestamp and a state.
+func what(r *Run) string {
+	if r.Kind == KindSetup {
+		return "a setup of " + r.About
+	}
+	return "the batch"
+}
+
+// nothingToStart is why the batch's control is absent, in the vocabulary of
+// whatever is actually going.
+func nothingToStart(live *Run) string {
+	if live.Kind != KindBatch {
+		return prose.Para(whatIsGoing(live) + ", so there is nothing to start " +
+			"here yet. One at a time: there is one journal and one cold wallet, and " +
+			"the operator a batch would ask to fetch m devices is the same operator " +
+			"that is waiting on. Nothing about it is armed and nothing in it is at " +
+			"risk.")
+	}
+	return prose.Para(fmt.Sprintf("Run %s is going, so there is nothing to "+
+		"start. One at a time: there is one journal, one cold wallet and one "+
+		"armed window, and a second run's dress rehearsal would build a decoy "+
+		"over the coins this one is about to spend.", live.ID))
 }
 
 func overview(cfgPath string) string {
@@ -275,7 +307,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	pending := run.Pending()
 
 	var text strings.Builder
-	fmt.Fprintf(&text, "run %s\n\nStarted %s.\n", run.ID,
+	fmt.Fprintf(&text, "%s\n\nStarted %s.\n", heading(run),
 		run.Started.Format(time.RFC3339))
 	switch {
 	case finished && err != nil:
@@ -287,12 +319,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 			"unwinding: cancelling the shims, abandoning what reached pending, "+
 			"releasing Core's coin locks. Reload to see how far it has got."))
 	case pending != nil:
-		text.WriteString("\n" + prose.Para(fmt.Sprintf("It is waiting on you. "+
-			"Answer below, before %s — that is the %s signing gate, not a timeout "+
-			"of this page's, and letting it pass costs one more signing round "+
-			"rather than anything that was at risk.",
-			pending.Deadline.Format(time.TimeOnly),
-			pending.Deadline.Sub(pending.Asked).Round(time.Second))))
+		text.WriteString("\n" + waitingOn(run, pending))
 	default:
 		text.WriteString("\n" + prose.Para("It is still going. Reload to see more; "+
 			"closing this tab does not stop it."))
@@ -305,7 +332,20 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	// the end of it is a receipt count nobody finds. The order is deliberate the
 	// other way round from the transcript's own — what the run is *waiting on*
 	// still goes last, next to the form that answers it.
-	text.WriteString("\n" + s.progressBlock(id))
+	//
+	// A batch only, because the receipt count is a batch's. A setup opens no
+	// channel and a bump's channels are already funded, so there is no number
+	// there for I-1 to turn on — and asking for one would be asking the journal
+	// about an id it has never had.
+	if run.Kind == KindBatch {
+		text.WriteString("\n" + s.progressBlock(id))
+	}
+	// Above the transcript, with the rest of what this screen knows about the run
+	// rather than below a transcript that grows without bound. It answers "what
+	// can I do here", which is a question asked on arrival.
+	if !finished && run.Kind != KindBatch {
+		text.WriteString("\n" + wayOut())
+	}
 	text.WriteString("\n" + transcript)
 	if pending != nil {
 		text.WriteString("\n" + pending.Prompt)
@@ -315,16 +355,101 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	// both go through screen(), which is what keeps decision 3's oracle over
 	// strings this repository did not choose — and then the controls.
 	var b strings.Builder
-	b.WriteString(screen("run "+run.ID, "", text.String()))
+	b.WriteString(screen(title(run), "", text.String()))
 	if pending != nil {
 		b.WriteString(questionForm(run.ID, pending))
 	}
-	if !finished {
+	if !finished && run.Kind == KindBatch {
 		// The abort control decision 2 makes mandatory: if a closed tab does not
 		// stop a run, something has to, and it is a link to a screen that says
 		// what stopping costs rather than a button that does it on one click.
+		//
+		// A batch only. What that control cancels is an armed window with n shims,
+		// n pending channels and Core's coin locks behind it, and the screen behind
+		// it says so in three paragraphs; a setup and a bump have none of those and
+		// each has its own way out, which wayOut states above instead. Offering
+		// this on them would be offering a teardown of nothing, described as a
+		// teardown of a batch.
 		fmt.Fprintf(&b, "<p><a href=\"/runs/%s/abort\">stop this run</a></p>\n",
 			html.EscapeString(run.ID))
 	}
 	serve(w, b.String())
+}
+
+// heading is the first line of a run's screen, in the vocabulary of whichever of
+// the three things it is.
+//
+// A batch keeps "run %s" exactly, because that id is the journal's and every
+// other screen in this UI already calls it that. A setup says what it is about as
+// well, because its id is this process's alone and nothing else on the page
+// carries the wallet's name until the question arrives.
+//
+// It leads with the id rather than with the description, and that is a render
+// fix rather than a preference: webrun's own prompt opens with "The cold wallet's
+// setup — <wallet>", so a heading phrased the same way put the identical line on
+// the screen twice with a paragraph between them.
+func heading(r *Run) string {
+	switch r.Kind {
+	case KindSetup:
+		return fmt.Sprintf("run %s — a setup of the cold wallet %s", r.ID, r.About)
+	default:
+		return "run " + r.ID
+	}
+}
+
+// title is the browser tab's, which is a different job from heading's: it has one
+// line and no room to explain, and an operator with three tabs open is choosing
+// between them by the first few words.
+func title(r *Run) string {
+	switch r.Kind {
+	case KindSetup:
+		return "setup " + r.ID
+	default:
+		return "run " + r.ID
+	}
+}
+
+// waitingOn is the clock sentence over a pending question, and there are two
+// clocks rather than one.
+//
+// A batch's is the signing gate — limits.abort_after_signing_seconds, the number
+// rehearsal.Gate measures a round against — and letting it pass costs one more
+// signing round. A setup's is not a gate at all: nothing is armed, no peer is
+// waiting, and letting it pass records nothing, which is the same verdict its
+// third button gives. Calling the second one a signing gate would name a
+// mechanism that is not running.
+func waitingOn(r *Run, q *Question) string {
+	left := q.Deadline.Sub(q.Asked).Round(time.Second)
+	if r.Kind == KindSetup {
+		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+			"%s: this question is held open for %s, and that is not a gate on "+
+			"anything — nothing is armed and no peer knows this is happening. "+
+			"Letting it pass records nothing at all, which is exactly what the "+
+			"third button records.",
+			q.Deadline.Format(time.TimeOnly), left))
+	}
+	return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before %s "+
+		"— that is the %s signing gate, not a timeout of this page's, and letting "+
+		"it pass costs one more signing round rather than anything that was at "+
+		"risk.", q.Deadline.Format(time.TimeOnly), left))
+}
+
+// wayOut is what to do instead of the abort control, for the two kinds that do
+// not have one.
+//
+// Written rather than omitted, because decision 2's own argument applies to every
+// kind: a closing tab stops nothing, so the operator needs to be told what does.
+// The difference is that here the answer is a button already on the screen rather
+// than a control that cancels a context.
+//
+// It says only what this screen knows and webrun's prompt does not. The prompt
+// already explains, at length, that the third button records nothing and that the
+// addresses are there tomorrow; repeating either was a duplication a browser
+// showed and no test would have.
+func wayOut() string {
+	return prose.Para("There is no control on this screen that stops a setup, and " +
+		"there is nothing for one to stop. A batch run has that control because it " +
+		"has funding shims open, channels that reached pending and coin locks Core " +
+		"is holding; this has two read-only RPCs and a question. Every way of not " +
+		"answering it ends the same: nothing recorded.")
 }

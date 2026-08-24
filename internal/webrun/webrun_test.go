@@ -26,7 +26,7 @@ import (
 // aRun is a server.Run to ask questions of.
 func aRun(t *testing.T) *server.Run {
 	t.Helper()
-	r, err := server.NewRegistry().Start("run-1", func() {})
+	r, err := server.NewRegistry().Start("run-1", server.KindBatch, "", func() {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}

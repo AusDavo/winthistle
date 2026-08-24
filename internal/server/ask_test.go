@@ -59,7 +59,7 @@ func post(t *testing.T, s *Server, path string, form url.Values) *http.Request {
 // until the process died.
 func TestAQuestionWithNoClockIsRefused(t *testing.T) {
 	r := NewRegistry()
-	run, err := r.Start("run-1", func() {})
+	run, err := r.Start("run-1", KindBatch, "", func() {})
 	if err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestAQuestionWithNoClockIsRefused(t *testing.T) {
 // is run.Do blocked forever on a channel nobody will write to, with n peers
 // holding reservations.
 func TestAnUnansweredQuestionExpiresRatherThanHanging(t *testing.T) {
-	run, _ := NewRegistry().Start("run-1", func() {})
+	run, _ := NewRegistry().Start("run-1", KindBatch, "", func() {})
 
 	start := time.Now()
 	_, err := run.Ask(context.Background(), Question{
@@ -100,7 +100,7 @@ func TestAnUnansweredQuestionExpiresRatherThanHanging(t *testing.T) {
 // be asked after the budget is gone. That is not a race to lose; it is a fact to
 // report.
 func TestADeadlineAlreadyPastIsToldTheRoundIsOver(t *testing.T) {
-	run, _ := NewRegistry().Start("run-1", func() {})
+	run, _ := NewRegistry().Start("run-1", KindBatch, "", func() {})
 	_, err := run.Ask(context.Background(), Question{
 		Prompt:   "well?",
 		Deadline: time.Now().Add(-time.Minute),
@@ -114,7 +114,7 @@ func TestADeadlineAlreadyPastIsToldTheRoundIsOver(t *testing.T) {
 // a question open at that moment has to come back rather than hold the teardown.
 func TestACancelledRunStopsAsking(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
-	run, _ := NewRegistry().Start("run-1", cancel)
+	run, _ := NewRegistry().Start("run-1", KindBatch, "", cancel)
 
 	go func() {
 		awaitPending(t, run)

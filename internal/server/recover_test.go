@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/AusDavo/winthistle/internal/prose"
 )
@@ -252,6 +253,13 @@ func TestTheJournalScreensGoThroughTheChokepoint(t *testing.T) {
 //
 // Runes, not bytes. A byte count reads every em dash as three columns, which is
 // worse than no check because it gets fixed by widening the pane.
+// aQuestion is a pending question with the clock a screen renders, and nothing
+// else: waitingOn reads only Asked and Deadline.
+func aQuestion() *Question {
+	asked := time.Date(2026, 8, 24, 19, 30, 12, 0, time.UTC)
+	return &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute)}
+}
+
 func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 	live := &Run{ID: "20260824-193012-9f3a1c"}
 	refusal := errors.New("run 20260824-193012-9f3a1c is publishing and funds 3 " +
@@ -270,17 +278,33 @@ func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 		"unwinding":           unwinding(live.ID),
 		"still unwinding":     stillUnwinding(live.ID),
 
+		"setup intro":             setupIntro("winthistle-cold"),
+		"setup busy":              setupBusy(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
+		"setup refused":           setupRefused(ErrRunInFlight, live),
+		"no setup":                noSetup(),
+		"not a batch":             notABatch(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
+		"the way out":             wayOut(),
+		"waiting, batch":          waitingOn(live, aQuestion()),
+		"waiting, setup":          waitingOn(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}, aQuestion()),
+		"nothing to start, batch": nothingToStart(live),
+		"nothing to start, setup": nothingToStart(
+			&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+		"heading, batch": heading(live),
+		"heading, setup": heading(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+
 		"journal note, nothing running": journalNote(nil, nil),
 		"journal note, run listed": journalNote(live,
 			[]string{live.ID, "20260824-1930"}),
 		"journal note, run not listed": journalNote(live, nil),
-		"journalled note, live":        journalledNote(live.ID, live),
-		"journalled note, not live":    journalledNote(live.ID, nil),
-		"read-only note":               readOnlyNote(live.ID, nil),
-		"read-only note, refused":      readOnlyNote(live.ID, refusal),
-		"no such journalled run":       noSuchJournalledRun(live.ID),
-		"no journal":                   noJournal(),
-		"journal unreadable":           journalUnreadable(refusal),
+		"journal note, setup running": journalNote(
+			&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}, nil),
+		"journalled note, live":     journalledNote(live.ID, live),
+		"journalled note, not live": journalledNote(live.ID, nil),
+		"read-only note":            readOnlyNote(live.ID, nil),
+		"read-only note, refused":   readOnlyNote(live.ID, refusal),
+		"no such journalled run":    noSuchJournalledRun(live.ID),
+		"no journal":                noJournal(),
+		"journal unreadable":        journalUnreadable(refusal),
 	}
 	for name, text := range screens {
 		for i, line := range strings.Split(text, "\n") {

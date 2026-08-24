@@ -87,7 +87,7 @@ func (s *Server) startRun(w http.ResponseWriter, r *http.Request) {
 	// happens to this connection can end it.
 	ctx, cancel := context.WithCancel(s.base())
 
-	run, err := s.Runs.Start(id, cancel)
+	run, err := s.Runs.Start(id, KindBatch, "", cancel)
 	if err != nil {
 		cancel()
 		code := http.StatusInternalServerError
@@ -243,6 +243,11 @@ func (s *Server) abortScreen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if run.Kind != KindBatch {
+		s.refuseRunScreen(w, http.StatusNotFound, id, notABatch(run))
+		return
+	}
+
 	if why := s.abortRefusal(id); why != nil {
 		w.WriteHeader(http.StatusConflict)
 		serve(w, screen("stop run "+id, "", abortRefused(id, why)))
@@ -285,6 +290,10 @@ func (s *Server) abortRun(w http.ResponseWriter, r *http.Request) {
 	run := s.Runs.Get(id)
 	if run == nil {
 		s.noSuchRun(w, id)
+		return
+	}
+	if run.Kind != KindBatch {
+		s.refuseRunScreen(w, http.StatusNotFound, id, notABatch(run))
 		return
 	}
 	if why := s.abortRefusal(id); why != nil {
@@ -435,10 +444,30 @@ func noBatch() string {
 		"`winthistle example-batch` prints one to start from.")
 }
 
+// alreadyRunning is the second concurrent run, refused.
+//
+// The middle paragraph used to be unconditional, and it was a false statement in
+// operator copy the moment the registry grew a second Kind: two *batches* collide
+// over coin selection, and a setup or a bump colliding with a batch does not. So
+// the collision that could actually have happened is the one described, and
+// whatIsGoing names the run in its own vocabulary.
 func alreadyRunning(err error, live *Run) string {
 	var b strings.Builder
 	b.WriteString(prose.Para("Nothing was started: " + err.Error() + "."))
 	b.WriteString("\n")
+
+	if live != nil && live.Kind != KindBatch {
+		b.WriteString(prose.Para(whatIsGoing(live) + ". One at a time, on " +
+			"purpose: there is one journal and one cold wallet, and the operator a " +
+			"batch would ask to fetch m devices is the same operator that is " +
+			"waiting on."))
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf("It is at /runs/%s. Nothing about it "+
+			"is armed and nothing is at risk in it — when it is done, this batch "+
+			"can be started here.", live.ID)))
+		return b.String()
+	}
+
 	b.WriteString(prose.Para("One at a time, on purpose. There is one journal, " +
 		"one cold wallet and one armed window, and the place two runs collide is " +
 		"the expensive one: the second run's dress rehearsal builds a decoy over " +
@@ -451,6 +480,29 @@ func alreadyRunning(err error, live *Run) string {
 			"Attach to it, or stop it there — closing a tab does not stop anything.",
 			live.ID)))
 	}
+	return b.String()
+}
+
+// notABatch is /runs/{id}/abort for a run that is not a batch.
+//
+// The URL is reachable by hand and by a bookmark from an earlier run, and the
+// screen behind it describes cancelling shims, abandoning pending channels and
+// releasing coin locks — three things a setup has none of. So it refuses rather
+// than renders, and it says what the way out actually is, which is the same
+// sentence the run screen carries above the form.
+func notABatch(r *Run) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "run %s cannot be stopped here\n\n", r.ID)
+	b.WriteString(prose.Para("This control cancels a batch, and run " + r.ID +
+		" is not one: it is a setup of the cold wallet " + r.About + ". The screen " +
+		"behind this link would have offered to cancel funding shims, abandon " +
+		"channels that reached pending and release Core's coin locks, and a setup " +
+		"has none of those — it has read two RPCs and it is waiting on a person."))
+	b.WriteString("\n")
+	b.WriteString(prose.Para("Nothing about a setup needs stopping. What is " +
+		"outstanding is a question, and every way of not answering it — the third " +
+		"button, closing the tab, letting the window pass — records nothing at " +
+		"all. The link below goes back to it."))
 	return b.String()
 }
 

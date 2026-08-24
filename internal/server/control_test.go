@@ -17,10 +17,12 @@ import (
 // about decision 2 is an assertion about the context that arrived here.
 type stubLauncher struct {
 	batch   string
+	wallet  string
 	refusal error
 
 	mu      sync.Mutex
 	started int
+	setups  int
 	ctx     context.Context
 	req     StartRequest
 
@@ -42,7 +44,30 @@ type stubLauncher struct {
 	progress map[string]string
 }
 
-func (l *stubLauncher) Batch() string { return l.batch }
+func (l *stubLauncher) Batch() string  { return l.batch }
+func (l *stubLauncher) Wallet() string { return l.wallet }
+
+// StartSetup is the setup screen's seam, stubbed the way Start is: it says one
+// thing into the transcript and then blocks on the same channel, so a test can
+// hold a setup open and watch what the registry and the screens do about it.
+func (l *stubLauncher) StartSetup(ctx context.Context, r *Run) error {
+	l.mu.Lock()
+	l.setups++
+	l.ctx = ctx
+	block := l.block
+	l.mu.Unlock()
+
+	r.Write([]byte("Reading the descriptors " + l.wallet + " holds\n"))
+	if block == nil {
+		return l.err
+	}
+	select {
+	case <-block:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return l.err
+}
 
 func (l *stubLauncher) Start(ctx context.Context, r *Run, req StartRequest) error {
 	l.mu.Lock()

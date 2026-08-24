@@ -24,6 +24,8 @@
 //     returns NotAnswered — and setup.Do, which returns before RecordSetup on
 //     NotAnswered and is the only writer of the setups table. internal/server
 //     cannot reach that table at all: it may not import internal/journal.
+//     Its clock is the one exception to the section below: see
+//     AddressCheckWindow.
 //   - abort.Confirmation — false, which is what a nil Confirmation means: never
 //     escalate to i_know_what_i_am_doing. It costs an abort that has to be
 //     finished by hand, which is the cheap side of that trade.
@@ -36,8 +38,8 @@
 //
 // # The clock is the 5:00 gate, and it is the round's
 //
-// limits.abort_after_signing_seconds, and not the peers' ten minutes. The
-// difference is not stylistic:
+// For every seam a batch has: limits.abort_after_signing_seconds, and not the
+// peers' ten minutes. The difference is not stylistic:
 //
 //   - the gate is ours. We set it, rehearsal.Gate measures against it, and it is
 //     therefore a number this code may enforce.
@@ -67,6 +69,7 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
+	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
@@ -122,6 +125,28 @@ func (l *Launcher) gate() time.Duration {
 	return config.DefaultAbortAfter
 }
 
+// AddressCheckWindow is how long a browser-driven setup holds its question open.
+//
+// It is deliberately not the gate, and the reason is that it is not a safety
+// bound at all. Every other deadline in this package is carved out of
+// limits.abort_after_signing_seconds because a signing round has peers holding
+// reservations against outpoints and a clock that is running whether or not
+// anybody is ready. The address check has none of that: nothing is armed, no peer
+// knows it is happening, and letting it lapse records nothing — the same verdict
+// its own third button records.
+//
+// So the only thing this number bounds is how long the registry's one-at-a-time
+// slot is held while the operator is at the safe. It has to be long enough that
+// walking to a hardware wallet and reading five addresses off it is not a race,
+// because that walk is the entire reason setup.Answer has three values and the
+// command is re-runnable. It has to be short enough that a tab abandoned at this
+// question frees the slot before somebody gives up on the UI and reaches for the
+// terminal.
+//
+// Fifteen minutes, and nothing is lost by it passing: deriveaddresses has no side
+// effect, so the same addresses are there on the next click.
+const AddressCheckWindow = 15 * time.Minute
+
 // Start drives one run to completion.
 //
 // The connections are opened here rather than when the server started, because
@@ -164,6 +189,79 @@ func (l *Launcher) Start(ctx context.Context, r *server.Run, req server.StartReq
 		Probe:             req.Probe,
 		StopBeforePublish: req.StopBeforePublish,
 	})
+	return err
+}
+
+// Wallet is the cold wallet's name, from winthistle.toml's [bitcoind] wallet.
+//
+// The one place the name comes from, for the reason setup.Options.WalletName is
+// that field rather than a flag of its own: the wallet a setup questions has to
+// be the wallet a run will spend from, and a second place to name it is a second
+// thing to get wrong.
+func (l *Launcher) Wallet() string { return l.cfg.Bitcoind.Wallet }
+
+// StartSetup drives `winthistle setup`'s resume path and gives setup.Ask its
+// first caller.
+//
+// # The resume path, and there is no parameter that could make it the other one
+//
+// setup.Options.Descriptors is nil here and nothing can set it. The install path
+// needs an operator's descriptor file, a file needs a path, and a path that came
+// in over HTTP is a browser choosing which file this process opens and imports —
+// so `winthistle setup --descriptors FILE` stays in the terminal, where the
+// operator names their own file. What is left is coldwallet.Read and
+// coldwallet.DeriveCheck, which have no side effect at all, and the question,
+// which is the half built to be asked twice.
+//
+// It also means nothing here blocks for a rescan. importdescriptors is minutes
+// to hours on mainnet and would hold the registry's one-at-a-time slot for all
+// of it; the resume path is a handful of local RPCs.
+//
+// # Core only, and the clients are opened here
+//
+// No LND: setting up the cold wallet has no channel, no peer and no macaroon in
+// it, so this works on a machine where the node is down — which is the same
+// reason setup.Deps has no LND field. Node has no wallet scope, for
+// getdescriptorinfo and deriveaddresses; Wallet is bound to the wallet being
+// questioned.
+//
+// Opened here rather than held from New, for the reason Unfinished's journal is:
+// `winthistle serve` has to start on a machine where nothing else is up, and a
+// journal held open across a serving session is a write lock held against
+// `winthistle recover` in another terminal.
+func (l *Launcher) StartSetup(ctx context.Context, r *server.Run) error {
+	if l.cfg.Bitcoind.Wallet == "" {
+		return errors.New("there is no cold wallet to question: name it as " +
+			"[bitcoind] wallet in winthistle.toml. It is that key rather than a " +
+			"field on the page because the wallet a setup questions has to be the " +
+			"wallet a batch will spend from")
+	}
+
+	nodeCfg := l.cfg.Bitcoind
+	nodeCfg.Wallet = ""
+	node, err := bitcoind.New(nodeCfg)
+	if err != nil {
+		return err
+	}
+	wallet, err := bitcoind.New(l.cfg.Bitcoind)
+	if err != nil {
+		return err
+	}
+
+	j, err := journal.Open(ctx, l.cfg.Server.Journal)
+	if err != nil {
+		return fmt.Errorf("opening the run journal at %s: %w",
+			l.cfg.Server.Journal, err)
+	}
+	defer j.Close()
+
+	_, err = setup.Do(ctx, setup.Deps{
+		Node:    node,
+		Wallet:  wallet,
+		Journal: j,
+		Out:     r,
+		Ask:     Ask(r, AddressCheckWindow),
+	}, setup.Options{WalletName: l.cfg.Bitcoind.Wallet})
 	return err
 }
 
@@ -518,7 +616,9 @@ func Approve(r *server.Run, gate time.Duration) func(context.Context, string) (b
 // line: a stray keypress cannot confirm a wallet nobody looked at, and it cannot
 // condemn a working one either.
 //
-// Its POST arrives with the setup screen, item 1.6.
+// It has a caller now: StartSetup, behind POST /setup. That route is the resume
+// path only — no descriptor file crosses the HTTP boundary — so the question this
+// asks is always about descriptors Core already holds.
 func Ask(r *server.Run, gate time.Duration) func(context.Context, coldwallet.AddressCheck) (setup.Answer, error) {
 	return func(ctx context.Context, c coldwallet.AddressCheck) (setup.Answer, error) {
 		a, err := r.Ask(ctx, server.Question{

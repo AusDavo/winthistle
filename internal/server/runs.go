@@ -11,8 +11,12 @@ import (
 	"time"
 )
 
-// Registry is every run this process is driving, addressed by the journal's run
-// id.
+// Registry is every run this process is driving, addressed by an id this
+// process minted.
+//
+// For a batch that id is also the journal's run id; for the other Kinds it is
+// nothing but this registry's key — see Kind for why that asymmetry is stated
+// rather than smoothed over.
 //
 // This type is the guard on decision 2: a closing browser tab does not abort a
 // run, so a run cannot live in a connection. It lives here, and a tab is only
@@ -66,7 +70,9 @@ func NewRegistry() *Registry {
 // cancel is what the explicit abort control calls, and it must cancel the
 // context the run was started with — not a request's. Nothing else in this
 // package holds it.
-func (reg *Registry) Start(id string, cancel func()) (*Run, error) {
+func (reg *Registry) Start(id string, kind Kind, about string,
+	cancel func()) (*Run, error) {
+
 	reg.mu.Lock()
 	defer reg.mu.Unlock()
 
@@ -79,18 +85,57 @@ func (reg *Registry) Start(id string, cancel func()) (*Run, error) {
 		return nil, fmt.Errorf("run %s is already in this registry", id)
 	}
 
-	r := reg.add(id)
+	r := reg.addKind(id, kind, about)
 	r.cancel = cancel
 	return r, nil
 }
 
+// Kind is which of the things a run in this registry is doing.
+//
+// The registry exists because internal/webrun's adapters ask their questions
+// through a *Run — that is the only way a browser answers a blocking callback
+// seam — and three of this build's commands have such a seam. So a setup goes in
+// here beside a batch, and `winthistle bump` will when it gets its screen. The
+// difference has to be readable from the run, because almost every sentence a
+// screen says about a batch is false about a setup: it opens no channel, holds no
+// reservation, and has no armed window to be taken apart.
+//
+// KindBatch is the zero value, which is right for the constructor tests use and
+// is not a default anything in production leans on: Start takes the kind, so
+// every production run states which it is.
+//
+// This is deliberately not the journal's vocabulary. A batch run's id is the
+// journal's run id; a setup writes a setups row keyed by the wallet and no run
+// row at all. So a setup's id is this process's alone, /recover/{that id} has
+// nothing, and the screens say so instead of implying a row that will never be
+// written.
+type Kind int
+
+const (
+	// KindBatch is `winthistle run`: the batch, its dress rehearsal, its armed
+	// window and its abort path. The only kind with an abort control, because it
+	// is the only kind with something to take apart.
+	KindBatch Kind = iota
+
+	// KindSetup is `winthistle setup`'s resume path: derive the cold wallet's
+	// addresses and ask a human whether they match. Nothing is created, nothing
+	// is spent, and the way out is the third button.
+	KindSetup
+)
+
 // ErrRunInFlight is the second concurrent run, refused. See "One run at a time".
 var ErrRunInFlight = errors.New("one run at a time")
 
-// add is the unguarded constructor. Start is the only production route to it:
-// the guard is a property of the registry, so it lives on the way in.
-func (reg *Registry) add(id string) *Run {
-	r := &Run{ID: id, Started: time.Now()}
+// add is the unguarded constructor for a batch run. Start is the only
+// production route to it: the guard is a property of the registry, so it lives
+// on the way in.
+func (reg *Registry) add(id string) *Run { return reg.addKind(id, KindBatch, "") }
+
+// addKind is add for the other things this registry drives. Kind and About are
+// filled before the run is in the map, because List reads a run the moment it is
+// there and neither field is ever written again.
+func (reg *Registry) addKind(id string, kind Kind, about string) *Run {
+	r := &Run{ID: id, Kind: kind, About: about, Started: time.Now()}
 	reg.runs[id] = r
 	return r
 }
@@ -142,6 +187,15 @@ func (reg *Registry) List() []*Run {
 type Run struct {
 	ID      string
 	Started time.Time
+
+	// Kind is which of the things this run is doing, and About is what makes it
+	// identifiable: the cold wallet a setup is questioning. Empty for a batch,
+	// whose own id is already the journal's.
+	//
+	// Both are set once, before this run is in the registry's map, and never
+	// written again — so a screen may read them without the mutex.
+	Kind  Kind
+	About string
 
 	mu       sync.Mutex
 	said     strings.Builder
@@ -221,6 +275,31 @@ type Launcher interface {
 	// Start drives one run to completion and blocks until it is done. The
 	// context is the server's, never a request's.
 	Start(ctx context.Context, r *Run, req StartRequest) error
+
+	// Wallet is the cold wallet's name, from winthistle.toml's [bitcoind]
+	// wallet. Empty means this server cannot run a setup, and the screen says
+	// so rather than offering a control that would fail.
+	//
+	// It is the launcher's rather than read from this package's own config for
+	// the reason Batch is: one thing owns what a run would be against, so a
+	// screen cannot name a wallet a setup would not question.
+	Wallet() string
+
+	// StartSetup drives `winthistle setup`'s resume path and blocks until it is
+	// done: read the descriptors the wallet holds, derive their addresses, and
+	// ask a human whether they match.
+	//
+	// The resume path only, and there is no parameter that would change that.
+	// Installing descriptors needs a file, a file needs a path, and a path
+	// posted from a browser is a browser choosing which file this process reads
+	// — so the install stays on the command line, where the operator names the
+	// file themselves. What a browser is for is the question, which is the half
+	// that has to be asked twice.
+	//
+	// The context is the server's, never a request's, for the reason Start's is.
+	// Nothing here is armed, but a comparison the operator is in the middle of
+	// making must not be cancelled by a reload.
+	StartSetup(ctx context.Context, r *Run) error
 
 	// AbortRefusal says why this run must not be aborted, or nil.
 	//

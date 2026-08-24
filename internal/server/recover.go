@@ -204,6 +204,21 @@ func journalNote(live *Run, ids []string) string {
 		return b.String()
 	}
 
+	// A live run that is not a batch will never be in this list, and saying it
+	// has "not written a row yet" would imply one is coming. A setup writes a
+	// setups row keyed by the wallet and no run row at all, so the honest thing
+	// is to say the list below is complete and name the other thing that is going.
+	if live.Kind != KindBatch {
+		b.WriteString(prose.Para(whatIsGoing(live) + ", and it will never appear " +
+			"in the list below: a setup records its answer against the wallet " +
+			"rather than as a run, so it has no run row to be unfinished. What is " +
+			"below is the runs, and it is complete."))
+		b.WriteString("\n")
+		b.WriteString(prose.Para(fmt.Sprintf("That setup is at /runs/%s. Nothing "+
+			"about it is armed, and nothing below is happening.", live.ID)))
+		return b.String()
+	}
+
 	if inList(live.ID, ids) {
 		b.WriteString(prose.Para(fmt.Sprintf(
 			"Run %s is going in this process right now, and it is in the list "+

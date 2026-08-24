@@ -13,11 +13,16 @@
 // bitcoind's JSON-RPC client, which is a client, so the security shape below had
 // no precedent to follow and is the part that had to be right first.
 //
-// It now serves five screens and the three unsafe methods that let an operator
-// open a batch from a browser: start a run, answer the four questions a run
-// asks, and stop one. What it cannot do is publish — see the guard on decision 1
-// — and what it does not do yet is the transports, the countdown and the
-// remaining screens.
+// It now serves six screens and the four unsafe methods behind them: start a
+// batch, start a setup of the cold wallet, answer the questions either of them
+// asks, and stop a batch. What it cannot do is publish — see the guard on
+// decision 1 — and what it does not do yet is the bump screen, mixing transports
+// per device, and the five reports.
+//
+// The newest is the setup screen, which is what finally gave webrun.Ask a caller.
+// It is the resume path only: no descriptor file crosses this boundary, because a
+// path posted from a browser is a browser choosing which file this process opens
+// and imports. setup.go is where that decision and its guard are written down.
 //
 // The two newest screens are the journal's, under /recover, and they are the
 // only ones that work on a node that is down. They are also read-only, on
@@ -252,6 +257,13 @@ func New(cfg *config.Config, opts Options) (*Server, error) {
 func (s *Server) routes() {
 	s.mux.HandleFunc("GET /{$}", s.index)
 	s.mux.HandleFunc("GET /doctor", s.doctor)
+
+	// The cold wallet's setup: the screen, and the POST that gives setup.Ask its
+	// first caller. It is the resume path only — no descriptor file crosses this
+	// boundary, because a path posted from a browser is a browser choosing which
+	// file this process reads. See setup.go.
+	s.mux.HandleFunc("GET /setup", s.setupScreen)
+	s.mux.HandleFunc("POST /setup", s.startSetup)
 	s.mux.HandleFunc("GET /runs/{id}", s.attach)
 
 	// The file transport's outbound leg. A GET, because it reads: the packet is
