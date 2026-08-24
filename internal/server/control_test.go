@@ -36,6 +36,10 @@ type stubLauncher struct {
 	ids        []string
 	journalled map[string]string
 	journalErr error
+
+	// progress is what the attach screen's state block renders, per run id. A
+	// run absent from it has journalled nothing, which is ordinary.
+	progress map[string]string
 }
 
 func (l *stubLauncher) Batch() string { return l.batch }
@@ -66,6 +70,17 @@ func (l *stubLauncher) Unfinished(context.Context) (string, []string, error) {
 		return "", nil, l.journalErr
 	}
 	return l.unfinished, l.ids, nil
+}
+
+func (l *stubLauncher) Progress(_ context.Context, id string) (string, error) {
+	if l.journalErr != nil {
+		return "", l.journalErr
+	}
+	text, ok := l.progress[id]
+	if !ok {
+		return "", fmt.Errorf("%w: %s", ErrNoJournalledRun, id)
+	}
+	return text, nil
 }
 
 func (l *stubLauncher) Journalled(_ context.Context, id string) (string, error) {

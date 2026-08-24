@@ -253,6 +253,22 @@ type Launcher interface {
 	// clean while a coin of theirs is locked.
 	Unfinished(ctx context.Context) (text string, ids []string, err error)
 
+	// Progress is a running batch's own state as text: one row per channel, how many
+	// receipts are in, whether the funding transaction is still held, and what
+	// is left of the peers' window.
+	//
+	// It is here rather than on this package's Run for the reason AbortRefusal
+	// is: the receipt count is the number I-1 turns on, and the journal is what
+	// decides it. A Run that reported its own progress would be a second copy of
+	// the arming rule sitting in the one place a mistake reads as reassurance —
+	// so the attach screen asks, and the answer comes from the same rows
+	// MarkPending counts.
+	//
+	// ErrNoJournalledRun means the run has journalled nothing yet, which is an
+	// ordinary state and not an error: its streams have not opened. The screen
+	// shows its transcript alone rather than saying the run is missing.
+	Progress(ctx context.Context, runID string) (string, error)
+
 	// Journalled is one journalled run's recovery screen, as text, and
 	// ErrNoJournalledRun when the journal has no such run.
 	//

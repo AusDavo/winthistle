@@ -44,9 +44,13 @@ func answerWith(t *testing.T, r *server.Run, choice, text string) *server.Questi
 // is given. A reply is handed over before Ask has cleared the pending question,
 // so a test that asks twice in a row has to wait for the second one by id — the
 // same distinction the handler makes, and for the same reason.
+// The bound is liveness, not latency. Every caller spawns the seam in a goroutine
+// and waits here for it to ask; what is asserted is that the question arrives and
+// what it says, never how fast. So the bound only has to be long enough that a
+// scheduler under load cannot be mistaken for a seam that never asked.
 func answerAfter(t *testing.T, r *server.Run, notID, choice, text string) *server.Question {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if q := r.Pending(); q != nil && q.ID != notID {
 			if err := r.Reply(q.ID, server.Answer{Choice: choice, Text: text}); err != nil {
@@ -362,13 +366,30 @@ func TestTheRoundsDeadlineIsSharedByEveryDevice(t *testing.T) {
 	last := ""
 	for _, dev := range devices {
 		dev := dev
-		go func() { dev.Sign(context.Background(), "cHNidP8BAAA=") }()
+		// Awaited, one device at a time, because Run.Ask refuses a second
+		// question while one is pending — and Reply returns as soon as the answer
+		// is buffered, before the asking Ask has woken up and cleared it. A test
+		// that spawned the next device on Reply returning was racing that window:
+		// the second Ask could see the first question still pending, return
+		// ErrAlreadyAsking without asking anything, and leave answerAfter waiting
+		// for a question nobody was going to post. Rare, and likelier the busier
+		// the machine.
+		//
+		// Serial is also what production does — run.sign awaits each device's
+		// Sign before calling the next — so this is the sequence being tested
+		// rather than a concession to the test.
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			dev.Sign(context.Background(), "cHNidP8BAAA=")
+		}()
 		q := answerAfter(t, r, last, ChoiceCannot, "")
 		last = q.ID
 		if !strings.Contains(q.Prompt, dev.Label) {
 			t.Errorf("the question does not name %s:\n%s", dev.Label, q.Prompt)
 		}
 		deadlines = append(deadlines, q.Deadline)
+		<-done
 	}
 	if !deadlines[0].Equal(deadlines[1]) {
 		t.Errorf("the two devices were given different deadlines, %s and %s.\n"+

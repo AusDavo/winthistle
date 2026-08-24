@@ -72,6 +72,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/AusDavo/winthistle/internal/peers"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/run"
@@ -265,6 +266,44 @@ func (l *Launcher) Journalled(ctx context.Context, runID string) (string, error)
 		return "", err
 	}
 	return b.String(), nil
+}
+
+// Progress is the running batch's own state, for the attach screen.
+//
+// It reads the journal rather than asking the run loop, because the number that
+// screen exists to show — how many channels have their receipt — is the number
+// I-1 turns on, and the journal is what decides it. A run loop reporting its own
+// progress would be a second copy of the arming rule, kept in the one place a
+// mistake would read as reassurance.
+//
+// Text and not rows, for the reason Unfinished is: prose is where the copy with
+// the overrun tests over it lives, and internal/server rendering a data type
+// would be a second rendering measured by nothing.
+//
+// The peers' window comes from internal/peers, which reads it out of the vendored
+// LND rather than restating it — chanfunding.DefaultReservationTimeout, neither
+// adjustable in a release build nor ours to choose. It is passed in rather than
+// looked up inside prose because it is a fact about the peer's build.
+//
+// ErrNoJournalledRun when there is no such run, like Journalled: a run whose
+// streams have not opened has journalled nothing, and the attach screen falls
+// back to its transcript for that case rather than claiming the run is missing.
+func (l *Launcher) Progress(ctx context.Context, runID string) (string, error) {
+	j, err := journal.Open(ctx, l.cfg.Server.Journal)
+	if err != nil {
+		return "", fmt.Errorf("the run journal at %s could not be opened: %w",
+			l.cfg.Server.Journal, err)
+	}
+	defer j.Close()
+
+	r, err := j.Load(ctx, runID)
+	if errors.Is(err, journal.ErrNoRun) {
+		return "", fmt.Errorf("%w: %s", server.ErrNoJournalledRun, runID)
+	}
+	if err != nil {
+		return "", err
+	}
+	return prose.Progress(r, time.Now(), peers.ReservationTimeout), nil
 }
 
 // Signers is run.Signers over the browser: the labels and the count come from

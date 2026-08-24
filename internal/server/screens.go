@@ -1,6 +1,8 @@
 package server
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"html"
 	"net/http"
@@ -145,6 +147,41 @@ func (s *Server) index(w http.ResponseWriter, r *http.Request) {
 // The batch summary is the launcher's text rather than this package's: the
 // launcher is the thing holding the batch file, and a second renderer of the
 // same amounts is a second thing to keep in step with the plan document.
+// progressBlock is the journal's account of the run, or nothing.
+//
+// Nothing, rather than an error, in the two cases that are not faults: no
+// launcher at all — a server started without one cannot have run this — and a
+// run that has journalled nothing, whose streams have not opened. Neither is
+// worth a paragraph on a screen whose transcript already says where the run is.
+//
+// A journal that could not be *read*, though, is said out loud. The receipt
+// count is the live reading of I-1, and a screen that quietly omitted it would
+// look like a run with no channels rather than a question nobody could answer.
+// The context is the server's and not the request's, which decision 2's guard
+// enforces rather than trusts: a response ends on a reload, a closed tab and a
+// laptop lid, and none of those is a reason to abandon a journal read. It is
+// bounded the way the other journal reads are — a screen that hung would be a
+// screen an operator cannot get the receipt count out of.
+func (s *Server) progressBlock(id string) string {
+	if s.opts.Launcher == nil {
+		return ""
+	}
+	ctx, cancel := context.WithTimeout(s.base(), journalReadTimeout)
+	defer cancel()
+
+	text, err := s.opts.Launcher.Progress(ctx, id)
+	switch {
+	case errors.Is(err, ErrNoJournalledRun):
+		return ""
+	case err != nil:
+		return prose.Para(fmt.Sprintf("The run journal could not be read, so how "+
+			"many channels have their receipt is not known from here: %v\n"+
+			"That is a question about this run's state and not about the run — the "+
+			"transcript below is still what the run itself said.", err))
+	}
+	return text
+}
+
 func (s *Server) startSection() string {
 	var b strings.Builder
 	b.WriteString("\n<h2>The batch</h2>\n")
@@ -256,8 +293,14 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 			"closing this tab does not stop it."))
 	}
 
-	// The transcript, then the question. Newest last, the way a terminal reads:
-	// what the run is waiting on is the last thing it said.
+	// The state block, then the transcript, then the question.
+	//
+	// State first because it is the thing being watched: the transcript grows
+	// without bound and pushes its own top off the screen, so a receipt count at
+	// the end of it is a receipt count nobody finds. The order is deliberate the
+	// other way round from the transcript's own — what the run is *waiting on*
+	// still goes last, next to the form that answers it.
+	text.WriteString("\n" + s.progressBlock(id))
 	text.WriteString("\n" + transcript)
 	if pending != nil {
 		text.WriteString("\n" + pending.Prompt)
