@@ -326,6 +326,11 @@ mainnet and the abort paths work. Assume every commit will eventually be public.
   keep it that way.
 - Commit identity is `AusDavo <david@dpinkerton.com>`, not the client
   address.
+- **Changing `docs/design.html` means republishing it in the same slice.** It is
+  published as an artifact and editing the file does not update the published
+  page, which is the only copy an outside reader sees. The two drifted five
+  statements apart before anyone checked. `HANDOFF.md`'s "Watch out for" has the
+  five and how to republish without clobbering.
 
 ## Style
 
