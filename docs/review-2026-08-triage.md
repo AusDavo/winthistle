@@ -101,7 +101,7 @@ So item 1's acceptance clause "same checks available read-only via
 | 2b | **DONE** | Fully implemented with 17 adversarial tests; the review's spec-only limit is moot |
 | 3 | **PARTIAL** | The house test pattern is already "assert an empty mempool"; five named scenarios genuinely absent |
 | 4 | **WRONG** (premise) | The web UI exists; `ratatui`/`crossterm` are Rust and this is Go; small real core survives |
-| 5 | **BLOCKED** | As specified it is a funding-transaction replacement authored by this repo — the rejected list forbids it. Needs your decision, not a spec |
+| 5 | **OPEN, held** | As specified it is a funding-transaction replacement authored by this repo, which the rejected list forbids — so it needs an invariant decision before a spec. Deliberately not closed; see *Held open* below |
 | 6 | **VALID** (6 of 8) | Real docs gaps; one bullet is wrong, one badly understates a stale claim |
 | 7 | **DONE** | Already out of scope and already agrees with `CLAUDE.md`; one docs sliver |
 | 8 | **WRONG** (artifact) / **DONE** (substance) | There is no run directory — it is SQLite — and "version it" is explicitly rejected by design |
@@ -300,7 +300,7 @@ rule), and "do not overload one key for abort." The abort control is already a
 link to a screen that says what stopping costs rather than a one-click button,
 which is the same instinct.
 
-### 5. Pre-signed abort — **BLOCKED, and it needs your decision**
+### 5. Pre-signed abort — **OPEN, held pending an invariant decision**
 
 Flagging rather than specifying, per `CLAUDE.md`'s instruction to say so and stop.
 
@@ -415,13 +415,47 @@ scoped (4). What is left, cheapest-first:
    mempool rejection at publish, peer never responds, LND restart mid-batch.
    Respect `-p 1`.
 5. **Item 8's docs residue** — the state table in `docs/design.html`.
-6. **Item 4, reduced** — render `journal.Run` as a live per-channel table on the
-   attach screen, plus the countdown. Reject the TUI.
+6. **Item 4's reduced core** — render `journal.Run` as a live per-channel table
+   on the attach screen, plus the countdown.
 
-Not doing: 2b (built), 8 as specified (no such artifact; versioning rejected),
-4 as specified (second front end, wrong language, fails the review's own audit
-test), 5 (collides with the rejected-approaches list — needs your decision
-first).
+Not doing now, on the evidence above: 2b (built and tested), 8 as specified (no
+such artifact, and versioning is rejected by design).
+
+## Held open — set aside, not ruled out
+
+Three things are **deferred by the owner rather than settled**, and this section
+exists so a later reader does not mistake "not now" for "no". Each has merits and
+may be picked up; none should be re-litigated as though it had been rejected.
+
+- **Item 5, pre-signed abort.** The blocker is real and specific: as specified it
+  puts a funding-transaction replacement in this repository, which
+  `CLAUDE.md`'s rejected list forbids and I-4 scopes by *authorship*. So it
+  cannot be specced first and decided after — the invariant decision comes first.
+  What it defends is also real: a compound failure where the signed transaction
+  leaks *and* the channels were since abandoned, which is the case the review is
+  right that nothing else covers. Its cost is a second bearer artefact and a
+  griefing vector.
+- **Item 4, the TUI.** Held on the audit-surface argument rather than on merit:
+  a second front end is a large spend against "small enough to read end to end",
+  and `ratatui`/`crossterm` are Rust in a Go repo. But the *reason* to want one
+  survives — a terminal-native state table needs no browser, no token, no socket,
+  and would suit a headless deployment beside LND, which is exactly where the web
+  UI is least convenient. If it returns, the state struct it needs
+  (`journal.Run`) and its renderer (`prose.RecoveryList`) already exist, so it is
+  a front end over settled internals rather than a rewrite.
+- **A no-change / spend-all batch.** Not from the review — the owner's own
+  question. It is genuinely wanted (consolidating cold storage into channels
+  without leaving a dust-ish change output, and without the change output's
+  privacy cost), and it is currently refused by the verifier: `ChangeMissing`.
+  The honest cost is in "Why the change output is required" in `CLAUDE.md` and
+  in this repo's README — a spend-all batch has **no CPFP lever**, so if it
+  confirms too slowly it is frozen with no exit that this build implements, and
+  the only route out is an out-of-band double-spend the operator performs with
+  their own tools. That is a real trade an informed operator may want to make;
+  it is not a default, and it is not a gate to remove quietly. If it is taken
+  up, the shape to consider is an explicit per-batch opt-in that fails loudly and
+  says what it costs — not a relaxation of the floor, and not a switch on the
+  verifier.
 
 Nothing above touches `arm.Publish`, the I-1 gate, or the pinned call-site count
 of 2.
