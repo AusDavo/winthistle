@@ -3015,12 +3015,14 @@ reproducible from this description in a few minutes, and the durable half of it 
       replacement — **and mixing them is part of this item**, because a
       browser-driven run currently uses the browser for every device even when a
       `[[signer]]` block names a working command.
-   5. **The countdown.** It is the *peers'* clock, not ours:
-      `pruneZombieReservations` skips PSBT reservations, so our node never
-      expires one. Do not re-derive that. Note what already exists to hang it
-      on: `arm.Streams.Opened` is when the last stream came up, and
-      `server.Question.Deadline` is the *gate*, which is a different clock and
-      must not be relabelled as this one.
+   5. ~~The countdown~~ — done, and this entry was stale for a slice because it
+      was never struck through: `prose.Progress` renders it on the attach screen,
+      above the transcript, reaching the server through `Launcher.Progress`. See
+      "Then the countdown and the live state" near the top of this file. What
+      remains true and must not be re-derived: it is the *peers'* clock, not
+      ours — `pruneZombieReservations` skips PSBT reservations, so our node never
+      expires one — and `server.Question.Deadline` is the *gate*, a different
+      clock that must not be relabelled as this one.
    6. ~~The recovery screens~~ — done. `GET /recover` and `GET /recover/{id}`,
       read-only, needing nothing but the journal. Four decisions with guards, and
       seven defects out of rendering it; see "The journal's own screens".
