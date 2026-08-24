@@ -14,6 +14,7 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
+	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/webrun"
@@ -181,6 +182,19 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 			t.Errorf("the transcript does not contain %q", want)
 		}
 	}
+
+	// Every question that was answered left a record, so a reload after the
+	// ceremony shows what the operator agreed to rather than nothing at all.
+	for _, want := range []string{
+		"> The dress rehearsal", "> The signing round", "> Abandon this channel?",
+		"This is the signed packet", "i_know_what_i_am_doing",
+	} {
+		if !strings.Contains(transcript, want) {
+			t.Errorf("the transcript keeps no record of %q", want)
+		}
+	}
+
+	assertFitsThePane(t, transcript)
 
 	// The journal is the record, and it is the only thing that can say the batch
 	// reached the I-1 gate.
@@ -389,4 +403,38 @@ func preOf(t *testing.T, body string) string {
 		t.Fatalf("unterminated <pre> in the page:\n%s", body)
 	}
 	return html.UnescapeString(inner)
+}
+
+// assertFitsThePane measures a whole run's transcript against prose.PaneWidth.
+//
+// This is the guard that was missing, and it is the reason two lines went out
+// unwrapped: every *report* package measures its own screens, and nothing measured
+// the composition — the strings internal/run writes between them. One of those
+// carried LND's verbatim errors and reached 251 characters, at the moment an
+// operator is reading hardest.
+//
+// A whole real transcript, from a real run against real peers, is the only thing
+// that covers them: they are one Fprintf each, on a path no unit test walks.
+// Runes rather than bytes, because this copy is full of em dashes and a byte count
+// would report a line as three columns wider than it renders.
+//
+// The one exemption is internal/doctor's: a line an operator *pastes* cannot be
+// wrapped without changing it. Nothing a run writes is pasteable today, and the
+// exemption is here so that adding one is a deliberate act rather than a failing
+// test somebody widens the pane to silence.
+func assertFitsThePane(t *testing.T, transcript string) {
+	t.Helper()
+	if strings.TrimSpace(transcript) == "" {
+		t.Fatal("the transcript is empty, so this measures nothing")
+	}
+	for i, line := range strings.Split(transcript, "\n") {
+		if strings.HasPrefix(line, "  $ ") {
+			continue
+		}
+		if n := len([]rune(line)); n > prose.PaneWidth {
+			t.Errorf("transcript line %d is %d runes, past the %d-column pane. "+
+				"Everything internal/run writes between the reports has to be "+
+				"wrapped the way the reports are:\n%s", i+1, n, prose.PaneWidth, line)
+		}
+	}
 }

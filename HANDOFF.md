@@ -2419,6 +2419,38 @@ And one test was measuring the wrong thing: `internal/doctor`'s pane check count
 now, like every other pane test in the repository. A byte count is worse than no
 check, because it is the kind of wrongness that gets fixed by widening the pane.
 
+### Every defect these three slices found, and the guard on each
+
+Kept as a table because the prose above is spread over three sections and a defect
+described in prose is a defect that comes back. **Nine found, nine with a
+mechanical guard.** Five of them had only prose for a while, which is how the
+list came to be written.
+
+| what was wrong | how it was found | what stops it returning |
+|---|---|---|
+| `recoverRun` ran on the context whose cancellation triggered it, so Ctrl-C during a run took *nothing* apart | reading the code while wiring the abort control | `TestCancellingMidRunStillTakesTheBatchApart` — the only test here that cancels a run mid-flight. Verified to fail on the pre-fix code |
+| `Origin: null` on a browser's form POST was read as a foreign origin, so every form in the UI answered `403` | the first click, in the first browser render | `TestABrowsersFormPostIsAdmitted`, plus test helpers that send the measured headers |
+| The transcript kept no record of what the operator was asked; an answered question vanished | rendering the recovery screen and reloading it | `TestTheTranscriptKeepsWhatWasAskedAndAnswered`, and the assertions in the browser-driven cold probe |
+| The rehearsal's report claimed `testmempoolaccept` had refused when Core was never asked | rendering a rehearsal that failed in the finalizer | `TestTheReportDoesNotInventAVerdictFromCore` |
+| The blunt-abandon button carried the full 66-character outpoint, wrapped to three lines, and outweighed the safe choice beside it | looking at the rendered screen | `TestEveryPromptAndButtonFitsThePane` |
+| The batch summary always soft-wrapped: 84 characters against a 78-column pane, on the first screen an operator sees | looking at the rendered screen | the same test |
+| A 79-character line in the plan verification, whose width grew with the vsize's digit count | rendering, because `internal/plan` had no pane test | `TestTheReportsFitThePane` and `TestTheEstimatedSizeNoteFitsWhateverTheSizeIs` |
+| Two lines written to the transcript unwrapped — the armed-window failure at 251 characters, and `psbt_verify` | measuring a rendered transcript | `assertFitsThePane` over a whole real transcript in the browser-driven cold probe |
+| `internal/doctor`'s pane test counted bytes, so every em dash read as three columns | writing the neighbouring test | the test itself, now counting runes |
+
+Three patterns are worth more than the list:
+
+- **A header a browser controls is not a header a test may invent.** The `403`
+  shipped green because every test chose an `Origin` no browser sends. The same
+  shape of error is available anywhere a test supplies input the real client
+  produces.
+- **When a report renders a verdict, check that the zero value is not a verdict.**
+  `Accepted bool` meant both "Core refused" and "we never asked", and the report
+  read the second as the first.
+- **A defect fixed with prose is a defect with no guard.** Five of the nine sat
+  in HANDOFF and in a commit message with nothing enforcing them. Prose says what
+  happened; a test says it will not happen again.
+
 ### What this slice does not do
 
 No transports beyond the minimum — the browser signer is one read-only field out

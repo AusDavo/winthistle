@@ -17,6 +17,8 @@ import (
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/AusDavo/winthistle/internal/policy"
+	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
 )
@@ -530,4 +532,93 @@ func TestALauncherWithNoBatchOffersNothing(t *testing.T) {
 	if !strings.Contains(err.Error(), "no batch") {
 		t.Errorf("the refusal is %v", err)
 	}
+}
+
+// TestEveryPromptAndButtonFitsThePane collects two defects that a browser found
+// and prose did not, and it is deliberately one test: both were the same mistake,
+// which is that a 66-character identifier does not fit in a 78-column pane
+// beside anything else.
+//
+//   - The blunt-abandon button carried the full outpoint, so it wrapped to three
+//     centred lines and became the largest thing on the screen — making the
+//     dangerous choice visually dominant over "No — leave this channel alone".
+//   - Summary put the amount and the pubkey on one line: two spaces plus a
+//     14-wide amount plus 66 characters is 84, so the first screen an operator
+//     sees always soft-wrapped and made a correct batch look mangled.
+//
+// Runes, not bytes: this copy is full of em dashes.
+func TestEveryPromptAndButtonFitsThePane(t *testing.T) {
+	txid := strings.Repeat("d", 64)
+
+	t.Run("the batch summary", func(t *testing.T) {
+		// A pubkey is the longest token this screen has, and the amount is the
+		// widest prose.Sats renders.
+		b := &config.Batch{Channels: []config.Channel{
+			{Peer: strings.Repeat("0", 66), AmountSat: 21_000_000_00000000,
+				Policy: policy.Policy{}},
+			{Peer: strings.Repeat("0", 66), AmountSat: 1, Private: true,
+				Policy: policy.Policy{}},
+		}}
+		for i, line := range strings.Split(Summary(b), "\n") {
+			if n := len([]rune(line)); n > prose.PaneWidth {
+				t.Errorf("line %d is %d runes, past the %d-column pane:\n%s",
+					i+1, n, prose.PaneWidth, line)
+			}
+		}
+	})
+
+	t.Run("the blunt-abandon buttons", func(t *testing.T) {
+		r := aRun(t)
+		go func() {
+			Confirmation(r, testGate)(context.Background(), abort.BluntRequest{
+				Channel:   lnd.ChannelPoint{TxID: txid, Index: 4294967295},
+				Rejection: "channel is not externally funded or not pending",
+			})
+		}()
+		q := awaitQuestion(t, r)
+
+		if len(q.Choices) != 2 {
+			t.Fatalf("the confirmation offers %d choices", len(q.Choices))
+		}
+		for _, c := range q.Choices {
+			if n := len([]rune(c.Label)); n > prose.PaneWidth {
+				t.Errorf("the %q button's label is %d runes, past the %d-column "+
+					"pane, so it wraps and outweighs the safe choice beside it:\n%s",
+					c.Value, n, prose.PaneWidth, c.Label)
+			}
+			if strings.Contains(c.Label, txid) {
+				t.Errorf("the %q button carries the full 64-character txid. The "+
+					"prompt above it states the outpoint twice; what stops a stale "+
+					"form answering about the wrong channel is the question id, not "+
+					"the reader.", c.Value)
+			}
+		}
+		// The abbreviation still has to identify the channel.
+		yes := q.Choices[1]
+		if !strings.Contains(yes.Label, txid[:12]) ||
+			!strings.Contains(yes.Label, ":4294967295") {
+
+			t.Errorf("the abbreviated outpoint does not identify the channel: %q",
+				yes.Label)
+		}
+		// And the safe choice is first, so it is the one nearest the copy that
+		// explains what the other one gives up.
+		if q.Choices[0].Value != ChoiceNo {
+			t.Errorf("the first button is %q, not the refusal", q.Choices[0].Value)
+		}
+	})
+}
+
+// awaitQuestion waits for the pending question without answering it.
+func awaitQuestion(t *testing.T, r *server.Run) *server.Question {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if q := r.Pending(); q != nil {
+			return q
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("nothing was asked")
+	return nil
 }

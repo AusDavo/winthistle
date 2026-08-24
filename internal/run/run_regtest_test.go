@@ -368,3 +368,133 @@ func TestARejectedWalletStopsTheRunBeforeAnythingIsAsked(t *testing.T) {
 		}
 	}
 }
+
+// cancelDuringBatchRound is a Signers that cancels the run partway through the
+// real signing round: the first device signs, and then the context is cancelled
+// while the second is being asked.
+//
+// That is where Ctrl-C is most likely to land and where it costs the most. By
+// then arm.Open has returned, n peers hold reservations, and every channel that
+// reached chan_pending is holding a commitment signature — so the teardown has
+// real work to do rather than nothing.
+type cancelDuringBatchRound struct {
+	t      *testing.T
+	env    *regtestenv.Env
+	cancel func()
+
+	// cancelled is closed once the cancel has been made, so the test can tell
+	// "the run stopped because we cancelled it" from "the run stopped for some
+	// other reason and this fixture never fired".
+	cancelled chan struct{}
+}
+
+func (c *cancelDuringBatchRound) Labels() []string { return regtestenv.ColdSigners() }
+
+func (c *cancelDuringBatchRound) Round(name string) []rehearsal.Device {
+	labels := regtestenv.ColdSigners()
+	out := make([]rehearsal.Device, 0, len(labels))
+	for i, label := range labels {
+		label, i := label, i
+		out = append(out, rehearsal.Device{
+			Label: label,
+			Sign: func(ctx context.Context, psbtB64 string) (combine.Part, error) {
+				// The rehearsal has to succeed: the gate is what decides whether
+				// the batch is armed at all, and a run that never arms leaves
+				// nothing for the teardown to take apart.
+				if name != "batch" || i == 0 {
+					return c.env.SignPartial(c.t, label, psbtB64), nil
+				}
+				close(c.cancelled)
+				c.cancel()
+				// Return the context's error rather than a signature, which is
+				// what a real transport does when the operator interrupts it.
+				<-ctx.Done()
+				return combine.Part{}, ctx.Err()
+			},
+		})
+	}
+	return out
+}
+
+// TestCancellingMidRunStillTakesTheBatchApart is the test that was missing when
+// the abort path shipped broken.
+//
+// recoverRun ran on the run's own context, so on Ctrl-C every call in the
+// teardown failed at once: the journal read is database/sql, the shim cancels and
+// the abandons are gRPC, and Core's lock release is JSON-RPC. An abort triggered
+// by a cancellation would have reported "context canceled" and taken nothing
+// apart — which is the exact opposite of what the deferred teardown is for.
+//
+// Nothing caught it because every test that exercised the abort path did so
+// through a *failure*, which leaves a live context. This one cancels instead, and
+// it is the only test in the repository that does. Its subject is not the error
+// the run returns — that is uninteresting, and it is a cancellation — but that
+// the teardown afterwards actually ran on a context of its own.
+func TestCancellingMidRunStillTakesTheBatchApart(t *testing.T) {
+	env := regtestenv.Start(t)
+	peers := env.Peers(t)
+	if len(peers) < 2 {
+		t.Skipf("this test needs 2 peers, alice has %d", len(peers))
+	}
+	d, o, out, env := setup(t, peers[:2],
+		[]int64{fixtureChannelSat, fixtureChannelSat})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	signers := &cancelDuringBatchRound{
+		t: t, env: env, cancel: cancel, cancelled: make(chan struct{}),
+	}
+	d.Signers = signers
+
+	res, err := run.Do(ctx, d, o)
+	t.Logf("\n%s", out.String())
+
+	select {
+	case <-signers.cancelled:
+	default:
+		t.Fatal("the run never reached the batch's second device, so nothing was " +
+			"cancelled and this test proved nothing")
+	}
+	if err == nil {
+		t.Fatal("a cancelled run reported success")
+	}
+
+	// The point of the test. A teardown on a cancelled context fails at its first
+	// call, so a report with something in it is the evidence that it ran on a
+	// context of its own.
+	if res.Aborted == nil {
+		t.Fatalf("the run was cancelled and nothing was taken apart. That is the "+
+			"defect this test exists for: the teardown has to run on a context "+
+			"that survives the cancellation that triggered it.\nrun returned: %v", err)
+	}
+	if !res.Aborted.Clean() {
+		t.Errorf("the teardown left something behind: %+v", res.Aborted.Failures)
+	}
+	if n := len(res.Aborted.Cancelled) + len(res.Aborted.Abandoned); n == 0 {
+		t.Error("the teardown reported no shims cancelled and no channels " +
+			"abandoned, so it had nothing to do — which means arm.Open never " +
+			"opened a stream and the cancellation landed somewhere harmless")
+	}
+
+	// And it must not have reported the cancellation as the reason it could not
+	// clean up, which is what the broken version said.
+	if strings.Contains(out.String(), "could not read run") {
+		t.Errorf("the teardown could not read its own journal row:\n%s", out.String())
+	}
+
+	// The journal agrees, which is what `winthistle recover` would read next.
+	run, jerr := d.Journal.Load(ctx, o.RunID)
+	if jerr != nil {
+		// The context is cancelled by now, so use a fresh one — the same thing
+		// recoverRun has to do.
+		fresh, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		if run, jerr = d.Journal.Load(fresh, o.RunID); jerr != nil {
+			t.Fatalf("reading the run back: %v", jerr)
+		}
+	}
+	if run.State != journal.StateAborted {
+		t.Errorf("the run ended in %s, not %s", run.State, journal.StateAborted)
+	}
+}

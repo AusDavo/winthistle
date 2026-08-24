@@ -126,3 +126,79 @@ func TestASubSecondRoundIsNotRoundedAway(t *testing.T) {
 		t.Errorf("the measured round is not in the report:\n%s", m.Report())
 	}
 }
+
+// TestTheReportDoesNotInventAVerdictFromCore is the guard on a defect that a
+// browser render found and that no test could have found, because the report was
+// never read against a measurement that stopped early.
+//
+// Accepted is a bool, and false meant two different things: "Core refused this
+// transaction" and "we never got as far as asking Core". The report read the
+// second as the first, so a rehearsal that died in the in-app finalizer announced
+// that testmempoolaccept had refused the result — with an empty reason, because
+// there was no reason — while the real error was reported somewhere else
+// entirely. That is a false statement in operator copy about the one call that
+// decides whether a batch is worth arming, and it sent a reader looking for a fee
+// problem that did not exist.
+//
+// Asked separates them. The general rule, worth more than the fix: when a report
+// renders a verdict, the zero value must not be a verdict.
+func TestTheReportDoesNotInventAVerdictFromCore(t *testing.T) {
+	base := func() *Measurement {
+		m := measured(2*time.Minute, ok("cold1", time.Minute), ok("cold2", time.Minute))
+		m.Total = 2 * time.Minute
+		return m
+	}
+
+	t.Run("Core refused, and said why", func(t *testing.T) {
+		m := base()
+		m.Asked, m.Accepted, m.RejectReason = true, false, "min relay fee not met"
+		got := m.Report()
+		if !strings.Contains(got, `refused the result: "min relay fee not met"`) {
+			t.Errorf("the report does not carry Core's reason:\n%s", got)
+		}
+		if strings.Contains(got, "did not get as far as") {
+			t.Errorf("a real refusal was reported as never having been asked:\n%s", got)
+		}
+	})
+
+	t.Run("Core refused and gave no reason", func(t *testing.T) {
+		m := base()
+		m.Asked, m.Accepted, m.RejectReason = true, false, ""
+		got := m.Report()
+		if !strings.Contains(got, "gave no reason for it") {
+			t.Errorf("an empty reason was not said in words:\n%s", got)
+		}
+		if strings.Contains(got, `result: ""`) {
+			t.Errorf("an empty reason rendered as a bare pair of quotes, which "+
+				"reads as though the tool lost the answer:\n%s", got)
+		}
+	})
+
+	t.Run("Core was never asked", func(t *testing.T) {
+		m := base()
+		m.Asked, m.Accepted = false, false
+		got := m.Report()
+		if !strings.Contains(got, "did not get as far as offering a transaction") {
+			t.Errorf("the report does not say Core was never asked:\n%s", got)
+		}
+		// The defect, stated as an assertion: this must not claim a refusal.
+		if strings.Contains(got, "testmempoolaccept refused") ||
+			strings.Contains(got, "refused the result") {
+
+			t.Errorf("the report claims testmempoolaccept refused a transaction it "+
+				"was never offered:\n%s", got)
+		}
+	})
+
+	// And the pane, for all three, because two of them are new copy.
+	for _, asked := range []bool{true, false} {
+		m := base()
+		m.Asked, m.Accepted = asked, false
+		for i, line := range strings.Split(m.Report(), "\n") {
+			if n := len([]rune(line)); n > 78 {
+				t.Errorf("asked=%v: line %d is %d columns, over the pane:\n%s",
+					asked, i+1, n, line)
+			}
+		}
+	}
+}
