@@ -278,12 +278,24 @@ func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 		"unwinding":           unwinding(live.ID),
 		"still unwinding":     stillUnwinding(live.ID),
 
-		"setup intro":             setupIntro("winthistle-cold"),
-		"setup busy":              setupBusy(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
-		"setup refused":           setupRefused(ErrRunInFlight, live),
-		"no setup":                noSetup(),
-		"not a batch":             notABatch(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
-		"the way out":             wayOut(),
+		"setup intro":   setupIntro("winthistle-cold"),
+		"setup busy":    setupBusy(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
+		"setup refused": setupRefused(ErrRunInFlight, live),
+		"no setup":      noSetup(),
+		"not a batch":   notABatch(&Run{ID: "20260824-193012-9f3a1c", Kind: KindSetup, About: "winthistle-cold"}),
+		"the way out, setup": wayOut(
+			&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}),
+		"the way out, bump": wayOut(
+			&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"not a batch, bump": notABatch(
+			&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"heading, bump": heading(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"nothing to start, bump": nothingToStart(
+			&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"bump intro":              bumpIntro("20260824-1930"),
+		"bump busy":               bumpBusy(&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}),
+		"bump refused":            bumpRefused(ErrRunInFlight, live),
+		"no bump":                 noBump(),
 		"waiting, batch":          waitingOn(live, aQuestion()),
 		"waiting, setup":          waitingOn(&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}, aQuestion()),
 		"nothing to start, batch": nothingToStart(live),
@@ -296,6 +308,11 @@ func TestTheServersOwnCopyFitsThePane(t *testing.T) {
 		"journal note, run listed": journalNote(live,
 			[]string{live.ID, "20260824-1930"}),
 		"journal note, run not listed": journalNote(live, nil),
+		"journal note, bump running": journalNote(
+			&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"},
+			[]string{"20260824-1930"}),
+		"journal note, bump of a run not listed": journalNote(
+			&Run{ID: live.ID, Kind: KindBump, About: "20260824-1930"}, nil),
 		"journal note, setup running": journalNote(
 			&Run{ID: live.ID, Kind: KindSetup, About: "winthistle-cold"}, nil),
 		"journalled note, live":     journalledNote(live.ID, live),

@@ -23,6 +23,8 @@ type stubLauncher struct {
 	mu      sync.Mutex
 	started int
 	setups  int
+	bumps   int
+	bumpReq BumpRequest
 	ctx     context.Context
 	req     StartRequest
 
@@ -77,6 +79,26 @@ func (l *stubLauncher) Start(ctx context.Context, r *Run, req StartRequest) erro
 	l.mu.Unlock()
 
 	r.Write([]byte("Phase 0\n"))
+	if block == nil {
+		return l.err
+	}
+	select {
+	case <-block:
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+	return l.err
+}
+
+// StartBump is the bump screen's seam, stubbed like the other two.
+func (l *stubLauncher) StartBump(ctx context.Context, r *Run, req BumpRequest) error {
+	l.mu.Lock()
+	l.bumps++
+	l.ctx, l.bumpReq = ctx, req
+	block := l.block
+	l.mu.Unlock()
+
+	fmt.Fprintf(r, "The batch being accelerated: run %s\n", req.RunID)
 	if block == nil {
 		return l.err
 	}

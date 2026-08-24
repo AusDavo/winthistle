@@ -83,6 +83,25 @@ type Signers interface {
 	Labels() []string
 }
 
+// RoundPrefix and RoundName are the signing round's name, and the sequence
+// number in it is load-bearing rather than decorative.
+//
+// internal/signers' file handshake keys its files on the round name, so a second
+// bump minutes after the first must not be able to pick up the first one's signed
+// file — the two are different transactions over the same change output, and
+// internal/combine would refuse the wrong one with a message about a moved txid
+// rather than about the wrong file.
+//
+// They are exported because the transports read them. internal/webrun renders
+// different copy for a bump round than for a batch's — a bump has no peer holding
+// a reservation and nothing after it can lose the batch — and matching on a
+// string literal spelled in two packages is how that copy ends up on the wrong
+// round.
+const RoundPrefix = "bump-"
+
+// RoundName is the round for one bump.
+func RoundName(seq int64) string { return fmt.Sprintf("%s%d", RoundPrefix, seq) }
+
 // Deps are the connections and the journal, already open.
 type Deps struct {
 	LND       Client
@@ -793,7 +812,7 @@ func Sign(ctx context.Context, d Deps, runID string, seq int64, child *settle.Ch
 		"turn, returning a partial. There is no shortcut that does not amount to a "+
 		"hot key able to spend the batch's change (I-2)."))
 
-	devices := d.Signers.Round(fmt.Sprintf("bump-%d", seq))
+	devices := d.Signers.Round(RoundName(seq))
 	for _, dev := range devices {
 		if err := d.Journal.RecordBumpSigner(ctx, runID, seq, dev.Label,
 			journal.SignerAwaiting); err != nil {

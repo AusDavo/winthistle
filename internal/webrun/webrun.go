@@ -70,9 +70,11 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/bitcoind"
+	"github.com/AusDavo/winthistle/internal/bump"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
+	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/peers"
@@ -262,6 +264,65 @@ func (l *Launcher) StartSetup(ctx context.Context, r *server.Run) error {
 		Out:     r,
 		Ask:     Ask(r, AddressCheckWindow),
 	}, setup.Options{WalletName: l.cfg.Bitcoind.Wallet})
+	return err
+}
+
+// StartBump drives `winthistle bump` and gives bump.Approve its first caller.
+//
+// The same connections a batch needs, because a bump needs the same things: LND
+// for the countdown and the broadcast, Core with no wallet scope for the mempool
+// entry and the fee estimate, the watch-only cold wallet that owns the change
+// output, and the journal that says which transaction is being accelerated.
+// run.Connect is what opens them, so a browser-driven bump dials exactly the way
+// `winthistle bump` does.
+//
+// The signers are the browser's, and the round's name carries the bump's sequence
+// number — bump.RoundName — which matters for the file transport: a second bump
+// minutes after the first must not pick up the first one's signed file.
+//
+// Approve is asked once, after the child is built and verified and before any
+// device is touched. An abandoned browser answers false, which releases the coin
+// lock and leaves the batch exactly as it was — see the package comment.
+func (l *Launcher) StartBump(ctx context.Context, r *server.Run,
+	req server.BumpRequest) error {
+
+	if req.RunID == "" {
+		return errors.New("a bump needs the id of the run whose batch it is " +
+			"accelerating: the journal is what says which transaction that is")
+	}
+	if !req.BuildOnly && len(l.cfg.Signers) == 0 {
+		return errors.New("no signers are configured, and the batch's change " +
+			"output belongs to cold storage — so there is nothing that can spend " +
+			"it. Add a [[signer]] block per device to winthistle.toml, or build the " +
+			"child without asking any device for anything, which is the box on the " +
+			"bump screen and is where the arithmetic gets checked")
+	}
+
+	d, closeAll, err := run.Connect(ctx, l.cfg)
+	if err != nil {
+		return err
+	}
+	defer closeAll()
+
+	_, err = bump.Do(ctx, bump.Deps{
+		LND:       d.LND.Lightning,
+		Publisher: d.LND.WalletKit,
+		Node:      d.Node,
+		Wallet:    d.Wallet,
+		Journal:   d.Journal,
+		Signers:   &Signers{run: r, cfg: l.cfg, gate: l.gate()},
+		Out:       r,
+		Approve:   Approve(r, l.gate()),
+	}, bump.Options{
+		RunID:          req.RunID,
+		TargetSatPerVB: req.TargetSatPerVB,
+		BuildOnly:      req.BuildOnly,
+		Fees: fees.Request{
+			TargetBlocks:  l.cfg.Fees.TargetBlocks,
+			Mode:          l.cfg.Fees.Mode,
+			FloorSatPerVB: l.cfg.Fees.FloorSatPerVB,
+		},
+	})
 	return err
 }
 
@@ -576,16 +637,20 @@ func Confirmation(r *server.Run, gate time.Duration) abort.Confirmation {
 // operator's evening — a bump is a second cold-wallet session, and the screen
 // above it is the arithmetic they are agreeing to pay.
 //
-// Its POST arrives with the bump screen, item 1.6. The adapter is here now
-// because it is one of the four seams and because its expiry verdict is part of
-// the same property the other three are tested for: an abandoned browser answers
-// the way no browser would.
+// It has a caller now: StartBump, behind POST /bump/{id}. Its expiry verdict is
+// part of the same property the other three seams are tested for — an abandoned
+// browser answers the way no browser would — and here that verdict is false,
+// which releases the coin lock and leaves the batch exactly as it was.
 func Approve(r *server.Run, gate time.Duration) func(context.Context, string) (bool, error) {
 	return func(ctx context.Context, question string) (bool, error) {
 		a, err := r.Ask(ctx, server.Question{
 			Prompt: prose.Para(question),
 			Choices: []server.Choice{
-				{Value: ChoiceNo, Label: "No — do not build the child"},
+				// Not "do not build the child": by the time this is asked the child
+				// is built, verified twice and on the screen above. Offering not to
+				// build it would describe the step before this one, and a browser
+				// showed exactly that.
+				{Value: ChoiceNo, Label: "No — leave the batch as it is"},
 				{Value: ChoiceYes, Label: "Sign and broadcast the child"},
 			},
 			Deadline: deadlineFor(ctx, time.Now().Add(gate)),
@@ -728,9 +793,23 @@ func short(cp lnd.ChannelPoint) string {
 	return fmt.Sprintf("%s:%d", txid, cp.Index)
 }
 
+// signPrompt is the copy over one device's packet, and there are three rounds
+// rather than two.
+//
+// A bump's round used to fall through to the batch's branch, which opens "This is
+// the batch. The peers' reservations are open and their clocks are running." Both
+// sentences are false about a CPFP child: the batch is already public, and no peer
+// holds a reservation against a transaction that spends its change. That is the
+// worst kind of false copy — it would have told an operator the ten minutes were
+// running during the one signing round where they are not.
+//
+// The round is matched on bump.RoundPrefix rather than on a literal, because the
+// name is composed in internal/bump and a string spelled in two packages is how
+// this copy ends up on the wrong round again.
 func signPrompt(req SignRequest) string {
 	var b strings.Builder
-	if req.Round == "rehearsal" {
+	switch {
+	case req.Round == "rehearsal":
 		fmt.Fprintf(&b, "\nThe dress rehearsal — %s, device %d of %d\n\n",
 			req.Label, req.Index, req.Of)
 		b.WriteString(prose.Para("This is not the batch. It is a decoy over the " +
@@ -740,7 +819,15 @@ func signPrompt(req SignRequest) string {
 			"takes with these devices, in this room, tonight — because the peers' " +
 			"ten minutes start whether or not anyone is ready, and until the round " +
 			"has been measured, arming is a bet."))
-	} else {
+	case strings.HasPrefix(req.Round, bump.RoundPrefix):
+		fmt.Fprintf(&b, "\nThe child's signing round — %s, device %d of %d\n\n",
+			req.Label, req.Index, req.Of)
+		b.WriteString(prose.Para("This is not the batch. The batch is already " +
+			"public — that is what a CPFP child is for — and this transaction " +
+			"spends its change output to pay a higher rate for both of them " +
+			"together. No peer holds a reservation against it and no channel " +
+			"depends on it, so nothing from here on can lose the batch."))
+	default:
 		fmt.Fprintf(&b, "\nThe signing round — %s, device %d of %d\n\n",
 			req.Label, req.Index, req.Of)
 		b.WriteString(prose.Para("This is the batch. The peers' reservations are " +
@@ -756,6 +843,17 @@ func signPrompt(req SignRequest) string {
 		"witness, which means that device held a transaction it could have " +
 		"broadcast, and no external party may ever hold one."))
 	b.WriteString("\n")
+	if strings.HasPrefix(req.Round, bump.RoundPrefix) {
+		// What expiry costs is on the run screen above this, once. Said here it
+		// would be the third copy of it on one page.
+		b.WriteString(prose.Para(fmt.Sprintf("This round has until %s. That is "+
+			"limits.abort_after_signing_seconds — the same budget a batch's signing "+
+			"round is measured against, reused here because it is the only measured "+
+			"one there is for a round with these devices — and it belongs to the "+
+			"round rather than to this device, so every other device's signature has "+
+			"to fit inside it too.", req.Deadline.Format(time.TimeOnly))))
+		return b.String()
+	}
 	b.WriteString(prose.Para(fmt.Sprintf("This round has until %s. That is the "+
 		"signing gate the dress rehearsal is measured against, not a timeout of "+
 		"this page's, and it belongs to the round rather than to this device — the "+

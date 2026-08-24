@@ -170,6 +170,25 @@ func (s *Server) recoverOne(w http.ResponseWriter, r *http.Request) {
 	var b strings.Builder
 	b.WriteString(screen("run "+id+" in the journal", "/recover",
 		journalledNote(id, s.Runs.Get(id))+"\n"+text+"\n"+readOnlyNote(id, refusal)))
+
+	// The one thing this screen offers that acts, and it is a link to another
+	// screen rather than a POST: /recover keeps its method patterns, so a POST
+	// here is still a 405 from the router.
+	//
+	// Offered only for a run the journal refuses to abort, which is not a
+	// coincidence — AbortTarget refuses a run in publishing or published, and
+	// that is the same condition that makes a bump possible at all. A batch that
+	// never reached the publish call has no parent in any mempool.
+	//
+	// The other thing a non-nil refusal can mean is a journal that could not be
+	// read, and it cannot mean that here: Journalled read this run out of the
+	// same file three lines up, so a second read failing is a race rather than
+	// the state. Being wrong in that race costs a link to a screen that says the
+	// parent is missing.
+	if refusal != nil {
+		fmt.Fprintf(&b, "<p><a href=\"%s\">accelerate run %s with a CPFP child</a></p>\n",
+			bumpPath(id), html.EscapeString(id))
+	}
 	b.WriteString("<p><a href=\"/recover\">back to the journal</a></p>\n")
 	serve(w, b.String())
 }
@@ -208,14 +227,40 @@ func journalNote(live *Run, ids []string) string {
 	// has "not written a row yet" would imply one is coming. A setup writes a
 	// setups row keyed by the wallet and no run row at all, so the honest thing
 	// is to say the list below is complete and name the other thing that is going.
-	if live.Kind != KindBatch {
+	if live.Kind == KindSetup {
 		b.WriteString(prose.Para(whatIsGoing(live) + ", and it will never appear " +
 			"in the list below: a setup records its answer against the wallet " +
 			"rather than as a run, so it has no run row to be unfinished. What is " +
 			"below is the runs, and it is complete."))
 		b.WriteString("\n")
-		b.WriteString(prose.Para(fmt.Sprintf("That setup is at /runs/%s. Nothing "+
-			"about it is armed, and nothing below is happening.", live.ID)))
+		b.WriteString(prose.Para(fmt.Sprintf("It is at /runs/%s. Nothing below is "+
+			"happening.", live.ID)))
+		return b.String()
+	}
+
+	if live.Kind == KindBump {
+		b.WriteString(prose.Para(whatIsGoing(live) + ", and it will never appear " +
+			"in the list below under that id: a bump writes its rows under run " +
+			live.About + ", which is the batch it is accelerating, rather than " +
+			"under an id of its own. It is at /runs/" + live.ID + "."))
+		b.WriteString("\n")
+
+		// The row below is that batch, and it is being written to right now. "Nothing
+		// below is happening" is the sentence this screen exists to avoid, and a
+		// live bump is the one case where it would have been said over a row that
+		// is changing — the bump's own rows go under exactly that run id.
+		if inList(live.About, ids) {
+			b.WriteString(prose.Para("So run " + live.About + " is in the list " +
+				"below, and its rows are being added to while you read them. Its " +
+				"funding transaction is not going to change — that is I-4, and a bump " +
+				"builds a child rather than a replacement — but what the journal says " +
+				"about its children will."))
+			return b.String()
+		}
+		b.WriteString(prose.Para("Run " + live.About + " is not in the list below, " +
+			"which means the journal does not have it as unfinished. That is worth " +
+			"a look before signing anything: a bump needs a batch whose funding " +
+			"transaction was actually published, and the journal is what says so."))
 		return b.String()
 	}
 
@@ -290,6 +335,12 @@ func readOnlyNote(id string, refusal error) string {
 			"keep its own copy of the rule — it asks the same question `winthistle "+
 			"recover %s` asks, and gets the same answer, so the two cannot come "+
 			"apart. Running that command would refuse in the same words.", id)))
+	b.WriteString("\n")
+	b.WriteString(prose.Para("So the exit is forward rather than back. Let it " +
+		"confirm, and close the channels normally if you no longer want them. If " +
+		"it is confirming too slowly, the link below builds a CPFP child of the " +
+		"batch — a child, never a replacement of it, which would change every " +
+		"funding outpoint and destroy every channel in it."))
 	return b.String()
 }
 

@@ -13,16 +13,17 @@
 // bitcoind's JSON-RPC client, which is a client, so the security shape below had
 // no precedent to follow and is the part that had to be right first.
 //
-// It now serves six screens and the four unsafe methods behind them: start a
-// batch, start a setup of the cold wallet, answer the questions either of them
-// asks, and stop a batch. What it cannot do is publish — see the guard on
-// decision 1 — and what it does not do yet is the bump screen, mixing transports
-// per device, and the five reports.
+// It now serves seven screens and the six unsafe methods behind them: start a
+// batch, start a setup of the cold wallet, build a CPFP child of a batch that is
+// already public, answer the questions any of the three ask, and stop a batch.
+// What it cannot do is publish — see the guard on decision 1 — and what it does
+// not do yet is mixing transports per device and the five reports.
 //
-// The newest is the setup screen, which is what finally gave webrun.Ask a caller.
-// It is the resume path only: no descriptor file crosses this boundary, because a
-// path posted from a browser is a browser choosing which file this process opens
-// and imports. setup.go is where that decision and its guard are written down.
+// All four callback seams now have a caller. setup.Ask arrived with the setup
+// screen (setup.go: the resume path only, because a path posted from a browser is
+// a browser choosing which file this process opens and imports) and bump.Approve
+// with the bump screen (bump.go: its own path, so /recover stays read-only). There
+// is no written-but-uncalled code left in this UI.
 //
 // The two newest screens are the journal's, under /recover, and they are the
 // only ones that work on a node that is down. They are also read-only, on
@@ -264,6 +265,13 @@ func (s *Server) routes() {
 	// file this process reads. See setup.go.
 	s.mux.HandleFunc("GET /setup", s.setupScreen)
 	s.mux.HandleFunc("POST /setup", s.startSetup)
+
+	// The CPFP child of a batch that is already public, and the last of the four
+	// callback seams to get a POST. Its own path rather than one under /recover,
+	// which stays read-only with no POST route at all; /recover/{id} links here.
+	// See bump.go.
+	s.mux.HandleFunc("GET /bump/{id}", s.bumpScreen)
+	s.mux.HandleFunc("POST /bump/{id}", s.startBump)
 	s.mux.HandleFunc("GET /runs/{id}", s.attach)
 
 	// The file transport's outbound leg. A GET, because it reads: the packet is

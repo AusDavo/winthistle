@@ -493,6 +493,20 @@ func alreadyRunning(err error, live *Run) string {
 func notABatch(r *Run) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "run %s cannot be stopped here\n\n", r.ID)
+
+	if r.Kind == KindBump {
+		b.WriteString(prose.Para("This control cancels a batch, and run " + r.ID +
+			" is not one: it is a CPFP child of run " + r.About + ", whose funding " +
+			"transaction is already public. " +
+			"Abandoning a channel whose funding transaction has been broadcast is " +
+			"the one move in this product that can strand funds, which is why the " +
+			"batch's own control refuses a run that reached the publish call — and " +
+			"a child of that batch is further past it still."))
+		b.WriteString("\n")
+		b.WriteString(wayOut(r))
+		return b.String()
+	}
+
 	b.WriteString(prose.Para("This control cancels a batch, and run " + r.ID +
 		" is not one: it is a setup of the cold wallet " + r.About + ". The screen " +
 		"behind this link would have offered to cancel funding shims, abandon " +

@@ -95,10 +95,11 @@ func (reg *Registry) Start(id string, kind Kind, about string,
 // The registry exists because internal/webrun's adapters ask their questions
 // through a *Run — that is the only way a browser answers a blocking callback
 // seam — and three of this build's commands have such a seam. So a setup goes in
-// here beside a batch, and `winthistle bump` will when it gets its screen. The
-// difference has to be readable from the run, because almost every sentence a
-// screen says about a batch is false about a setup: it opens no channel, holds no
-// reservation, and has no armed window to be taken apart.
+// here beside a batch, and so does a bump. The difference has to be readable from
+// the run, because almost every sentence a screen says about a batch is false
+// about the other two: a setup opens no channel at all, a bump's channels are
+// already funded and no peer is waiting on its round, and neither has an armed
+// window to be taken apart.
 //
 // KindBatch is the zero value, which is right for the constructor tests use and
 // is not a default anything in production leans on: Start takes the kind, so
@@ -106,9 +107,17 @@ func (reg *Registry) Start(id string, kind Kind, about string,
 //
 // This is deliberately not the journal's vocabulary. A batch run's id is the
 // journal's run id; a setup writes a setups row keyed by the wallet and no run
-// row at all. So a setup's id is this process's alone, /recover/{that id} has
-// nothing, and the screens say so instead of implying a row that will never be
-// written.
+// row at all; a bump writes bump rows under the id of the batch it is
+// accelerating rather than under its own. So a setup's or a bump's id is this
+// process's alone, /recover/{that id} has nothing, and the screens say so instead
+// of implying a row that will never be written.
+//
+// A bump deliberately does not reuse the batch's run id as its registry key, even
+// though that is the id it is about. It would put a bump on /runs/{the batch's
+// id} — the URL that means "the batch is going in this process" — and make the
+// journal screens say a run is live when what is live is a second cold-wallet
+// session about a transaction that is already public. About is where that id
+// goes.
 type Kind int
 
 const (
@@ -121,6 +130,11 @@ const (
 	// addresses and ask a human whether they match. Nothing is created, nothing
 	// is spent, and the way out is the third button.
 	KindSetup
+
+	// KindBump is `winthistle bump`: the CPFP child of a batch that is already
+	// public. Its own signing round, and its own way out — a device that cannot
+	// sign fails the round, which releases the coin lock on the batch's change.
+	KindBump
 )
 
 // ErrRunInFlight is the second concurrent run, refused. See "One run at a time".
@@ -189,8 +203,9 @@ type Run struct {
 	Started time.Time
 
 	// Kind is which of the things this run is doing, and About is what makes it
-	// identifiable: the cold wallet a setup is questioning. Empty for a batch,
-	// whose own id is already the journal's.
+	// identifiable: the cold wallet a setup is questioning, or the journalled run
+	// a bump is accelerating. Empty for a batch, whose own id is already the
+	// journal's.
 	//
 	// Both are set once, before this run is in the registry's map, and never
 	// written again — so a screen may read them without the mutex.
@@ -301,6 +316,26 @@ type Launcher interface {
 	// making must not be cancelled by a reload.
 	StartSetup(ctx context.Context, r *Run) error
 
+	// StartBump drives `winthistle bump` and blocks until it is done: find the
+	// parent in Core's mempool, price the lift, build and verify the child, ask,
+	// and then run a second cold-wallet signing round over it.
+	//
+	// It gives bump.Approve its caller. That seam is asked once, after the child
+	// is built and verified and before it goes to any device, and what it
+	// protects is the operator's evening rather than the batch — nothing after
+	// it can lose one. Declining releases the coin lock and leaves the batch
+	// exactly as it was.
+	//
+	// This package cannot name a *bump.Signed, which is the second of the two
+	// production call sites of WalletKit.PublishTransaction and the reason the
+	// import ban exists. What it can do is start the sequence and answer its
+	// questions.
+	//
+	// The context is the server's, never a request's: the round in here is a
+	// cold-wallet round with the same devices a batch uses, and a reload must not
+	// end one.
+	StartBump(ctx context.Context, r *Run, req BumpRequest) error
+
 	// AbortRefusal says why this run must not be aborted, or nil.
 	//
 	// It exists so the answer comes from the journal rather than from a copy of
@@ -365,6 +400,27 @@ type Launcher interface {
 // be read" is the difference between a 404 and a page that must not pretend it
 // looked.
 var ErrNoJournalledRun = errors.New("the journal has no such run")
+
+// BumpRequest is what the operator chose on the bump screen.
+//
+// RunID is the journalled run whose batch is being accelerated, and it is a run
+// id rather than a txid for the reason `winthistle bump` takes one: the journal is
+// what says a transaction was actually published, what its change output was, and
+// whether an earlier child of it is already holding a coin lock.
+type BumpRequest struct {
+	RunID string
+
+	// TargetSatPerVB is the rate to lift the parent and child to together, not
+	// the child's own rate. Zero means ask Core, through internal/fees — never a
+	// fee API, which would be handed the size of what is being built and the
+	// moment it is being built.
+	TargetSatPerVB float64
+
+	// BuildOnly stops after the child is built and verified, asking no device for
+	// anything. The bump's dry run: the arithmetic is the part that can be wrong,
+	// and checking it reveals whether a cold wallet is worth bringing out.
+	BuildOnly bool
+}
 
 // StartRequest is what the operator chose on the form. The batch itself is the
 // launcher's, from `winthistle serve --batch`.

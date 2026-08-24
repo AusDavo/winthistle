@@ -213,15 +213,41 @@ func (s *Server) startSection() string {
 	return b.String()
 }
 
+// whatIsGoing is one clause naming the live run, in the vocabulary of whichever
+// of the three things it is.
+//
+// It exists because the sentence that used to be written wherever it is now
+// called — the second run's dress rehearsal building a decoy over the same coins
+// — is true of a batch and false of the other two. Four screens were saying it,
+// and a refusal that explains a collision that could not have happened is a false
+// statement in operator copy on the one page somebody reads while they are
+// already lost.
+func whatIsGoing(live *Run) string {
+	switch live.Kind {
+	case KindSetup:
+		return fmt.Sprintf("A setup of the cold wallet %s is going in this "+
+			"process right now, as run %s", live.About, live.ID)
+	case KindBump:
+		return fmt.Sprintf("A CPFP child of run %s is being built in this "+
+			"process right now, as run %s", live.About, live.ID)
+	default:
+		return fmt.Sprintf("Run %s is opening the batch right now", live.ID)
+	}
+}
+
 // what is one noun phrase for a run, for the list on the overview.
 //
 // Short on purpose: it sits inside a line that already carries an id, a
 // timestamp and a state.
 func what(r *Run) string {
-	if r.Kind == KindSetup {
+	switch r.Kind {
+	case KindSetup:
 		return "a setup of " + r.About
+	case KindBump:
+		return "a CPFP child of run " + r.About
+	default:
+		return "the batch"
 	}
-	return "the batch"
 }
 
 // nothingToStart is why the batch's control is absent, in the vocabulary of
@@ -229,10 +255,10 @@ func what(r *Run) string {
 func nothingToStart(live *Run) string {
 	if live.Kind != KindBatch {
 		return prose.Para(whatIsGoing(live) + ", so there is nothing to start " +
-			"here yet. One at a time: there is one journal and one cold wallet, and " +
-			"the operator a batch would ask to fetch m devices is the same operator " +
-			"that is waiting on. Nothing about it is armed and nothing in it is at " +
-			"risk.")
+			"here yet. One at a time, because there is one journal and one cold " +
+			"wallet — and a batch and the thing that is going both want the same " +
+			"devices out of the same safe. Nothing about it is armed, and no batch " +
+			"is at risk in it.")
 	}
 	return prose.Para(fmt.Sprintf("Run %s is going, so there is nothing to "+
 		"start. One at a time: there is one journal, one cold wallet and one "+
@@ -344,7 +370,7 @@ func (s *Server) attach(w http.ResponseWriter, r *http.Request) {
 	// rather than below a transcript that grows without bound. It answers "what
 	// can I do here", which is a question asked on arrival.
 	if !finished && run.Kind != KindBatch {
-		text.WriteString("\n" + wayOut())
+		text.WriteString("\n" + wayOut(run))
 	}
 	text.WriteString("\n" + transcript)
 	if pending != nil {
@@ -392,6 +418,8 @@ func heading(r *Run) string {
 	switch r.Kind {
 	case KindSetup:
 		return fmt.Sprintf("run %s — a setup of the cold wallet %s", r.ID, r.About)
+	case KindBump:
+		return fmt.Sprintf("run %s — a CPFP child of run %s", r.ID, r.About)
 	default:
 		return "run " + r.ID
 	}
@@ -404,6 +432,8 @@ func title(r *Run) string {
 	switch r.Kind {
 	case KindSetup:
 		return "setup " + r.ID
+	case KindBump:
+		return "bump of run " + r.About
 	default:
 		return "run " + r.ID
 	}
@@ -416,16 +446,33 @@ func title(r *Run) string {
 // rehearsal.Gate measures a round against — and letting it pass costs one more
 // signing round. A setup's is not a gate at all: nothing is armed, no peer is
 // waiting, and letting it pass records nothing, which is the same verdict its
-// third button gives. Calling the second one a signing gate would name a
-// mechanism that is not running.
+// third button gives. A bump's is a budget rather than a gate too, and its
+// expiry has a consequence neither of the others has — the coin lock on the
+// batch's change output goes back.
+//
+// Calling any of the other two a signing gate would name a mechanism that is not
+// running, and the bump one said it over the question about whether to build a
+// child at all, which signs nothing. Found by looking at the page.
 func waitingOn(r *Run, q *Question) string {
 	left := q.Deadline.Sub(q.Asked).Round(time.Second)
-	if r.Kind == KindSetup {
+	switch r.Kind {
+	case KindSetup:
 		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
 			"%s: this question is held open for %s, and that is not a gate on "+
 			"anything — nothing is armed and no peer knows this is happening. "+
 			"Letting it pass records nothing at all, which is exactly what the "+
 			"third button records.",
+			q.Deadline.Format(time.TimeOnly), left))
+	case KindBump:
+		// One sentence for both of a bump's questions — whether to build the
+		// child, and then each device's signature over it. Neither of them is the
+		// gate this UI means everywhere else: the batch is already public, no peer
+		// is waiting, and what expiry costs is the same in both cases.
+		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+			"%s, which is %s from when it was asked. Letting it pass costs only "+
+			"this attempt: no child is signed, and the coin lock Core may be "+
+			"holding on the batch's change output is released. The batch is "+
+			"untouched either way, and `winthistle bump` can be run again.",
 			q.Deadline.Format(time.TimeOnly), left))
 	}
 	return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before %s "+
@@ -446,7 +493,20 @@ func waitingOn(r *Run, q *Question) string {
 // already explains, at length, that the third button records nothing and that the
 // addresses are there tomorrow; repeating either was a duplication a browser
 // showed and no test would have.
-func wayOut() string {
+func wayOut(r *Run) string {
+	if r.Kind == KindBump {
+		// What only this screen knows, and no more. The state line above already
+		// says what expiry costs and the signing prompt says it again; three
+		// copies of one sentence on one page is a duplication a browser shows.
+		return prose.Para("There is no control on this screen that stops a bump, " +
+			"and the clean way out is one of the answers rather than a control: a " +
+			"device that cannot sign fails the round. A batch run has a stop control " +
+			"because it has funding shims open and channels that reached pending; " +
+			"this batch's channels are funded and its funding transaction is public, " +
+			"so there is nothing here to unwind. If it is interrupted some other " +
+			"way — Ctrl-C, or nobody here when the window passes — `winthistle bump " +
+			"--abandon " + r.About + "` hands back a coin lock left behind.")
+	}
 	return prose.Para("There is no control on this screen that stops a setup, and " +
 		"there is nothing for one to stop. A batch run has that control because it " +
 		"has funding shims open, channels that reached pending and coin locks Core " +

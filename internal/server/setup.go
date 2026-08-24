@@ -221,21 +221,3 @@ func noSetup() string {
 		"where the node is down."))
 	return b.String()
 }
-
-// whatIsGoing is one clause naming the live run, in the vocabulary of whichever
-// of the three things it is.
-//
-// It exists because the sentence that used to be written here — the second run's
-// dress rehearsal building a decoy over the same coins — is true of a batch and
-// false of the other two. A refusal that explained a collision that could not
-// have happened would be a false statement in operator copy on the one screen
-// somebody reads while they are already lost.
-func whatIsGoing(live *Run) string {
-	switch live.Kind {
-	case KindSetup:
-		return fmt.Sprintf("A setup of the cold wallet %s is going in this "+
-			"process right now, as run %s", live.About, live.ID)
-	default:
-		return fmt.Sprintf("Run %s is opening the batch right now", live.ID)
-	}
-}

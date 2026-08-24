@@ -3026,13 +3026,25 @@ reproducible from this description in a few minutes, and the durable half of it 
    6. ~~The recovery screens~~ — done. `GET /recover` and `GET /recover/{id}`,
       read-only, needing nothing but the journal. Four decisions with guards, and
       seven defects out of rendering it; see "The journal's own screens".
-   7. **The remaining screens, and the seam still waiting for a POST.** The
-      setup screen is **done** — `GET /setup`, `POST /setup`, and `setup.Ask`
-      has a caller for the first time. The bump screen would give
-      `bump.Approve` its own, and that adapter is still built, unit tested and
-      uncalled, which is the last of the written-but-uncalled code. Then the
-      peer reports, the fee report, the reserve report, the plan document and
-      the settlement report. Verbatim in a `<pre>` is v1 for every one of them.
+   7. **The remaining screens.** The setup and bump screens are **done** —
+      `GET`/`POST /setup` and `GET`/`POST /bump/{id}` — and with them all four
+      callback seams have a caller. **There is no written-but-uncalled code left
+      in this UI.** What remains here is the peer reports, the fee report, the
+      reserve report, the plan document and the settlement report. Verbatim in a
+      `<pre>` is v1 for every one of them.
+
+      **What the bump screen decided.** It hangs off `/recover/{id}` rather than
+      living under it: /recover stays read-only with no POST route, and the link
+      is chrome. The link is offered **only for a run the journal refuses to
+      abort**, and the two conditions are the same condition — `AbortTarget`
+      refuses a run in publishing or published, which is exactly when a parent
+      exists in a mempool to accelerate. A bump does **not** reuse the batch's
+      run id as its registry key, because that would put it on the URL that
+      means "the batch is going in this process"; the batch's id goes in
+      `Run.About`. And `internal/bump` now exports `RoundPrefix`/`RoundName`,
+      because webrun renders different copy for a bump round than for a batch's
+      and matching on a literal spelled in two packages is how that copy lands
+      on the wrong round.
 
       **What the setup screen decided, since the next screen inherits it.**
       Three things. First, it is `winthistle setup`'s **resume path only** and
