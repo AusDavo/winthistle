@@ -88,7 +88,11 @@ Two of these cost real debugging time; both fail in ways that look like your cod
   because there is no fee history to estimate from.
 - **`--tlsextraip=127.0.0.1`** is set, so gRPC from the host validates against
   each node's certificate.
-- **`--maxpendingchannels=10`**, so re-arm cycles don't hit the per-peer default.
+- **`--maxpendingchannels=200`**, so re-arm cycles don't hit the per-peer
+  default. This line said 10 until 2026-08-26; `.env` has set 200 for longer than
+  that, and its own comment says "not the 10 Polar would give you" — so the two
+  files disagreed about which number was the harness's and which was Polar's.
+  `.env` is authoritative: it is the file the containers actually read.
 - **Named volumes, not bind mounts.** Avoids the uid-mismatch trap, and keeps
   this usable against a remote daemon — `docker context create stacker --docker
   host=ssh://stacker@host` then `docker --context stacker compose up -d`.

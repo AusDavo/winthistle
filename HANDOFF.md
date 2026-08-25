@@ -27,7 +27,8 @@ and change findings report rather than refuse and the `Replaceable` lint is gone
 which is not one: it is a run of the tool against real peers with coins that
 never move, and it is written up below.
 
-**The tree.** 28,881 Go lines, down from 55,670 before item 5. Packages:
+**The tree.** ~29,100 Go lines, down from 55,670 before item 5 (28,881 at the
+end of item 5; item 6 put ~250 back). Packages:
 `arm` · `plan` · `combine` · `peers` · `reserve` · `settle` · `journal` ·
 `methods` · `lnd` · `prose` · `config` · `abort` · `doctor` · `policy` · `run`,
 plus `internal/bitcoind` and `internal/regtestenv/coldwallet` **inside the
@@ -159,9 +160,21 @@ so at the moment it happens.
    "shim funded" from `ThawHeight > 0` and a plain PSBT open sets none.
 5. **`--stop-before-publish` exits non-zero if the teardown does not finish.** A
    probe that proved the sequence and then left channels pending is not a
-   success, and a probe is usually run from a terminal somebody walks away from.
-   **Check the exit code.**
-6. **Separately, deliberately let one stream lapse without verifying**, to
+   success. **Check the exit code.**
+6. **You cannot walk away from the teardown, and there is a five-minute clock on
+   it.** Two facts that have to be read together. `--yes` skips the arming
+   prompt and **not** the blunt-abandon confirmation, which `abort.AbandonPending`
+   asks *per channel, at the moment of the rejection*. And `run.recoverRun` wraps
+   the whole teardown — prompts included — in
+   `TeardownBudget = 5 * time.Minute`. `confirmBlunt` discards the context, so
+   the prompt itself waits on stdin indefinitely, but the `PendingChannels` and
+   `AbandonChannel` calls on either side of it do not: **spend more than five
+   minutes cumulatively at those prompts and the abandons start failing with a
+   deadline, after you have already answered yes.** Sit with it, or pipe the
+   answers in — `confirmBlunt` accepts a piped answer deliberately and refuses
+   only end-of-input. This is a live constraint rather than a bug report; whether
+   the prompt belongs outside the budget is a design question nobody has taken.
+7. **Separately, deliberately let one stream lapse without verifying**, to
    observe a real peer's timeout rather than trusting the ten-minute figure.
    Regtest measured 10m41s against a stock LND; a CLN or Eclair peer has its own.
 
@@ -216,8 +229,13 @@ inline in a test or a doc example.
    funding manager blocks when it is full. Steps 5→6 verify all *n* and then
    collect *n* receipts, which is what `arm.Receipts` does, and this flow produces
    exactly two updates per stream before confirmation: `psbt_fund` (read in
-   `Open`) and `chan_pending`. Re-checked against every send site in
-   `funding/manager.go` — `:2217`, `:2873`, `:4254`, and there is no fourth.
+   `Open`) and `chan_pending`. Re-verified against LND v0.19.3-beta on
+   2026-08-26: every send into an update channel in `funding/manager.go` is at
+   `:2217` (`psbt_fund`), `:2884` (`chan_pending`) and `:4265` (`ChanOpen`, which
+   is after confirmation), and there is no fourth. This file used to cite `:2873`
+   and `:4254`, which are the `upd :=` construction and the `if updateChan != nil`
+   guard — a few lines short of the sends, and the kind of citation that stops
+   being checkable.
    There is room for the receipt and no room for anything else. **A third update
    per stream, or a change that stops reading promptly, breaks this and the
    failure looks like a dead peer.** `arm.Receipts`' doc comment says so where it
@@ -229,9 +247,11 @@ inline in a test or a doc example.
    `plan.checkChange`'s own `ChangeMissing` detail text. The rule the
    replacements follow: **name what is missing (the lever), never imply what is
    not (risk).** Nothing is at risk in a stuck batch; what is missing is the
-   exit. Two strings in `internal/regtestenv/coldwallet/build.go` still carry the
-   old framing and were left alone — harness-only, and item 6 did not falsify
-   them.
+   exit. Three strings in `internal/regtestenv/coldwallet/build.go` still carry
+   the old framing and were left alone — harness-only, and item 6 did not
+   falsify them. Two are error messages (`:131`, `:197`); the third (`:109`) is a
+   comment about the CPFP child, which item 5 deleted from the application, so it
+   is stale for a second reason.
 
 **Four claims that were wrong**, found by auditing rather than by working:
 `handleFundingSigned` does not exist in LND v0.19.3-beta (it is
