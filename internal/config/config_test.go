@@ -32,7 +32,6 @@ cookie  = "/core/.cookie"
 wallet  = "winthistle-cold"   # trailing comment
 
 [server]
-bind    = "127.0.0.1:7420"
 journal = "/state/runs.db"
 
 [limits]
@@ -77,9 +76,6 @@ func TestATypicalFileReadsBack(t *testing.T) {
 
 		t.Errorf("signers read back as %+v", cfg.Signers)
 	}
-	if !cfg.Loopback() {
-		t.Error("127.0.0.1 is not being recognised as loopback")
-	}
 }
 
 // TestTheDefaultsAreTheOnesTheCodeAlreadyHas.
@@ -109,9 +105,6 @@ journal = "/state/runs.db"
 	if cfg.Limits.AbortAfterSigning != DefaultAbortAfter {
 		t.Errorf("the abort gate defaulted to %s, not %s",
 			cfg.Limits.AbortAfterSigning, DefaultAbortAfter)
-	}
-	if cfg.Server.Bind != DefaultBind {
-		t.Errorf("bind defaulted to %q", cfg.Server.Bind)
 	}
 	if !cfg.Limits.RequireConfirmedInputs {
 		t.Error("require_confirmed_inputs defaulted to false. An unconfirmed " +
@@ -182,10 +175,10 @@ func TestWhatElseIsRefused(t *testing.T) {
 		"an unknown section": {
 			body: good + "\n[wallet]\nname = \"x\"\n", want: "not a section",
 		},
-		"a wildcard bind": {
-			body: strings.Replace(good, `bind    = "127.0.0.1:7420"`,
-				`bind    = "0.0.0.0:7420"`, 1),
-			want: "wildcard",
+		"a key that was retired": {
+			body: strings.Replace(good, "[server]",
+				"[server]\nbind = \"127.0.0.1:7420\"", 1),
+			want: "there is no socket left for this to name",
 		},
 		"admin.macaroon": {
 			body: strings.Replace(good, "/creds/winthistle.macaroon",

@@ -221,20 +221,52 @@ func (d *document) array(name string) []*table {
 func (d *document) unknown(known map[string]bool) []string {
 	var out []string
 	for _, t := range d.tables {
+		if why, gone := retiredSections[t.name]; gone {
+			out = append(out, fmt.Sprintf("%s: [%s] %s",
+				where(d.path, t.line), t.name, why))
+			continue
+		}
 		if !known[t.name] {
 			out = append(out, fmt.Sprintf("%s: [%s] is not a section this tool reads",
 				where(d.path, t.line), t.name))
 			continue
 		}
 		for _, k := range t.order {
-			if !t.used[k] {
-				out = append(out, fmt.Sprintf("%s: [%s] has no key %q",
-					where(d.path, t.vals[k].line), t.name, k))
+			if t.used[k] {
+				continue
 			}
+			if why, gone := retiredKeys[t.name+"."+k]; gone {
+				out = append(out, fmt.Sprintf("%s: [%s] %s %s",
+					where(d.path, t.vals[k].line), t.name, k, why))
+				continue
+			}
+			out = append(out, fmt.Sprintf("%s: [%s] has no key %q",
+				where(d.path, t.vals[k].line), t.name, k))
 		}
 	}
 	sort.Strings(out)
 	return out
+}
+
+// retiredSections and retiredKeys are what a removed setting says instead of
+// "has no key".
+//
+// Removing a key is a loud breaking change, and that is the right direction to
+// fail in — the file is read once, at the start of a run that may end with a
+// cold wallet on the table, so a setting that quietly stopped doing anything is
+// worse than one that refuses. But the refusal has to be worth reading. "[fees]
+// has no key \"mode\"" reads like a typo; "[fees] mode is gone: the fee rate is
+// no longer asked of Bitcoin Core" reads like the change it is.
+//
+// A key belongs here for one release cycle of this file's own making — long
+// enough that anybody with a configuration from before the change gets the
+// sentence rather than the shrug. Nothing reads these but the refusal.
+var retiredSections = map[string]string{}
+
+var retiredKeys = map[string]string{
+	"server.bind": "is gone: the local web UI went with it, and there is no " +
+		"socket left for this to name. `winthistle run` is the front door. Delete " +
+		"the line; [server] journal stays.",
 }
 
 // The accessors below all mark the key used, so unknown can tell the difference

@@ -198,7 +198,7 @@ type Verification struct {
 // OK reports whether the transaction may go on to psbt_verify.
 func (v *Verification) OK() bool { return len(v.Problems) == 0 }
 
-// VerifyBase64 verifies a PSBT in the encoding a browser upload carries.
+// VerifyBase64 verifies a PSBT that is already in base64.
 func (p *Plan) VerifyBase64(s string) (*Verification, error) {
 	raw, err := base64.StdEncoding.DecodeString(s)
 	if err != nil {

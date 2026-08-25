@@ -1,20 +1,16 @@
 // Command winthistle is the local, guided tool for batch-opening Lightning
 // channels from cold storage.
 //
-// Seven commands, and the order they are in is the order they are used: setup
+// Six commands, and the order they are in is the order they are used: setup
 // builds the watch-only wallet from the cold wallet's descriptors,
-// print-macaroon-command bakes the credential, doctor checks both, serve puts
-// the local web UI on a loopback socket, run opens the batch, bump accelerates
-// one that went out too cheap, and recover takes apart a run that stopped
-// somewhere it should not have.
+// print-macaroon-command bakes the credential, doctor checks both, run opens the
+// batch, bump accelerates one that went out too cheap, and recover takes apart a
+// run that stopped somewhere it should not have.
 //
-// serve is the newest and the least finished. It carries the security shape
-// docs/design.html asks for — loopback bind, a token printed at startup, strict
-// Origin and Host checks, no CORS — and it can now start a run, answer the four
-// questions a run asks, and stop one. What it cannot do is publish: the two
-// locks on that are the pinned call-site count and internal/server's import ban,
-// neither of them a convention. The transports, the countdown and the remaining
-// screens are still to come.
+// There is one front door now. The local web UI is gone: it was a second
+// renderer of the same reports and a second place for the copy to be wrong, and
+// the only thing that ever wanted live redraw is the peers' ten-minute clock,
+// which the inversion took the signing round out of.
 package main
 
 import (
@@ -42,9 +38,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/run"
-	"github.com/AusDavo/winthistle/internal/server"
 	"github.com/AusDavo/winthistle/internal/setup"
-	"github.com/AusDavo/winthistle/internal/webrun"
 )
 
 const usage = `winthistle — batch-open Lightning channels from cold storage.
@@ -53,8 +47,6 @@ Commands:
   setup                    build the watch-only wallet from the cold wallet's
                            descriptors, and end by comparing addresses
   doctor                   check every prerequisite and print what fixes each
-  serve                    serve the local web UI on [server] bind, and print
-                           the URL with the startup token in it
   run --batch FILE --psbt FILE
                            open the batch: Phase 0, the armed window, Phase 2.
                            --psbt is where you save the transaction you build
@@ -76,16 +68,10 @@ attributes the funding outputs to peers, so you can see which peer each one
 funds and at what amount, and it holds the gate — every channel reaches
 chan_pending before the transaction is allowed to reach the network.
 
-The web UI can open a batch: it starts a run, answers the questions a run asks,
-and stops one. What it cannot do is publish — that stays inside the sequence
-that earned it. Missing from it still: the countdown, and the screens that list
-what an earlier run left behind, which recover is still the only way to read.
-
-Either front door drives the same sequence: the peer pre-flight, the fee source
-and the reserve check for Phase 0; the armed window, the wallet's two visits and
-the single publish for Phase 1; the confirmation watch, the policy pass and the
-CPFP child for Phase 2; and the abort and recovery paths under all of it. See
-HANDOFF.md.
+The sequence is the peer pre-flight, the fee source and the reserve check for
+Phase 0; the armed window, the wallet's two visits and the single publish for
+Phase 1; the confirmation watch, the policy pass and the CPFP child for Phase 2;
+and the abort and recovery paths under all of it. See HANDOFF.md.
 `
 
 func main() {
@@ -109,8 +95,6 @@ func main() {
 		err = printMacaroonCommand(os.Args[2:])
 	case "doctor":
 		err = doctorCmd(ctx, os.Args[2:])
-	case "serve":
-		err = serveCmd(ctx, os.Args[2:])
 	case "run":
 		err = runCmd(ctx, os.Args[2:])
 	case "bump":
@@ -302,52 +286,6 @@ func doctorCmd(ctx context.Context, args []string) error {
 	return nil
 }
 
-// serveCmd starts the local web UI.
-//
-// Ctrl-C here shuts the socket down and, if a run is going, cancels it and waits
-// for it to come apart. That used to say "no run is touched", which was true
-// only because nothing this UI served could start one; now that it can, the
-// honest reading of decision 2 is its own sentence — what ends a run is the
-// clock, or the operator's Ctrl-C on the process. A tab closing is still
-// nothing, and that is the asymmetry worth knowing about. internal/server's
-// package comment and HANDOFF.md both say why at length.
-func serveCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
-	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
-	batchPath := fs.String("batch", "", "a batch file, so the doctor screen's "+
-		"peer and anchor-reserve checks are about the batch you mean to open")
-	allowConnect := fs.Bool("connect", false, "let the doctor screen's peer "+
-		"check connect to peers that are not connected already")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
-	cfg, err := loadConfig(*cfgPath)
-	if err != nil {
-		return err
-	}
-	opts := server.Options{Doctor: doctor.Options{Connect: *allowConnect}}
-	if *batchPath != "" {
-		opts.Doctor.Batch, err = config.LoadBatch(*batchPath)
-		if err != nil {
-			return err
-		}
-	}
-
-	// The launcher is what a POST to /runs hands the work to. It is built even
-	// without a batch — a launcher with none reports so, and the control is
-	// absent rather than offered and then refused — and it dials nothing until a
-	// run actually starts, because `winthistle serve` has to work on a machine
-	// where LND is down. That is the state the doctor screen is read in.
-	opts.Launcher = webrun.New(cfg, opts.Doctor.Batch)
-
-	s, err := server.New(cfg, opts)
-	if err != nil {
-		return err
-	}
-	return s.Serve(ctx, os.Stdout)
-}
-
 func runCmd(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
@@ -402,7 +340,7 @@ func runCmd(ctx context.Context, args []string) error {
 	d.Signing = wallet
 
 	if !*yes {
-		fmt.Printf("\n%s", webrun.Summary(batch))
+		fmt.Printf("\n%s", run.BatchSummary(batch))
 		ok, err := ask("Open this batch?")
 		if err != nil {
 			return err
@@ -414,7 +352,7 @@ func runCmd(ctx context.Context, args []string) error {
 
 	id := *runID
 	if id == "" {
-		id, err = server.NewRunID()
+		id, err = run.NewRunID()
 		if err != nil {
 			return err
 		}
@@ -529,7 +467,6 @@ func recoverCmd(ctx context.Context, args []string) error {
 		// rather than here: they are not the same thing and they are not aborted
 		// the same way, but a screen that listed one and not the other would be
 		// telling somebody their node is clean when a coin of theirs is locked.
-		// The web UI's /recover calls the same function for the same reason.
 		runs, err := run.Unfinished(ctx, j, os.Stdout)
 		if err != nil {
 			return err
@@ -552,11 +489,9 @@ func recoverCmd(ctx context.Context, args []string) error {
 
 // connect is the terminal's front door onto run.Connect.
 //
-// The dialling itself moved to internal/run when the web UI grew a second front
-// door: decision 1 is that the CLI and the browser are one code path through
-// run.Do, and two sets of dialling decisions underneath that would drift. What
-// stays here is the part that is genuinely a terminal's — stdout, and the two
-// prompts that read stdin.
+// The dialling itself lives in internal/run so that every command that touches a
+// batch opens the same connections the same way. What stays here is the part
+// that is genuinely a terminal's — stdout, and the two prompts that read stdin.
 func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
 	run.Deps, func(), error) {
 

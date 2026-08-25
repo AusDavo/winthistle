@@ -16,17 +16,15 @@ import (
 // Connect opens everything a run, a bump or a recovery needs, and returns the
 // function that closes it.
 //
-// It lives here rather than in cmd/winthistle because there are two front doors
-// now. Decision 1 is that the CLI and the web UI are one code path through
-// run.Do; the connections underneath it have to be one code path too, or the
-// second front door is a second set of dialling decisions — which timeout, which
-// wallet scope, where the PSBT directory is — that drift from the first without
-// anything noticing.
+// It lives here rather than in cmd/winthistle because it is the same set of
+// connections for every command that touches a batch, and because a test that
+// drives this against the harness should not have to write a configuration file
+// to say where the harness is. There was a second reason once — the local web UI
+// was a second front door and two sets of dialling decisions would have drifted
+// — and it went with the UI.
 //
 // What it deliberately does not fill in is Out, Confirm and Signers. Those are
-// the front door's own: a terminal writes to stdout and asks on stdin, and a
-// browser writes to a transcript and asks over a channel. internal/webrun is the
-// second set.
+// the terminal's own: stdout, and the prompts that read stdin.
 func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 	var d Deps
 
@@ -68,11 +66,10 @@ func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 // `winthistle bump` asks for partial signatures, and a configuration with no
 // [[signer]] blocks is now an ordinary configuration rather than an unusable one.
 //
-// Separate from Connect because a browser-driven bump does not want them: the
-// devices are the same devices and the labels are the same labels, but the
-// packet goes out through the page rather than through a command or a file
-// handshake. Nil for an empty configuration is right — bump refuses a child with
-// no signers, and the refusal it gives says what to add.
+// Separate from Connect because it reads the configuration rather than opening a
+// connection, and because it is the one thing here a run does not want at all.
+// Nil for an empty configuration is right — bump refuses a child with no
+// signers, and the refusal it gives says what to add.
 func ConfiguredSigners(cfg *config.Config, psbtDir string, out io.Writer) (Signers, error) {
 	if len(cfg.Signers) == 0 {
 		return nil, nil

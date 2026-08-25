@@ -215,8 +215,7 @@ const DefaultSettleFor = 30 * time.Minute
 // Running out of it costs nothing that cannot be picked up: `winthistle recover`
 // is safe to run as many times as it takes and everything under it is
 // idempotent. The seams clamp their own deadlines inside this one, so a
-// confirmation nobody answers declines rather than erroring — see
-// webrun.deadlineFor.
+// confirmation nobody answers declines rather than erroring.
 const TeardownBudget = 5 * time.Minute
 
 // Result is what the run did, however far it got.
@@ -735,8 +734,7 @@ func members(armed *arm.Armed, p *prepared, o Options) []settle.Member {
 // # The teardown outlives the cancellation that caused it
 //
 // The commonest reason to be here is that the run's context was cancelled —
-// Ctrl-C in the terminal, or the web UI's abort control, which is the same
-// cancellation from the other front door. On a cancelled context every call
+// Ctrl-C in the terminal. On a cancelled context every call
 // below fails at once: the journal read is a database/sql query, the shim
 // cancels and the abandons are gRPC, and Core's lock release is JSON-RPC. So an
 // abort triggered by Ctrl-C would have reported "context canceled" and taken

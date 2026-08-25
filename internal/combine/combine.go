@@ -141,9 +141,9 @@ type Part struct {
 	// transaction" is a hunt and "cold2 did" is a fix.
 	Label string
 
-	// PSBT is the raw bytes. Base64 is what a browser upload carries, so use
-	// ParseBase64 on the way in rather than teaching this package about
-	// transports.
+	// PSBT is the raw bytes. A wallet may hand you either encoding, so use
+	// Parse or ParseBase64 on the way in rather than teaching this package
+	// about transports.
 	PSBT []byte
 }
 
@@ -202,14 +202,13 @@ var magic = []byte{0x70, 0x73, 0x62, 0x74, 0xff}
 
 // Parse reads a PSBT that arrived as either base64 text or raw bytes.
 //
-// Three transports need this and they need the same answer. A wallet writes
+// Every transport needs this and they need the same answer. A wallet writes
 // whichever form it writes — Sparrow writes binary .psbt files, Core writes
 // base64 — and an operator moving a file by hand should not have to know which
-// one this build wanted. internal/signers' file handshake needed it first, a
-// browser upload needs it now, and it lives here because this is the package
-// that owns what a PSBT is. Two sniffers in two packages could disagree about
-// one file, which is the kind of disagreement that surfaces as a device being
-// blamed for something a transport did.
+// one this build wanted. It lives here because this is the package that owns
+// what a PSBT is. Two sniffers in two packages could disagree about one file,
+// which is the kind of disagreement that surfaces as a device being blamed for
+// something a transport did.
 func Parse(body []byte) ([]byte, error) {
 	trimmed := bytes.TrimSpace(body)
 	if len(trimmed) == 0 {
@@ -274,7 +273,7 @@ func Unsigned(raw []byte) error {
 	return nil
 }
 
-// ParseBase64 decodes a base64 PSBT, for the transport a browser upload uses.
+// ParseBase64 decodes a base64 PSBT, for a caller that already knows it has one.
 func ParseBase64(s string) ([]byte, error) {
 	packet, err := psbt.NewFromRawBytes(bytes.NewReader([]byte(s)), true)
 	if err != nil {

@@ -40,7 +40,6 @@ package config
 
 import (
 	"fmt"
-	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -58,7 +57,6 @@ const DefaultPath = "winthistle.toml"
 // Defaults for the keys that have one. The abort gate's default is
 // rehearsal.DefaultAbortAfterSigning rather than a number written twice.
 const (
-	DefaultBind         = "127.0.0.1:7420"
 	DefaultJournal      = "~/.winthistle/runs.db"
 	DefaultAbortAfter   = rehearsal.DefaultAbortAfterSigning
 	DefaultTargetBlocks = 6
@@ -78,14 +76,11 @@ type Config struct {
 }
 
 // Server is the [server] block.
+//
+// One key left in it. bind went with the local web UI: a key that names a socket
+// nothing opens is the thing this package's own copy calls worse than no key at
+// all, so it is retired by name rather than accepted and ignored.
 type Server struct {
-	// Bind is the address the UI will listen on. A localhost bind is not an
-	// authentication boundary — any process on the machine can reach it — so the
-	// design pairs it with a startup token and strict Origin and Host checks.
-	// What is enforced here is the weaker, earlier thing: a wildcard bind is
-	// refused, because "0.0.0.0" is not an interface anybody chose.
-	Bind string
-
 	// Journal is the run journal's SQLite file. It holds no key material and it
 	// is the one piece of state worth backing up.
 	Journal string
@@ -195,11 +190,9 @@ func Load(path string) (*Config, error) {
 	}
 
 	s := doc.section("server")
-	bind, err := s.str(path, "bind", DefaultBind)
-	fail(err)
 	journal, err := s.str(path, "journal", DefaultJournal)
 	fail(err)
-	c.Server = Server{Bind: bind, Journal: p(journal)}
+	c.Server = Server{Journal: p(journal)}
 
 	lim := doc.section("limits")
 	if lim.has("allow_rbf") {
@@ -283,9 +276,6 @@ func (c *Config) validate(path string, doc *document) []string {
 	need(c.Server.Journal != "", "[server] journal is required: where to keep the "+
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
-	if msg := checkBind(c.Server.Bind); msg != "" {
-		out = append(out, msg)
-	}
 
 	need(c.Limits.AbortAfterSigning > 0, fmt.Sprintf(
 		"[limits] abort_after_signing_seconds is %d. The gate has to be a positive "+
@@ -326,48 +316,6 @@ func (c *Config) validate(path string, doc *document) []string {
 		labels[s.Label] = true
 	}
 	return out
-}
-
-// checkBind refuses a bind address that names no interface.
-//
-// docs/design.html: the tool refuses a non-loopback bind unless a config key
-// explicitly names the interface. A wildcard names none of them — it is every
-// interface the machine has now and every one it grows later — so it is refused
-// outright, while an explicit address is the operator saying which.
-func checkBind(bind string) string {
-	if bind == "" {
-		return "[server] bind is empty"
-	}
-	host, port, err := net.SplitHostPort(bind)
-	if err != nil {
-		return fmt.Sprintf("[server] bind %q is not host:port", bind)
-	}
-	if port == "" {
-		return fmt.Sprintf("[server] bind %q names no port", bind)
-	}
-	switch host {
-	case "", "0.0.0.0", "::", "[::]", "*":
-		return fmt.Sprintf("[server] bind %q is a wildcard, which is every "+
-			"interface this machine has and every one it grows later. Name the "+
-			"interface: \"127.0.0.1:%s\" for the ordinary case, or the address of "+
-			"the one you mean", bind, port)
-	}
-	return ""
-}
-
-// Loopback reports whether the server will bind an address only this machine
-// can reach. False is not refused — the operator named an interface — but it is
-// worth a doctor line, because a localhost bind is the assumption the token and
-// the Origin checks are layered on top of.
-func (c *Config) Loopback() bool {
-	host, _, err := net.SplitHostPort(c.Server.Bind)
-	if err != nil {
-		return false
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return host == "localhost"
 }
 
 // Invalid is a configuration file that could not be used, and every reason.
@@ -418,7 +366,6 @@ cookie  = "~/.bitcoin/.cookie"
 wallet  = "winthistle-cold"
 
 [server]
-bind    = "127.0.0.1:7420"
 journal = "~/.winthistle/runs.db"
 
 [limits]

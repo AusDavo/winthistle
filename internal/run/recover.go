@@ -20,9 +20,8 @@ import (
 // their node is clean while a coin of theirs is locked — Core leaves locked
 // outputs out of listunspent, so a held lock looks exactly like change that was
 // already spent — and a screen that listed only the children would be missing
-// the half that has peers holding reservations. Both front doors call this, so
-// neither can grow half a screen: `winthistle recover` with no argument, and the
-// web UI's /recover.
+// the half that has peers holding reservations. `winthistle recover` with no
+// argument is what calls it.
 //
 // Everything on it comes off the journal's own rows, so it is the same screen on
 // a node that is down — which is the state an operator most often reads it in.
@@ -42,10 +41,10 @@ func Unfinished(ctx context.Context, j *journal.Journal, w io.Writer) (
 
 // listRuns is the run half, and it is deliberately not exported.
 //
-// It was List until the web UI needed the same screen. An exported function that
-// lists the runs and not the children is a trap: it reads like the whole answer,
-// it is the obvious thing for a third front door to call, and what it leaves out
-// is invisible from the screen it produces. Unfinished is the only way in.
+// An exported function that lists the runs and not the children is a trap: it
+// reads like the whole answer, it is the obvious thing for a new caller to
+// reach for, and what it leaves out is invisible from the screen it produces.
+// Unfinished is the only way in.
 func listRuns(ctx context.Context, j *journal.Journal, w io.Writer) (
 	[]*journal.Run, error) {
 

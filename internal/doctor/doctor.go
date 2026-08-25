@@ -232,11 +232,6 @@ func checkConfig(r *Report, cfg *config.Config) {
 	c.say("lnd %s, core %s, wallet %q", cfg.LND.Address, cfg.Bitcoind.Address,
 		cfg.Bitcoind.Wallet)
 	c.say("abort gate %s of the peers' 10m", cfg.Limits.AbortAfterSigning)
-	if !cfg.Loopback() {
-		c.warn("[server] bind is %s, which is not loopback. A bind is not an "+
-			"authentication boundary either way — the token and the Origin checks "+
-			"are — but this one is reachable from off the machine.", cfg.Server.Bind)
-	}
 	if len(cfg.Signers) == 0 {
 		c.fail("no [[signer]] blocks, so there is nothing to sign with. There must " +
 			"be exactly as many as the descriptor requires: btcd's finalizer wants " +
