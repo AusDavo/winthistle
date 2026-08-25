@@ -83,13 +83,32 @@ mainnet**, with **real coins that never move**. Step 8 is simply not taken. It
 proves the one thing no harness can: *these* peers, *this* node, *this* wallet
 and *these* devices.
 
-**Why it costs nothing on-chain.** Nothing is at risk until broadcast. The
-coins stay unspent in a transaction that is never published, and the only
-externality is a briefly held reservation on each peer, which their own timeout
-clears.
+**Why it costs nothing on-chain.** Nothing is at risk until broadcast. The coins
+stay unspent in a transaction that is never published, and there is no fee and no
+footprint.
+
+**It is not free of the peers, though, and this is the thing to plan around.**
+Every channel in a probe reaches `chan_pending` and is then abandoned — and
+`AbandonChannel` touches only *our own* database. The peer, as responder, keeps
+its side pending until `fundingTimeout` fires: `waitForTimeout` counts
+`lncfg.DefaultMaxWaitNumBlocksFundingConf` = **2016 blocks**, about a fortnight
+on mainnet, from the channel's broadcast height. Nothing shortens that and
+nothing tells the peer otherwise. So **a probe spends one of each probed peer's
+pending-channel slots for roughly two weeks**, and `withheld()`'s own screen says
+so at the moment it happens.
 
 ### Before you start
 
+- **Decide which peers you are willing to burn, and decide it first.** This is
+  the only choice in the probe that cannot be taken back, because of the two-week
+  hold above. Against a peer running LND's default `--maxpendingchannels=1`,
+  **probing a peer and then opening a real channel with that peer are a fortnight
+  apart.** Two ways to read that, and both are defensible: probe with the peers
+  you actually want, which is what proves *these* peers and costs you the wait;
+  or probe with two you do not mind, which proves the code path against mainnet
+  and leaves the real batch free to go the same day. `--maxpendingchannels` is
+  not in gossip and cannot be read, so assume 1 unless the peer has told you
+  otherwise.
 - **`winthistle doctor` clean**, against the mainnet node, with the baked
   macaroon rather than `admin.macaroon`. It checks the credential by asking
   `CheckMacaroonPermissions` rather than by calling anything, so a clean doctor
@@ -100,11 +119,22 @@ clears.
 - **Two channels, at the smallest size the chosen peers accept.** The probe is
   commissioning, not an allocation. The first *live* batch afterwards should be
   the same shape.
-- **Know each peer's minimum.** A probe that is refused costs nothing, but a
-  probe that is *accepted* holds one of that peer's pending-channel slots for
-  about eleven minutes and `shim_cancel` does not give it back. Against a peer
-  running LND's default `--maxpendingchannels=1`, probing and then arming
-  collides with itself. See the "probe is not free" bullet under "Watch out for".
+- **Know each peer's minimum, and find it out for free.** Every limit check runs
+  *before* the peer creates a reservation, so a probe the peer **refuses** costs
+  nothing at all and you may probe downwards as often as you like. Worth doing
+  before the run: a size a peer rejects at step 2 is rejected on the clock.
+
+  **Three costs, and they are not the same size.** A refused probe: nothing. A
+  *shim* probe the peer accepts (`run --probe`, or a stream that reaches
+  `accept_channel` and is then cancelled): one slot for **about eleven minutes**,
+  because `shim_cancel` deletes an entry in our own wallet and sends the peer
+  nothing. A channel that reached `chan_pending` and was abandoned — **which is
+  every channel in a probe**: one slot for **~2016 blocks**. The peer counts live
+  reservations *plus* pending channels with no thaw height against the same
+  `--maxpendingchannels` budget, so all three draw on one number. This file used
+  to name only the eleven-minute one here, which is the smallest of the three and
+  not the one a probe actually incurs. See the "probe is not free" bullet under
+  "Watch out for" for the reservation half.
 - **A declared fee rate.** `[fees] target_sat_per_vb` must be set or the config
   will not load. The number does not matter much here — nothing is published —
   but a wrong one now produces a report at step 5, not a refusal, so it will not
@@ -389,6 +419,11 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
   costs *us* nothing, but the peer has already sent `accept_channel` and holds
   its reservation until its own timeout, so a tight run of `make test` can still
   crowd a peer for ten minutes.
+
+  **On mainnet this bullet is not an annoyance, it is a fortnight**, and there is
+  no `mine N=2016` to reach for. The same fact — the peer keeps an abandoned
+  channel pending until `fundingTimeout` — is what makes the cold probe cost one
+  pending-channel slot per peer for ~2016 blocks. See "The next thing" above.
 - **A shim probe that succeeds is not free.** The peer holds a reservation for
   about eleven minutes and `shim_cancel` does not tell it otherwise. Probing all
   *n* peers and then arming collides with itself against any peer running LND's
