@@ -280,7 +280,7 @@ rather than as correct behaviour. Neither is a safety failure — the batch is
 unarmed, unpublishable and abortable throughout — and neither was changed in this
 slice, because a deadline on the armed window is a design decision about the
 countdown and the 5:00 gate rather than a test fixture. It is carried in
-`HANDOFF.md`'s "Next actions" as its own item.
+`HANDOFF.md`'s "Next actions" as item 3.
 
 **Two corrections to what this row assumed about publish, both from LND's
 source at v0.19.3-beta.** First, LND does not pass Core's reject reason through.

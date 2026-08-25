@@ -112,13 +112,25 @@ see "Held open" below.
    failed once in a full-suite run and passes alone and on repeat. `-p 1` stops
    two test binaries sharing alice concurrently; it does not undo what an earlier
    package left in the mempool.
-4. **Three of the review's item-3 scenarios were not written, and they are not
-   test-writing jobs.** An LND restart mid-batch and a peer that accepts then
-   goes silent both need container stop/start, which `internal/regtestenv` does
-   not have. Core unreachable at the `testmempoolaccept` pre-flight inside the
-   armed window needs a seam where `run.Deps` holds a concrete `*bitcoind.Client`
-   — and Phase 0's fee estimate uses the same client, so a dead one fails earlier
-   and tests a different thing.
+4. **Two of the three item-3 scenarios this list called un-writable were
+   ordinary test-writing jobs, and one still is not.** This entry said an LND
+   restart mid-batch and a peer that accepts then goes silent both needed
+   container stop/start that `internal/regtestenv` does not have. They did not:
+   both are failures of the *counterparty* arriving at `arm.Client`, and a stub
+   client returns either one at exactly the chosen channel, every time — which is
+   a better test of our handling than a container stopped at the right moment
+   would be. Both shipped on 2026-08-25 in `internal/arm/mid_batch_test.go`. The
+   lesson is the one the triage audit taught twice in the same slice: **check
+   what a scenario actually needs before recording that it cannot be reached.**
+
+   The third is still open and its reasoning still holds. **Core unreachable at
+   the `testmempoolaccept` pre-flight inside the armed window** needs a seam
+   where `run.Deps` holds a concrete `*bitcoind.Client`, and Phase 0's fee
+   estimate uses the same client, so a dead one fails earlier and tests a
+   different thing. Note this is *not* the triage's "bitcoind unreachable at
+   publish time" row, which is covered — nothing calls Core at publish, so that
+   one arrives as LND's transport error. This is the pre-flight, several steps
+   earlier, with *n* streams already open.
 
 **That decision was owed before the transports slice and it has been made.** See
 "The QR decision and the file transport" below. In short: review item 7 was
@@ -3269,9 +3281,9 @@ to no peer and pays no fee.
    whose subject is LND's own behaviour. `internal/arm`'s publish test is still
    the only test in this repository that publishes and must stay so.
 
-   **The one thing driving them found is a code gap, and it is item 2a below.**
+   **The one thing driving them found is a code gap, and it is item 3 below.**
 
-2a. **Nothing bounds the wait for a `chan_pending`, and the fallback shares the
+3. **Nothing bounds the wait for a `chan_pending`, and the fallback shares the
    context that ends it.** `arm.finalizeOne` blocks in `Recv` with no deadline of
    its own, and `winthistle run` builds its context from `signal.NotifyContext`
    and nothing else — so a peer that accepts `psbt_finalize` and never sends
@@ -3289,7 +3301,7 @@ to no peer and pays no fee.
    clock may bound what ("Watch out for"). The `isPending` half is much smaller
    than the deadline half and could be taken on its own: a `context.WithoutCancel`
    plus a short timeout would let the one question that matters still be asked.
-3. **Signet, for the two things regtest cannot reach.** The descriptor-import
+4. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
    `internal/coldwallet/coldwallet_regtest_test.go`. `winthistle doctor` reports
@@ -3316,11 +3328,11 @@ to no peer and pays no fee.
    the indistinguishability the round-trip address check exists to cover, and
    pinning it is what stops a later slice turning the birthday into a promise it
    cannot keep.
-4. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
+5. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-5. **Nothing new at this level.** What remains is items 2a, 3 and 4, in that
+6. **Nothing new at this level.** What remains is items 3, 4 and 5, in that
    order, and only the last of them needs something this machine does not have —
    mainnet coins and real peers. Three claims on this list have now been wrong the
    same way: that no browser was installed, which cost a guard bug a single click
