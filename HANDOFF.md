@@ -3250,21 +3250,45 @@ to no peer and pays no fee.
 
    Still true before the first browser-driven armed window on anything that
    matters: the startup-token cookie is not port-scoped (see "Watch out for").
-2. **The adversarial harness**, which is not on this list because it is on the
-   other one. With item 1 closed, the next work comes off
-   `docs/review-2026-08-triage.md`'s "Recommended order, revised", where every
-   entry has shipped except finding 3: the scenarios that have no test. It
-   belongs before the cold probe rather than after, for the reason the build
-   order is inverted at all — the probe terminates through the abort path, and
-   these are the failures that path exists for.
+2. ~~**The adversarial harness**~~ — **done 2026-08-25.** All seven of finding
+   3's scenarios have a test, and `docs/review-2026-08-triage.md` item 3 is
+   `DONE` with the table re-audited row by row. Three things from it are worth
+   carrying forward rather than re-deriving:
 
-   Two things to know before starting it. Its scenario table is **partly stale**:
-   the duplicate/non-member receipt row reads "absent" and
-   `internal/journal/receipts_test.go` now covers all three cases `MarkPending`
-   guards, so auditing the table is part of the slice rather than a preamble.
-   And `internal/arm`'s publish test is the only test here that publishes and
-   must stay so — a mempool-rejection test asserts the *refusal*, which is a
-   transaction Core will reject rather than one it will relay.
+   **Two of the seven rows were already covered when the table said "absent".**
+   `internal/journal/receipts_test.go` and `internal/arm/publish_refused_test.go`
+   both landed one commit *after* the triage was written. Auditing the worklist
+   was a third of the slice and it was the third that paid: without it the slice
+   would have spent its budget rebuilding tests that existed.
+
+   **Five of the seven are stub tests, and that is the stronger test here.** What
+   these scenarios exercise is our handling of a counterparty failure — a peer
+   that goes silent, a node that restarts, a backend that is gone. A stub returns
+   that failure at exactly the chosen channel, every time; a container broken at
+   the right moment does not. The two that stayed on the cluster are the two
+   whose subject is LND's own behaviour. `internal/arm`'s publish test is still
+   the only test in this repository that publishes and must stay so.
+
+   **The one thing driving them found is a code gap, and it is item 2a below.**
+
+2a. **Nothing bounds the wait for a `chan_pending`, and the fallback shares the
+   context that ends it.** `arm.finalizeOne` blocks in `Recv` with no deadline of
+   its own, and `winthistle run` builds its context from `signal.NotifyContext`
+   and nothing else — so a peer that accepts `psbt_finalize` and never sends
+   `funding_signed` parks the armed window until `Ctrl-C`, with the rest of the
+   batch already armed behind it. Then, because the context that ended the wait
+   is the one `isPending` is asked on, the lookup that decides abandon-versus-
+   cancel fails too, and the operator is told "this channel's state is unknown"
+   about a channel LND could still have answered for.
+
+   Neither is a safety failure: the batch is unarmed, unpublishable and abortable
+   throughout, and `TestAPeerThatNeverAnswersFinalizeLeavesTheBatchUnarmed` pins
+   both as current behaviour rather than as correct behaviour. It was left alone
+   on purpose — a deadline on the armed window is a decision about the countdown
+   and the 5:00 gate, not a test fixture, and the seams' rule already says which
+   clock may bound what ("Watch out for"). The `isPending` half is much smaller
+   than the deadline half and could be taken on its own: a `context.WithoutCancel`
+   plus a short timeout would let the one question that matters still be asked.
 3. **Signet, for the two things regtest cannot reach.** The descriptor-import
    rescan and the prune-horizon pre-flight both need a chain with history. Both
    are built and both are untested; see the note in
@@ -3296,12 +3320,14 @@ to no peer and pays no fee.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-5. **Nothing new at this level.** What remains is items 2 to 4, in that order,
-   and only the last of them needs something this machine does not have — mainnet
-   coins and real peers. Two claims on this list have now been wrong the same
-   way: that no browser was installed, which cost a guard bug a single click
-   would have found, and that signet needed absent hardware. Both survived
-   several handoffs because nobody checked. Check before writing "we cannot".
+5. **Nothing new at this level.** What remains is items 2a, 3 and 4, in that
+   order, and only the last of them needs something this machine does not have —
+   mainnet coins and real peers. Three claims on this list have now been wrong the
+   same way: that no browser was installed, which cost a guard bug a single click
+   would have found; that signet needed absent hardware; and that finding 3 had
+   five missing scenarios, when two of them had shipped a commit later. All three
+   survived several handoffs because nobody checked. Check before writing "we
+   cannot" — and check a worklist before working it.
 
 Done since the last handoff, all from the previous list:
 
@@ -3741,6 +3767,32 @@ Done since the last handoff, all from the previous list:
   history too.** Renaming a key is a breaking change to every operator's file,
   and the failure is loud rather than silent. That is the intent; it is also
   worth remembering before renaming one.
+
+- **Waiting out the peers' window on a batch gives you no receipts, not one.**
+  The obvious way to drive "a funding timeout expires with one receipt
+  outstanding" is to open the batch, wait eleven minutes and finalize. It does
+  not work: every peer's clock starts at its own `accept_channel`, so a batch
+  opened together lapses together, and what you get is *n* dead reservations and
+  a `psbt_verify` that already failed before any finalize. What produces one
+  survivor is a **stagger** —
+  `TestOnePeersWindowExpiringLeavesTheRestOfTheBatchArmed` opens the doomed
+  stream six minutes before the other, verifies both while both are alive
+  (`psbt_verify` is local and touches no timer, which is why it passes minutes
+  before one member is gone), watches the first peer give up rather than sleeping
+  past it, and finalizes afterwards. `WINTHISTLE_SLOW=1`, ~12 minutes, and it
+  holds alice's streams and the cold wallet's coin locks for all of it — so do
+  not run anything else harness-backed alongside it.
+
+- **LND calls itself unsynced when regtest's tip is more than two hours old, and
+  a long test can cross that line mid-run.** btcwallet's `IsSynced`: "if the
+  timestamp on the best header is more than 2 hours in the past, then we're not
+  yet synced" — exactly two hours, at v0.19.3-beta. `OpenChannel` then refuses
+  with `channels cannot be created before the wallet is fully synced`, which
+  reads like a node problem and is a *clock* problem: nothing has been mined.
+  It bit the funding-timeout test on its first run, where the stream opened at
+  t+0 and the one at t+6m did not. `env.Mine(t, 1)` at the start buys two hours
+  of headroom and confirms nothing but itself. Any test that spans minutes on an
+  idle cluster wants it.
 
 ## Open questions
 

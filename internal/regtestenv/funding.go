@@ -306,6 +306,33 @@ func (e *Env) SignAndCombine(t *testing.T, funded FundedPSBT) (rawTxHex, txid st
 // ChanType.HasFundingTx() and that is what gates the broadcast block.
 func (e *Env) Finalize(t *testing.T, s *Stream, rawTxHex string) lnd.ChannelPoint {
 	t.Helper()
+	if err := e.TryFinalize(t, s, rawTxHex); err != nil {
+		t.Fatalf("psbt_finalize for %s: %v", s.PendingChanID, err)
+	}
+	upd, err := s.recv.Recv()
+	if err != nil {
+		t.Fatalf("waiting for chan_pending on %s: %v", s.PendingChanID, err)
+	}
+	pending := upd.GetChanPending()
+	if pending == nil {
+		t.Fatalf("expected chan_pending, got %T", upd.GetUpdate())
+	}
+	cp, err := lnd.ChannelPointFromPending(pending.GetTxid(), pending.GetOutputIndex())
+	if err != nil {
+		t.Fatalf("reading chan_pending outpoint: %v", err)
+	}
+	return cp
+}
+
+// TryFinalize is step 7 for one stream, with the refusal handed back.
+//
+// Finalize fatals, which is right almost everywhere: psbt_finalize failing is
+// not what those tests are about. It is exactly what one test is about — a
+// reservation the peer has already swept — and there the refusal is the
+// measurement, so it cannot be a t.Fatal. It does not wait for chan_pending:
+// a call that was refused has no receipt coming.
+func (e *Env) TryFinalize(t *testing.T, s *Stream, rawTxHex string) error {
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -321,23 +348,7 @@ func (e *Env) Finalize(t *testing.T, s *Stream, rawTxHex string) lnd.ChannelPoin
 			},
 		},
 	})
-	if err != nil {
-		t.Fatalf("psbt_finalize for %s: %v", s.PendingChanID, err)
-	}
-
-	upd, err := s.recv.Recv()
-	if err != nil {
-		t.Fatalf("waiting for chan_pending on %s: %v", s.PendingChanID, err)
-	}
-	pending := upd.GetChanPending()
-	if pending == nil {
-		t.Fatalf("expected chan_pending, got %T", upd.GetUpdate())
-	}
-	cp, err := lnd.ChannelPointFromPending(pending.GetTxid(), pending.GetOutputIndex())
-	if err != nil {
-		t.Fatalf("reading chan_pending outpoint: %v", err)
-	}
-	return cp
+	return err
 }
 
 // OpenAndConfirmPlainChannel opens a channel the ordinary way — LND funds it

@@ -214,10 +214,11 @@ func recoveryPublished(r *journal.Run) string {
 			"recoverable before it went out, and the settlement pass takes over — " +
 			"confirmation, then the forwarding policy on each channel."))
 	b.WriteString(Bullet(
-		"If it is not there: re-broadcast it. The raw transaction is in this run's " +
-			"journal row for exactly this reason. no_publish also turns off LND's " +
-			"own rebroadcaster for this transaction, so nothing else is going to do " +
-			"it."))
+		"If it is not there: re-broadcast it yourself, with bitcoin-cli " +
+			"sendrawtransaction <hex>. The raw transaction is in this run's journal " +
+			"row for exactly this reason. winthistle will not do it — the journal " +
+			"refuses a second publish for a run that already reached the call — and " +
+			"no_publish turned off LND's own rebroadcaster for this transaction."))
 	b.WriteString(Bullet(
 		"Do not abandon anything, and do not build a replacement. Replacing the " +
 			"transaction changes every funding outpoint in it, and the peers hold " +

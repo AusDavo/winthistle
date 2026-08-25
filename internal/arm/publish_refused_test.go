@@ -12,6 +12,7 @@ import (
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
+	"github.com/lightningnetwork/lnd/lnwallet"
 	"google.golang.org/grpc"
 )
 
@@ -107,7 +108,11 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		// what the operator has to be able to read in the message
 		says string
 	}{{
-		name: "a gRPC error, which is how v0.19.3-beta reports a rejection",
+		// The general case: whatever the node said, said back. The two cases
+		// below are the specific shapes v0.19.3-beta actually produces, and this
+		// one is here because our wrapping must not swallow a message it does not
+		// recognise either.
+		name: "an error the node returned and this build has never seen",
 		pub:  &refusingPublisher{err: errors.New("insufficient fee, rejecting replacement")},
 		says: "insufficient fee",
 	}, {
@@ -118,6 +123,46 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		name: "publish_error inside a successful response",
 		pub:  &refusingPublisher{inRep: "txn-mempool-conflict"},
 		says: "txn-mempool-conflict",
+	}, {
+		// A real mempool rejection, in the form it actually arrives in.
+		//
+		// BtcWallet.PublishTransaction runs the backend's TestMempoolAccept
+		// first and, when it refuses, maps the reject reason through
+		// mapRpcclientError. ErrMempoolConflict, ErrMissingInputs,
+		// ErrTxAlreadyKnown and ErrTxAlreadyConfirmed all collapse into a bare
+		// lnwallet.ErrDoubleSpend — Core's reject string is *dropped*, so
+		// "txn-mempool-conflict" above is what the proto could carry and not what
+		// v0.19.3-beta says. Which is why the assertion here is that our message
+		// keeps what we were told, however little that is: an operator with n
+		// peers holding reservations gets "output already spent" and no reason
+		// code, and must not also lose it to our own wrapping.
+		name: "a mempool conflict, which LND reduces to ErrDoubleSpend",
+		pub:  &refusingPublisher{err: lnwallet.ErrDoubleSpend},
+		says: "output already spent",
+	}, {
+		// The one rejection whose reason survives: ErrMempoolMinFeeNotMet is
+		// wrapped rather than replaced, so the operator sees the backend's text.
+		name: "a fee too low for the mempool, which keeps its reason",
+		pub: &refusingPublisher{err: fmt.Errorf("%w: %v", lnwallet.ErrMempoolFee,
+			"min relay fee not met, 100 < 141")},
+		says: "min relay fee not met",
+	}, {
+		// bitcoind unreachable at publish time.
+		//
+		// We never call Core here — the only pre-flight is testmempoolaccept, and
+		// that ran back in the armed window. LND is the one that needs the
+		// backend, and it needs it twice inside this single RPC: BtcWallet asks
+		// the chain for TestMempoolAccept before publishing, and a failure that
+		// is not ErrBackendVersion is returned raw. So a dead bitcoind arrives
+		// here as an ordinary transport error, and the important part is what it
+		// does *not* let us say: nothing distinguishes "the backend was gone
+		// before the broadcast" from "the broadcast happened and the answer was
+		// lost", so the run stays in publishing like any other refusal.
+		name: "bitcoind unreachable, which reaches us as LND's transport error",
+		pub: &refusingPublisher{err: errors.New(
+			"rpc error: code = Unknown desc = Post \"http://127.0.0.1:18443\": " +
+				"dial tcp 127.0.0.1:18443: connect: connection refused")},
+		says: "connection refused",
 	}}
 
 	for _, tc := range cases {
@@ -184,5 +229,56 @@ func TestARefusedPublishKeepsTheTransactionToRebroadcast(t *testing.T) {
 	}
 	if run.TxID != refusedTxID {
 		t.Errorf("journalled txid %s, want %s", run.TxID, refusedTxID)
+	}
+}
+
+// After a refusal, there is no retry through this program — and the operator
+// copy has to say so, because "re-broadcast it" is the advice.
+//
+// MarkPublishing accepts only a run in armed, and a refused publish leaves the
+// run in publishing. That is deliberate rather than an oversight: the state is
+// what stops an abort, and moving back out of it to allow a retry would be
+// moving back out of the only thing standing between a pending channel and an
+// abandon it must not have. But it means the raw transaction in the journal is
+// re-broadcast by the operator with their own tools —
+// `bitcoin-cli sendrawtransaction <hex>` — and not by a second call from here. A
+// retry path in this repository would be a third WalletKit.PublishTransaction
+// call site, which the pinned count of 2 forbids.
+func TestARefusedPublishCannotBeRetriedThroughThisProgram(t *testing.T) {
+	ctx := context.Background()
+	runID := "refused-no-retry"
+	j, a := armedRun(t, runID)
+
+	pub := &refusingPublisher{err: lnwallet.ErrDoubleSpend}
+	if err := Publish(ctx, pub, j, a); err == nil {
+		t.Fatal("expected a refusal")
+	}
+
+	// The same call again, as an operator would reach for it.
+	err := Publish(ctx, pub, j, a)
+	if err == nil {
+		t.Fatal("a second publish was accepted. The run is in publishing, which " +
+			"is the state that refuses an abort — it must not also be a state a " +
+			"fresh broadcast can start from")
+	}
+	if !errors.Is(err, journal.ErrNotArmed) {
+		t.Errorf("error is %v, want ErrNotArmed: the journal is what refuses, and "+
+			"a caller has to be able to tell that from a node that said no", err)
+	}
+	if pub.calls != 1 {
+		t.Errorf("PublishTransaction was called %d times, want 1 — the second "+
+			"attempt must not reach the node at all", pub.calls)
+	}
+
+	run, err := j.Load(ctx, runID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if run.State != journal.StatePublishing {
+		t.Errorf("the run is %s, want %s", run.State, journal.StatePublishing)
+	}
+	if run.RawTx == "" {
+		t.Error("the raw transaction is gone, and it is the only thing an operator " +
+			"has left to re-broadcast with")
 	}
 }

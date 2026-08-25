@@ -94,9 +94,11 @@ func mayBePublic(armed *arm.Armed, err error) string {
 		"getmempoolentry, then getrawtransaction."))
 	b.WriteString(prose.Bullet("If it is there, this is an ordinary settlement: " +
 		"every channel is recoverable and the batch simply needs to confirm."))
-	b.WriteString(prose.Bullet("If it is not, re-broadcast it. The finalized " +
-		"transaction is in the journal, which is why it is stored — no_publish " +
-		"also gates LND's own rebroadcaster, so that duty is ours."))
+	b.WriteString(prose.Bullet("If it is not, re-broadcast it yourself: " +
+		"bitcoin-cli sendrawtransaction <hex>, with the finalized transaction from " +
+		"the journal, which is why it is stored. winthistle will not make the call " +
+		"twice — the journal refuses a run that already reached it — and no_publish " +
+		"also gates LND's own rebroadcaster. That duty is yours."))
 	b.WriteString(prose.Bullet("Do not abandon these channels, and the tool will " +
 		"not let you: abandoning a pending channel whose funding transaction then " +
 		"confirms strands its funds with no force-close path. That is the one " +

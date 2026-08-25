@@ -230,7 +230,7 @@ script. Plus `TestTheVerifierStillGetsTheLastWord`.
 lifted rather than honoured, because honouring it means writing a spec for
 shipped, tested code.
 
-### 3. Adversarial harness — **PARTIAL**
+### 3. Adversarial harness — **DONE** (2026-08-25)
 
 The review's acceptance criterion is already the house pattern: `env.InMempool`
 assertions appear in `internal/abort`, `internal/journal`, `internal/run` and
@@ -238,25 +238,79 @@ assertions appear in `internal/abort`, `internal/journal`, `internal/run` and
 after *every* finalize including the last, which is the one that actually tests
 I-1. And the second half it says "matters as much" (a state `recover` can act
 on) is done: `journal.Recover` is the same code path `winthistle recover` runs,
-exercised by `recover_regtest_test.go`. 388 test functions across 61 files.
+exercised by `recover_regtest_test.go`. 472 test functions across 75 files.
 
-Scenario by scenario:
+Scenario by scenario, **re-audited against the code on 2026-08-25** and no
+longer the list this file shipped with. Two rows were already stale when they
+were written — `internal/journal/receipts_test.go` and
+`internal/arm/publish_refused_test.go` both landed in `111e619`, one commit
+after this file. The "peer disconnects" row was correct as written. The other
+four were done in the slice that made this edit.
 
 | Scenario | Status |
 |---|---|
-| Peer disconnects between finalize 2 and 3 | **covered** — `TestRunAbortsAPartiallyArmedBatch`, `TestAFailureInsideTheArmedWindowIsTakenApart`; and per Correction B this is the natural shape of the loop |
-| `PublishTransaction` fails at the gate | **partly** — `TestPublishRefusesABatchTheJournalDoesNotCallArmed`, `TestMarkPublishingRefusesAPartiallyArmedBatch`, `TestACrashMidPublishLeavesTheTransactionOnDisk`. The *refusals* are tested; a real mempool rejection (already-in-mempool, insufficient fee) is not |
-| Peer never responds to `FundingStateStep` | **absent** |
-| LND restarts mid-batch after some receipts | **absent** |
-| Funding timeout expires with one receipt outstanding | **absent** — `TestWhoOwnsTheTenMinuteClock` measures the clock (10m41s against bob) but does not drive this |
-| Duplicate receipt, or a receipt for a non-member channel | **absent** — `TestWritesToAnUnknownRunAreRefused` is the nearest and is about runs, not channels |
-| bitcoind unreachable at publish time | **absent** |
+| Peer disconnects between finalize 2 and 3 | **covered, harness** — `TestRunAbortsAPartiallyArmedBatch`, `TestAFailureInsideTheArmedWindowIsTakenApart`; and per Correction B this is the natural shape of the loop. `TestASilentPeerWithNothingPendingIsAMissingReceipt` is the same failure at the seam |
+| `PublishTransaction` fails at the gate | **covered, stub** — `internal/arm/publish_refused_test.go`: five refusals, including the two shapes a real mempool rejection actually arrives in, and the fact that a refused publish cannot be retried through this program |
+| Peer never responds to `FundingStateStep` | **covered, stub** — `TestAPeerThatNeverAnswersFinalizeLeavesTheBatchUnarmed`, plus both ways a lost receipt resolves (`TestALostReceiptIsRecoveredFromPendingChannels`). This is the row that found something; see below |
+| LND restarts mid-batch after some receipts | **covered, stub** — `TestLNDRestartingMidBatchLeavesExactlyTheReceiptsThatArrived`: one receipt of three, and an abort target that splits 1 abandon against 2 shim cancels |
+| Funding timeout expires with one receipt outstanding | **covered, harness**, behind `WINTHISTLE_SLOW=1` — `TestOnePeersWindowExpiringLeavesTheRestOfTheBatchArmed`, ~11 minutes. It needs a **stagger**, not a wait: every peer's clock starts at its own `accept_channel`, so a batch opened together lapses together, and waiting eleven minutes gives two dead reservations and no receipt at all. Measured 2026-08-25: the first peer gave up at 10m39s and at 10m13s on two runs — the sweeper's one-minute granularity, around the clock test's 10m41s — and `psbt_finalize` against the swept reservation is refused by our own node, synchronously, with "no funding intent found for pendingChannelID(…)" |
+| Duplicate receipt, or a receipt for a non-member channel | **covered, unit** — `internal/journal/receipts_test.go` covers all three cases `MarkPending` guards: a repeated receipt is idempotent, a receipt for a channel this run does not own is `ErrNoRun`, and one naming a different outpoint is `ErrOutpointMoved` |
+| bitcoind unreachable at publish time | **covered, stub** — a case in the publish table. Nothing in this repository calls Core at publish time: the only pre-flight, `testmempoolaccept`, ran back in the armed window, and it is LND that needs the backend. So it arrives as an ordinary transport error and is handled as one |
 
-Five genuinely missing scenarios. **VALID**, and the cheapest of them
-(duplicate/non-member receipt) is a unit test against the journal, not a harness
-test. Note `make test` uses `-p 1` deliberately — two harness-backed packages
-through one alice fail with LND's reserved-value error, which says nothing about
-the real cause — so new regtest tests must respect that.
+**Why five of the seven are stubs, and why that is the stronger test here.** What
+these scenarios exercise is *our* handling of a counterparty failure, and a stub
+that returns the failure at exactly the chosen channel, every time, tests that
+better than a container broken at the right moment. The harness is for what LND
+and Core actually do — which is why the two rows that stayed on it are the two
+whose subject is LND's own behaviour: what a real half-armed batch leaves behind,
+and what a swept reservation does to `psbt_finalize`.
+
+**What driving them turned up.** One thing, and it is in the code rather than in
+the harness: **nothing bounds the wait for a `chan_pending`.** `finalizeOne`
+blocks in `Recv` with no deadline of its own, and `winthistle run` builds its
+context from `signal.NotifyContext` and nothing else — so a peer that accepts
+`psbt_finalize` and never sends `funding_signed` parks the armed window until
+`Ctrl-C`, with the rest of the batch already armed behind it. And when that
+context *is* what ends the wait, the fallback that would settle the channel's
+state cannot run either: `isPending` is asked on the same context, so it fails
+too and the operator is told "this channel's state is unknown" about a channel
+LND could still have answered for. Both are pinned by
+`TestAPeerThatNeverAnswersFinalizeLeavesTheBatchUnarmed` as *current* behaviour
+rather than as correct behaviour. Neither is a safety failure — the batch is
+unarmed, unpublishable and abortable throughout — and neither was changed in this
+slice, because a deadline on the armed window is a design decision about the
+countdown and the 5:00 gate rather than a test fixture. It is carried in
+`HANDOFF.md`'s "Next actions" as its own item.
+
+**Two corrections to what this row assumed about publish, both from LND's
+source at v0.19.3-beta.** First, LND does not pass Core's reject reason through.
+`BtcWallet.PublishTransaction` runs the backend's `TestMempoolAccept` and maps
+the result: `ErrMempoolConflict`, `ErrMissingInputs`, `ErrTxAlreadyKnown` and
+`ErrTxAlreadyConfirmed` all collapse into a bare `lnwallet.ErrDoubleSpend` —
+"transaction rejected: output already spent", reason code gone. Only
+`ErrMempoolMinFeeNotMet` is wrapped rather than replaced, so it is the one
+rejection whose text survives to the operator. Second, **"already in mempool" is
+not a rejection at all**: `ErrTxAlreadyInMempool` is re-published to set the
+label and returns nil, so that half of the row was asking for a test of a failure
+that does not happen.
+
+**And one thing the operator copy was quietly wrong about.** Both places that say
+"re-broadcast it" — `prose.Recovery` and `run.mayBePublic` — implied the tool
+would. It will not: `MarkPublishing` accepts only a run in `armed`, and a refused
+publish leaves the run in `publishing`, which is also the state that refuses an
+abort. So there is no retry path here and there cannot be one, because a retry
+would be a third `WalletKit.PublishTransaction` call site. Both now name
+`bitcoin-cli sendrawtransaction <hex>` and say the duty is the operator's;
+`TestARefusedPublishCannotBeRetriedThroughThisProgram` is what keeps that true.
+Neither says "nothing else will do it", which was the tempting shorter sentence
+and is not provable: `no_publish` gates the *funding manager's* rebroadcaster,
+and whether btcwallet's wallet-level one has the transaction depends on how far
+the failed call got — which is the one thing an error does not tell you.
+
+`make test` uses `-p 1` deliberately — two harness-backed packages through one
+alice fail with LND's reserved-value error, which says nothing about the real
+cause — so the new tests went into packages that already have harness tests
+rather than into new ones.
 
 ### 4. Operator surface — **WRONG** on the premise, small **VALID** core
 
@@ -489,13 +543,21 @@ scoped (4). What is left, cheapest-first:
    in the peer pre-flight, surfaced in `doctor --batch` too.
 3. **Item 2a's one real field** — the peer alias into `plan.Channel` and the
    sheet.
-4. **Item 3's five missing scenarios**, cheapest first: duplicate / non-member
-   receipt (unit, against the journal), then bitcoind unreachable at publish,
-   mempool rejection at publish, peer never responds, LND restart mid-batch.
-   Respect `-p 1`.
+4. ~~**Item 3's five missing scenarios**~~ — **done 2026-08-25**, and two of the
+   five were already done when this line was written. The audit is the part
+   worth keeping: a worklist nobody re-checked would have spent the slice
+   rebuilding `internal/journal/receipts_test.go`. Five of the seven rows are
+   stub tests, deliberately — see the section above for why that is the stronger
+   test when the subject is our handling rather than LND's behaviour.
 5. **Item 8's docs residue** — the state table in `docs/design.html`.
 6. **Item 4's reduced core** — render `journal.Run` as a live per-channel table
    on the attach screen, plus the countdown.
+
+**On the rest of this list.** `HANDOFF.md`'s "Next actions" records items 1, 2, 3,
+5 and 6 as shipped in the slices between this file and 2026-08-25. That was not
+re-audited here — only item 3 was, because it was the one being worked — so the
+strikethrough on 4 is the only status on this list that has been checked against
+the code. Check before building, the way item 3 turned out to need.
 
 Not doing now, on the evidence above: 2b (built and tested), 8 as specified (no
 such artifact, and versioning is rejected by design).
