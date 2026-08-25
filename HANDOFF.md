@@ -1,6 +1,6 @@
 # Winthistle — handoff
 
-> ## ⚠ Direction changed on 2026-08-25. `docs/replan-2026-08.md` is the plan.
+> ## ⚠ Direction changed on 2026-08-25. `docs/replan-2026-08.md` is the plan, and as of 2026-08-26 **every item on it is done.**
 >
 > **This file used to be ~3,960 lines of design record for a design that is
 > being replaced.** Most of it has been deleted, deliberately, in the docs
@@ -17,99 +17,159 @@
 
 ## Where the build actually is
 
-**Items 1 to 5 are done. Item 6 is the only one left, and it is small.** The
-inversion is proved on a running node, the armed window is built around it, `run`
-neither builds nor signs the transaction, and everything on the replan's cut list
-is deleted. `docs/replan-2026-08.md`'s "Item 3, as built", "Item 4, as built" and
-"Item 5, as built" are the account of what moved.
+**All six replan items are done.** The inversion is proved on a running node,
+the armed window is built around it, `run` neither builds nor signs the
+transaction, everything on the cut list is deleted, and since 2026-08-26 the fee
+and change findings report rather than refuse and the `Replaceable` lint is gone.
+`docs/replan-2026-08.md`'s four "as built" sections are the account.
 
-**Item 5 removed 28,267 lines and added 846**, in five commits, taking the tree
-from 55,670 Go lines to 28,881. Gone: `internal/server`, `internal/webrun`,
-`prose.Progress` and `winthistle serve`; `internal/bump`, `internal/signers`,
-`internal/settle/cpfp.go` and the three bump tables; `internal/setup`,
-`internal/rehearsal`, the `setups` table and `internal/config/descriptors.go`;
-`internal/fees` and the `testmempoolaccept` pre-flight; `internal/coldwallet`'s
-setup half, `signet/`, `internal/signetenv`, `doctor`'s Core checks, the coin-lock
-machinery and the `[bitcoind]` section.
+**There is no code slice waiting.** What is left is the **mainnet cold probe**,
+which is not one: it is a run of the tool against real peers with coins that
+never move, and it is written up below.
 
-**What is left.** `arm` · `plan` · `combine` · `peers` · `reserve` · `settle` ·
-`journal` · `methods` · `lnd` · `prose` · `config` · `abort` · `doctor` ·
-`policy` · `run`, plus `internal/bitcoind` and `internal/regtestenv/coldwallet`
-**inside the harness only**. Four commands: `run`, `doctor`, `recover`,
+**The tree.** 28,881 Go lines, down from 55,670 before item 5. Packages:
+`arm` · `plan` · `combine` · `peers` · `reserve` · `settle` · `journal` ·
+`methods` · `lnd` · `prose` · `config` · `abort` · `doctor` · `policy` · `run`,
+plus `internal/bitcoind` and `internal/regtestenv/coldwallet` **inside the
+harness only**. Four commands: `run`, `doctor`, `recover`,
 `print-macaroon-command`, and two `example-*` printers.
 
-**Three decisions item 5 made that the code now depends on:**
+**Four decisions the code now depends on, from items 5 and 6:**
 
 1. **The fee rate is declared.** `[fees] target_sat_per_vb`, or `run --fee-rate
-   N`. Nothing estimates it and nothing may be asked to — the no-third-party rule
-   forbids the substitute, and the app does not build the transaction or choose
-   the fee anyway, so what the verifier needs is the rate the operator said they
-   were aiming at. `config.Load` and `plan.Build` each refuse a missing or
-   non-positive one, independently.
-2. **There is no pre-flight.** What survives is `combine.Accept` executing every
-   input's witness against its own script; what is lost is node policy, and
-   `plan.Verify`'s `Verification.Unchecked` names it and says this build does not
-   run `testmempoolaccept`.
+   N`. Nothing estimates it and nothing may be asked to. `config.Load` and
+   `plan.Build` each refuse a missing or non-positive one, independently — and
+   **that is a different thing from the fee findings**, which report. A missing
+   rate is still a refusal at load time; a batch that pays the wrong one is a
+   report at step 5.
+2. **There is no pre-flight.** `combine.Accept` executes every input's witness
+   against its own script; what is lost is node policy, and
+   `plan.Verify`'s `Verification.Unchecked` names `testmempoolaccept` and says
+   this build does not run it.
 3. **`Method.CallSites` is 1.**
-
-**Two things item 5 changed that were not in the plan.** The config reader grew
-`retiredKeys` and `retiredSections`, so a removed setting gets a sentence saying
-what happened to it rather than "has no key" — eleven keys and three sections
-went in this slice, including `[bitcoind]`, `[[signer]]`,
-`limits.abort_after_signing_seconds` and the three `[fees]` estimator keys, and
-`[server] journal` became `[journal] path`. And the harness owns its coin locks
-now: `Env.BuildPSBTPaying` releases what it locks, because the application's abort
-path used to and no longer can.
+4. **The verifier refuses and reports out of two different types.**
+   `Verification.Problems []Problem` are refusals and `OK()` is
+   `len(Problems) == 0`; `Verification.Reports []Finding` are things it
+   established and does not stop for — `ChangeMissing`, `ChangeTooSmall`,
+   `FeeTooLow`, `FeeTooHigh` — rendered under **"Reported, not refused"**.
+   `Unchecked []string` is the third and is not interchangeable with the second:
+   it is what could not be established at all. **Do not add a severity field to
+   `Problem`**; the split is which list a finding lands in, and two types are
+   what keeps `OK()` from depending on a grade somebody set wrong.
 
 ---
 
-## The next slice: item 6, demote the fee and change findings
+## The next thing: the mainnet cold probe
 
-Small, and the last one before the mainnet cold probe is the only thing left.
-Two halves, and they are independent:
+**Not a code slice.** Everything it needs exists, and composing it forced exactly
+one branch — an `if` before `arm.Publish`. It is the real run with the final call
+withheld, not a second path to the same place. The specification is
+`docs/design.html`'s **Cold probe** section (phase C); this is what to know
+before running it.
 
-**Demote four codes to reports.** `ChangeMissing`, `ChangeTooSmall`, `FeeTooLow`
-and `FeeTooHigh` move out of `Verification.Problems` and into
-`Verification.Unchecked`, which exists "so that a clean result is not read as a
-broader guarantee than it is". Your fee and change arrangements are yours, the app
-does not build the transaction, and it cannot size a change output — it can only
-tell you yours is too small.
+### What it is
 
-`plan.Problem`'s comment reads *"Every problem is a refusal. There is no severity
-here on purpose"*, and that sentence is the thing item 6 has to keep true rather
-than edit around: the answer is to move the four out, not to grow a severity
-field. Where they go is a decision — `Unchecked` is a `[]string` today and these
-four carry numbers a report wants to render.
+```
+winthistle run --batch BATCH.toml --psbt FILE --stop-before-publish
+```
 
-**And the copy that goes with it.** Three strings still frame a stuck batch in
-custody language, which `CLAUDE.md` explains at length is the dangerous framing
-because an operator who believes coins are at risk reaches, under pressure, for
-the one thing I-4 forbids. Two of the three are operator-facing:
-`internal/plan/plan.go` ("change is the only way a stuck batch can be
-accelerated", an error message), `internal/plan/report.go` (the same claim, in a
-plan-report bullet) and `internal/plan/size.go` ("a batch with nothing to rescue
-it", a doc comment). `CLAUDE.md`'s "Why the change output is required" has the
-correct version already written; the code has to catch up to it.
+`--probe` is worth adding the first time you meet a peer, and worth leaving off
+afterwards: it shim-probes every peer before arming and then **waits out the
+~11-minute hold it just created**, because otherwise the probe collides with the
+open. `run --help` says so.
 
-**Remove `Replaceable`.** `internal/plan/verify.go`'s sequence-number refusal.
-Core 29's full-RBF is unconditional — verified live — so refusing a transaction
-over a signal that changes nothing is a lint wearing an invariant's clothes.
-`plan.MaxNonReplaceableSequence` goes with the refusal; `plan.MaxBIP125Sequence`
-already went with the CPFP child in item 5, and the comment above
-`MaxNonReplaceableSequence` records both halves of that.
+Steps 1 through 7 exactly as production runs them, against **real peers on
+mainnet**, with **real coins that never move**. Step 8 is simply not taken. It
+proves the one thing no harness can: *these* peers, *this* node, *this* wallet
+and *these* devices.
 
-**What must not change with it.** I-4 is enforced by authorship and always was:
-no code path in this repository replaces a funding transaction. Removing the lint
-is not a relaxation of the invariant and the commit should say so, because the
-two look identical in a diff.
+**Why it costs nothing on-chain.** Nothing is at risk until broadcast. The
+coins stay unspent in a transaction that is never published, and the only
+externality is a briefly held reservation on each peer, which their own timeout
+clears.
 
-**Verification.** `internal/plan`'s unit tests are where most of this lands —
-`TestNoFeeAtAllIsRefused`, `TestChangeTooSmallForACPFPChildIsRefused`,
-`TestChangeFloorCoversTheChildAndTheParentDeficit` and the `FeeTooLow`/`FeeTooHigh`
-cases all assert refusals that become reports. `TestTheReportsFitThePane` is the
-one that will notice if the demoted findings render badly.
+### Before you start
+
+- **`winthistle doctor` clean**, against the mainnet node, with the baked
+  macaroon rather than `admin.macaroon`. It checks the credential by asking
+  `CheckMacaroonPermissions` rather than by calling anything, so a clean doctor
+  is evidence and not a rehearsal.
+- **`winthistle print-macaroon-command`**, and bake from *that* rather than from
+  `docs/design.html`'s illustrative block — which has rotted before, with the
+  count matching while the membership did not.
+- **Two channels, at the smallest size the chosen peers accept.** The probe is
+  commissioning, not an allocation. The first *live* batch afterwards should be
+  the same shape.
+- **Know each peer's minimum.** A probe that is refused costs nothing, but a
+  probe that is *accepted* holds one of that peer's pending-channel slots for
+  about eleven minutes and `shim_cancel` does not give it back. Against a peer
+  running LND's default `--maxpendingchannels=1`, probing and then arming
+  collides with itself. See the "probe is not free" bullet under "Watch out for".
+- **A declared fee rate.** `[fees] target_sat_per_vb` must be set or the config
+  will not load. The number does not matter much here — nothing is published —
+  but a wrong one now produces a report at step 5, not a refusal, so it will not
+  stop you and you should not expect it to.
+
+### What to actually watch
+
+1. **Step 6 is the assertion.** *n* of *n* `chan_pending`, **with nothing
+   signed**. That is the whole safety argument, observed on mainnet for the first
+   time. Everything before it is reversible at no cost.
+2. **The channel backups export while the channels are pending.** Step 6 does
+   this, before publish and before signing, and it is the one place the probe
+   proves something the harness cannot fully vouch for.
+3. **Sign for real at step 7.** The point is to exercise the devices and the
+   descriptor, not to satisfy the tool. Then confirm the txid has not moved —
+   I-3, and the only load-bearing check on what comes back.
+4. **The teardown.** `--stop-before-publish` clears up itself rather than
+   suggesting it: `AbandonChannel` for each pending channel and `shim_cancel` for
+   any stream that never verified. **Expect `pending_funding_shim_only` to be
+   refused and the blunt `i_know_what_i_am_doing` flag to be asked for, once per
+   channel.** That is the normal route here, not a warning sign — LND infers
+   "shim funded" from `ThawHeight > 0` and a plain PSBT open sets none.
+5. **`--stop-before-publish` exits non-zero if the teardown does not finish.** A
+   probe that proved the sequence and then left channels pending is not a
+   success, and a probe is usually run from a terminal somebody walks away from.
+   **Check the exit code.**
+6. **Separately, deliberately let one stream lapse without verifying**, to
+   observe a real peer's timeout rather than trusting the ten-minute figure.
+   Regtest measured 10m41s against a stock LND; a CLN or Eclair peer has its own.
+
+### Reading the probe's journal row afterwards
+
+**A probe that withheld the publish leaves no `raw_tx` on disk, and that is
+correct.** The signed bytes reach the journal immediately before the publish RPC
+and nowhere else, so `raw_tx` means "we may owe a rebroadcast" — and a probe owes
+nothing. The pinned txid is there.
+
+**Publish is step 8, not step 9.** It moved when the signing round moved, and the
+withheld-publish screen says *"Step 8 was not made"*. A screen or a note that
+calls it step 9 is pre-inversion copy.
+
+### What would make it a failure
+
+- A `chan_pending` that does not arrive, and `PendingChannels` not explaining it.
+  Note that **nothing bounds this wait** — see "Two live code gaps" below — so a
+  silent peer parks the run until `Ctrl-C` rather than timing out.
+- A txid that moved between step 5 and step 7.
+- A teardown that leaves a channel pending, i.e. a non-zero exit.
+- Anything the verifier **refuses** at step 5. What it *reports* there is not a
+  failure of the probe: a change output too small or a fee outside tolerance is
+  the operator's business and the run continues past it deliberately.
+
+### After it passes
+
+The repo is **private and intended to go public** once the probe passes on
+mainnet. Assume every commit will eventually be public, and re-read the "Repo
+hygiene" section of `CLAUDE.md` before flipping it — particularly **never commit
+a mainnet xpub**, which `.gitignore` does not protect you from when one is pasted
+inline in a test or a doc example.
+
+---
 
 ## The three collisions found while rewriting the docs, and where they stand
+
+**All three are settled.**
 
 1. **`combine.ErrAlreadyFinalized` — settled in item 4, and its last caller went
    in item 5.** `combine` is the acceptance check now, `combine.Accept` takes the
@@ -133,12 +193,15 @@ one that will notice if the demoted findings render badly.
    failure looks like a dead peer.** `arm.Receipts`' doc comment says so where it
    would be read.
 
-3. **The custody-language change-output copy is still shipping.** `CLAUDE.md`
-   explains at length why framing a stuck batch as a custody risk is dangerous,
-   in the past tense, while three strings still say it — two of them
-   operator-facing: `internal/plan/plan.go`, `internal/plan/report.go` and the
-   comment at `internal/plan/size.go`. **Item 6's business**, alongside demoting
-   the finding, and it is written up at the top of this file.
+3. **The custody-language change-output copy — fixed in item 6**, along with
+   eight more places carrying the same framing that the three-string inventory
+   had missed, including the most operator-facing one of the lot:
+   `plan.checkChange`'s own `ChangeMissing` detail text. The rule the
+   replacements follow: **name what is missing (the lever), never imply what is
+   not (risk).** Nothing is at risk in a stuck batch; what is missing is the
+   exit. Two strings in `internal/regtestenv/coldwallet/build.go` still carry the
+   old framing and were left alone — harness-only, and item 6 did not falsify
+   them.
 
 **Four claims that were wrong**, found by auditing rather than by working:
 `handleFundingSigned` does not exist in LND v0.19.3-beta (it is
@@ -150,37 +213,12 @@ named two methods the build never calls while omitting two it does, with both
 lists 17 long so the count matched. Check before writing "we do", not only
 before writing "we cannot".
 
-## The mainnet cold probe
-
-**The one thing no harness substitutes for, and the replan does not change it.**
-`winthistle run --stop-before-publish`: the whole production sequence with the
-one call that broadcasts withheld, against real peers, with coins that never
-move. Everything it needs exists — the steps up to publish are the production
-code path, publish is one call inside one `if` that it does not make, and the
-abort path it terminates through runs on every failure and is tested on both.
-
-Composing it forced **exactly one branch**, an `if` before `arm.Publish`, and
-that survived the inversion: the probe is the real run with the final call
-withheld rather than a second path to the same place. It now sits after the
-signing round rather than after a finalize, which is a change of neighbours and
-not of shape.
-
-Two things the replan changed about it, and item 3 has now made both true of the
-code. The probe terminates by abandoning channels that reached `chan_pending`
-**with nothing signed** — and regtest confirmed LND still refuses
-`pending_funding_shim_only` on those, so it still costs an
-`i_know_what_i_am_doing` confirmation per channel. And publish is step 8, not
-step 9; the withheld-publish screen says "Step 8 was not made".
-
-One thing worth knowing before reading the probe's journal row: **a probe that
-withheld the publish leaves no raw transaction on disk, and that is correct.** The
-signed bytes reach the journal immediately before the publish RPC and nowhere
-else, so `raw_tx` means "we may owe a rebroadcast" — and a probe owes nothing. The
-pinned txid is there.
-
-`--stop-before-publish` exits non-zero if the teardown does not finish. The probe
-proving the sequence and then leaving channels pending is not a success, and a
-probe is usually run from a terminal somebody walks away from.
+**Three more stale strings found in item 6's sweep and deliberately not fixed**,
+because item 6 did not falsify them and the slice had a scope: the "directed
+mode" / "assisted mode" vocabulary in `plan.Change.Address`'s doc comment and in
+`plan.checkOutputs`, and `plan_regtest_test.go`'s "the app's own builder", which
+has been the harness's builder since item 4. All three are comments. Fix them in
+whatever slice next touches those functions.
 
 ## Two live code gaps, and neither is a safety failure
 
