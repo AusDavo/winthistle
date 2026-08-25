@@ -1,9 +1,0 @@
-#!/usr/bin/env bash
-# bitcoin-cli against the signet harness's unpruned node.
-#   ./bin/bcli getblockchaininfo
-# Add -rpcwallet=NAME as the first arg to target a wallet.
-set -euo pipefail
-cd "$(dirname "$0")/.."
-U=$(sed -n 's/^RPCUSER=//p' .env); P=$(sed -n 's/^RPCPASS=//p' .env)
-exec docker compose exec -T bitcoind \
-  bitcoin-cli -signet -rpcuser="$U" -rpcpassword="$P" "$@"

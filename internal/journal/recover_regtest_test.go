@@ -73,10 +73,6 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 		defer done()
 		_, _ = env.Cold.ReleaseLocks(c, funded.Inputs)
 	})
-	if err := j.RecordLocks(ctx, runID, funded.Inputs); err != nil {
-		t.Fatalf("RecordLocks: %v", err)
-	}
-
 	// The txid goes on disk before the first psbt_verify, because that call does
 	// not pause LND's funding flow — it completes it, and from there a peer may be
 	// storing a commitment signature against an outpoint of this transaction.
@@ -145,9 +141,6 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	if len(target.Shims) != 1 || target.Shims[0] != strandedStream.PendingChanID {
 		t.Fatalf("want %s to cancel, got %v", strandedStream.PendingChanID, target.Shims)
 	}
-	if len(target.Locks) != len(funded.Inputs) {
-		t.Fatalf("want %d coin locks to free, got %d", len(funded.Inputs), len(target.Locks))
-	}
 
 	if !pendingOpen(t, env, cp) {
 		t.Fatalf("%s should still be pending before the recovery", cp)
@@ -156,7 +149,7 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	// The recovery itself. The blunt flag is the standard route here, not an
 	// edge case — rpcserver.go infers "shim funded" from ThawHeight > 0 and a
 	// plain PSBT open sets none — so a confirmation has to be on offer.
-	rep, err := reopened.Recover(ctx, env.Alice.Lightning, env.Cold, runID, alwaysConfirm)
+	rep, err := reopened.Recover(ctx, env.Alice.Lightning, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
@@ -165,9 +158,6 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	}
 	if len(rep.Abandoned) != 1 || len(rep.Cancelled) != 1 {
 		t.Fatalf("report is %+v", rep)
-	}
-	if len(rep.LocksFreed) != len(funded.Inputs) {
-		t.Fatalf("freed %d of %d coin locks", len(rep.LocksFreed), len(funded.Inputs))
 	}
 	if pendingOpen(t, env, cp) {
 		t.Fatalf("%s is still pending after the recovery", cp)
@@ -185,11 +175,11 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	}
 
 	// And again, because a recovery can itself be interrupted and restarted.
-	rep2, err := reopened.Recover(ctx, env.Alice.Lightning, env.Cold, runID, alwaysConfirm)
+	rep2, err := reopened.Recover(ctx, env.Alice.Lightning, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("second Recover should be a no-op, got: %v", err)
 	}
-	if len(rep2.Abandoned) != 0 || len(rep2.Cancelled) != 0 || len(rep2.LocksFreed) != 0 {
+	if len(rep2.Abandoned) != 0 || len(rep2.Cancelled) != 0 {
 		t.Fatalf("second Recover redid work that was already done: %+v", rep2)
 	}
 }

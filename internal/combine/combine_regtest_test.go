@@ -9,11 +9,11 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 )
 
 // fixtureChannelSat matches internal/abort's and internal/plan's, so a peer that

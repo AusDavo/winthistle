@@ -91,7 +91,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
@@ -282,18 +281,6 @@ func (s *Streams) Close() {
 			st.cancel()
 		}
 	}
-}
-
-// FundingOutputs are the outputs the batch has to pay, for directed mode's
-// step 4.
-func (s *Streams) FundingOutputs() []coldwallet.Output {
-	out := make([]coldwallet.Output, 0, len(s.All))
-	for _, st := range s.All {
-		out = append(out, coldwallet.Output{
-			Address: st.FundingAddress, AmountSat: st.FundingAmount,
-		})
-	}
-	return out
 }
 
 // Blueprint is the plan minus the funding addresses, which do not exist until

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 )
 
@@ -55,29 +54,6 @@ func (j *Journal) Begin(ctx context.Context, runID string, chans []NewChannel) e
 			}
 		}
 		return nil
-	})
-}
-
-// RecordLocks notes the inputs Core is holding unspendable for this run.
-//
-// Written after walletcreatefundedpsbt returns, which is the earliest we know
-// them — and the reason bitcoind.ListLocks is exported: a crash in between
-// leaves locks with no owner, and only Core can then say what is held.
-func (j *Journal) RecordLocks(ctx context.Context, runID string, ops []bitcoind.Outpoint) error {
-	if err := j.mustExist(ctx, runID); err != nil {
-		return err
-	}
-	return j.tx(ctx, func(tx *sql.Tx) error {
-		for _, op := range ops {
-			_, err := tx.ExecContext(ctx,
-				`INSERT INTO locks (run_id, txid, vout) VALUES (?, ?, ?)
-				 ON CONFLICT (run_id, txid, vout) DO NOTHING`,
-				runID, op.TxID, op.Vout)
-			if err != nil {
-				return fmt.Errorf("recording coin lock %s of run %s: %w", op, runID, err)
-			}
-		}
-		return j.touch(ctx, tx, runID)
 	})
 }
 

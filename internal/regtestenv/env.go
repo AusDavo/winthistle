@@ -378,16 +378,15 @@ func (e *Env) ConfigFile(t *testing.T, dir string) string {
 		t.Fatalf("writing %s: %v", macPath, err)
 	}
 
+	// No [bitcoind]: the application dials no Bitcoin node. The harness still
+	// does — Env.Cold and Env.Node are the stand-in for Sparrow — but it builds
+	// those clients from regtest/.env directly rather than from a file the app
+	// reads, which is what keeps the harness's Core out of the app's
+	// configuration.
 	body := fmt.Sprintf(`[lnd]
 address  = %q
 tls_cert = %q
 macaroon = %q
-
-[bitcoind]
-address = %q
-user    = %q
-pass    = %q
-wallet  = %q
 
 [server]
 journal = %q
@@ -399,8 +398,7 @@ require_confirmed_inputs = true
 target_sat_per_vb = 1.0
 `,
 		aliceAddr, filepath.Join(e.Root, "regtest", "creds", "alice", "tls.cert"),
-		macPath, coreAddr, e.rpcUser, e.rpcPass, ColdWallet,
-		filepath.Join(dir, "runs.db"))
+		macPath, filepath.Join(dir, "runs.db"))
 
 	path := filepath.Join(dir, "winthistle.toml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

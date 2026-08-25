@@ -8,13 +8,12 @@ winthistle.toml
 *.local.toml
 .env
 .env.*
-# ...but the harnesses' .env files are required for them to run, and hold only
-# version pins and deliberately-fake credentials for chains where coins are free.
-# internal/regtestenv and internal/signetenv read the RPC user and password out
-# of these rather than hardcoding them, so an ignored one breaks the tests with
-# "harness not configured".
+# ...but the harness's .env file is required for it to run, and holds only
+# version pins and deliberately-fake credentials for a chain where coins are
+# free. internal/regtestenv reads the RPC user and password out of it rather than
+# hardcoding them, so an ignored one breaks the tests with "harness not
+# configured".
 !regtest/.env
-!signet/.env
 
 # --- Run state: contains outpoints, peer sets, raw transactions ---
 *.db
@@ -64,4 +63,3 @@ batch-*.toml
 # harness runtime output
 regtest/creds/
 regtest/__pycache__/
-signet/__pycache__/

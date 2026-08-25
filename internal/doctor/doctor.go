@@ -54,13 +54,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/arm"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
@@ -187,23 +184,15 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) *Report {
 	}
 	checkMacaroon(ctx, r, cfg, cli)
 
-	// One journal handle for the whole report. The cold-wallet check needs it —
-	// the answer to the round-trip address check is the only thing that
-	// distinguishes a correct descriptor from a plausible wrong one, and it is
-	// written down there — and opening it twice in one run would report the same
-	// failure in two places.
 	j, journalErr := openJournal(ctx, cfg)
 	if j != nil {
 		defer j.Close()
 	}
 
-	node, wallet := checkCore(ctx, r, cfg)
-	checkColdWallet(ctx, r, cfg, node, wallet, j)
-	checkCoins(ctx, r, cfg, wallet)
 	checkReserve(ctx, r, cli, opts)
 	checkFees(ctx, r, cfg)
 	checkPeers(ctx, r, cli, opts)
-	checkJournal(ctx, r, cfg, wallet, j, journalErr)
+	checkJournal(ctx, r, cfg, j, journalErr)
 	return r
 }
 
@@ -229,8 +218,7 @@ func checkConfig(r *Report, cfg *config.Config) {
 	// everywhere else in this tool's copy.
 	c.say("read:")
 	c.say("    %s", cfg.Path)
-	c.say("lnd %s, core %s, wallet %q", cfg.LND.Address, cfg.Bitcoind.Address,
-		cfg.Bitcoind.Wallet)
+	c.say("lnd %s", cfg.LND.Address)
 }
 
 func checkLND(ctx context.Context, r *Report, cfg *config.Config) *lnd.Client {
@@ -421,188 +409,6 @@ func tooNarrow(err error) bool {
 		strings.Contains(err.Error(), "permission denied")
 }
 
-func checkCore(ctx context.Context, r *Report, cfg *config.Config) (node, wallet *bitcoind.Client) {
-	c := r.add(Check{Name: "Bitcoin Core"})
-
-	nodeCfg := cfg.Bitcoind
-	nodeCfg.Wallet = ""
-	node, err := bitcoind.New(nodeCfg)
-	if err != nil {
-		c.fail("%v", err)
-		return nil, nil
-	}
-	wallet, err = bitcoind.New(cfg.Bitcoind)
-	if err != nil {
-		c.fail("%v", err)
-		return node, nil
-	}
-
-	net, err := node.GetNetworkInfo(ctx)
-	if err != nil {
-		c.fail("cannot reach %s: %v", cfg.Bitcoind.Address, err)
-		c.say("Directed mode builds the batch with Core — coin selection, change " +
-			"derivation, the exact fee rate and the bip32 derivations the signers " +
-			"need. There is no other builder in this build.")
-		c.fix("# is it listening, and is the cookie readable?\nss -ltnp | grep %s\nls -l %s",
-			port(cfg.Bitcoind.Address), cfg.Bitcoind.Cookie)
-		return node, wallet
-	}
-	c.say("core %s (%d)", net.SubVersion, net.Version)
-	if net.Version < coldwallet.MinCoreVersion {
-		c.fail("core %d is below the %d this build expects", net.Version,
-			coldwallet.MinCoreVersion)
-	}
-
-	chain, err := node.GetBlockchainInfo(ctx)
-	if err != nil {
-		c.fail("getblockchaininfo: %v", err)
-		return node, wallet
-	}
-	c.say("%s, block %d of %d", chain.Chain, chain.Blocks, chain.Headers)
-	if chain.InitialBlockDownload {
-		c.fail("core is still in initial block download (%.2f%%). A rescan against "+
-			"a chain that is still arriving finds whatever has arrived, silently.",
-			chain.VerificationProgress*100)
-	}
-	if chain.Pruned {
-		when, err := node.BlockTime(ctx, chain.PruneHeight)
-		if err == nil {
-			c.warn("pruned to block %d (%s). A descriptor import rescans from the "+
-				"cold wallet's birthday, and the blocks before this one are gone — "+
-				"if the wallet is older than that date, its history cannot be found "+
-				"here.", chain.PruneHeight, when.Format("2006-01-02"))
-		} else {
-			c.warn("pruned to block %d", chain.PruneHeight)
-		}
-	}
-	return node, wallet
-}
-
-func checkColdWallet(ctx context.Context, r *Report, cfg *config.Config,
-	node, wallet *bitcoind.Client, j *journal.Journal) {
-
-	c := r.add(Check{Name: "the cold wallet"})
-	if wallet == nil {
-		c.Status = Skip
-		c.say("not checked: Core could not be reached")
-		return
-	}
-
-	info, err := wallet.GetWalletInfo(ctx)
-	if err != nil {
-		c.fail("wallet %q: %v", cfg.Bitcoind.Wallet, err)
-		c.say("Core does not auto-load non-default wallets, so this is what every " +
-			"wallet call says after a bitcoind restart. It reads like data loss and " +
-			"it is not.")
-		c.fix("bitcoin-cli loadwallet %q", cfg.Bitcoind.Wallet)
-		return
-	}
-	c.say("wallet %q is loaded", info.Name)
-
-	if info.PrivateKeysEnabled {
-		c.fail("this wallet has private keys. The watch-only wallet is structurally " +
-			"incapable of signing, which is the property that makes it safe to point " +
-			"a batch builder at it — this one is not that wallet.")
-		c.fix("bitcoin-cli createwallet %q true true \"\" false true true",
-			cfg.Bitcoind.Wallet+"-watch")
-	}
-	if !info.Descriptors {
-		c.fail("this is a legacy wallet, not a descriptor wallet. The whole setup " +
-			"path is importdescriptors.")
-		c.fix("bitcoin-cli createwallet %q true true \"\" false true true",
-			cfg.Bitcoind.Wallet+"-watch")
-	}
-	if info.Scanning.Running {
-		c.warn("a rescan is running (%.1f%%). Until it finishes the balance and the "+
-			"coin list are whatever has been scanned so far.", info.Scanning.Progress*100)
-	}
-
-	descs, err := wallet.ListDescriptors(ctx)
-	if err != nil {
-		c.fail("listdescriptors: %v", err)
-		return
-	}
-	active := 0
-	for _, d := range descs {
-		if !d.Active {
-			continue
-		}
-		active++
-		branch := "receive"
-		if d.Internal {
-			branch = "change"
-		}
-		c.say("%s: %s", branch, describe(d))
-	}
-	switch active {
-	case 0:
-		c.fail("no active descriptors, so this wallet knows about no coins at all.")
-		c.say("The descriptors and the birthday come out of your own wallet " +
-			"software and nothing here can guess either. Import them into this " +
-			"wallet with Core's importdescriptors, and compare the first few " +
-			"addresses against what the wallet software shows before you fund " +
-			"anything: nothing a node can be asked separates a correct descriptor " +
-			"from a plausible wrong one.")
-		return
-	case 2:
-		c.say("two active descriptors, which is a receive branch and a change branch")
-	default:
-		c.warn("%d active descriptors. A cold wallet is normally two: receive and "+
-			"change.", active)
-	}
-	if stale := len(descs) - active; stale > 0 {
-		c.warn("%d descriptor%s in this wallet %s inactive, and their coins are "+
-			"still in this wallet's coin list. Core keeps one active receive branch "+
-			"and one active change branch, so an import replaces an earlier pair by "+
-			"deactivating it — there is no RPC that removes a descriptor. A batch "+
-			"built here can still spend those coins.",
-			stale, prose.Plural(stale), prose.IsAre(stale))
-	}
-}
-
-// anyOurs reports whether this node opened any of these pending channels, which
-// is what makes `winthistle recover` the right thing to suggest: a channel we
-// opened and did not finish is one this tool may be able to take apart, and one
-// the peer opened is not ours to touch.
-func anyOurs(pending []peers.PendingOpen) bool {
-	for _, po := range pending {
-		if po.Ours {
-			return true
-		}
-	}
-	return false
-}
-
-func checkCoins(ctx context.Context, r *Report, cfg *config.Config, wallet *bitcoind.Client) {
-	c := r.add(Check{Name: "the coins"})
-	if wallet == nil {
-		c.Status = Skip
-		c.say("not checked: Core could not be reached")
-		return
-	}
-	coins, err := coldwallet.SelectCoins(ctx, wallet, cfg.Limits.MinConfirmations())
-	if err != nil {
-		c.fail("listing the cold wallet's coins: %v", err)
-		return
-	}
-	c.say("%d spendable coin%s, %s", len(coins.Eligible), prose.Plural(len(coins.Eligible)),
-		prose.Sats(coins.EligibleSat))
-	if len(coins.Excluded) > 0 {
-		c.warn("%d coin%s excluded, %s, so this wallet's own balance and anything "+
-			"this tool builds will disagree:", len(coins.Excluded),
-			prose.Plural(len(coins.Excluded)), prose.Sats(coins.ExcludedSat))
-		for _, e := range coins.Excluded {
-			c.say("    %s  %s — %s", e.Coin.Outpoint(), e.Why, e.Detail)
-		}
-		c.say("A legacy input is refused by LND outright — verifyAllInputsSegWit, " +
-			"\"risk of malleability\" — so these are fenced off rather than " +
-			"selected and then rejected.")
-	}
-	if len(coins.Eligible) == 0 {
-		c.fail("nothing to fund a batch with.")
-	}
-}
-
 func checkReserve(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {
 	c := r.add(Check{Name: "the anchor reserve"})
 	if cli == nil {
@@ -738,8 +544,27 @@ func checkPeers(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {
 		"nowhere, so the only authoritative answer is accept_channel.")
 }
 
+// anyOurs reports whether this node opened any of these pending channels, which
+// is what makes `winthistle recover` the right thing to suggest: a channel we
+// opened and did not finish is one this tool may be able to take apart, and one
+// the peer opened is not ours to touch.
+func anyOurs(pending []peers.PendingOpen) bool {
+	for _, po := range pending {
+		if po.Ours {
+			return true
+		}
+	}
+	return false
+}
+
+// checkJournal is the runs that stopped.
+//
+// It reconciled Core's coin locks against the journal's owners until item 5. A
+// run takes no coin locks — this app selects no coins — and there is no Core
+// client to ask, so what is left is the half that was always about this tool's
+// own state.
 func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
-	wallet *bitcoind.Client, j *journal.Journal, openErr error) {
+	j *journal.Journal, openErr error) {
 
 	c := r.add(Check{Name: "the run journal"})
 	if j == nil {
@@ -753,68 +578,16 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		c.fail("reading the journal: %v", err)
 		return
 	}
-	claimed := map[bitcoind.Outpoint]string{}
-	for _, run := range unfinished {
-		for _, l := range run.Locks {
-			if !l.Released {
-				claimed[l.Outpoint] = run.ID
-			}
-		}
-	}
-
-	if len(unfinished) > 0 {
-		c.fail("%d run%s stopped somewhere %s should not have:", len(unfinished),
-			prose.Plural(len(unfinished)), prose.IsAre(len(unfinished)))
-		for _, run := range unfinished {
-			c.say("    %s — %s", run.ID, run.State)
-		}
-		c.fix("winthistle recover")
-	} else {
+	if len(unfinished) == 0 {
 		c.say("no unfinished runs")
-	}
-
-	if wallet == nil {
 		return
 	}
-	locks, err := wallet.ListLocks(ctx)
-	if err != nil {
-		c.warn("could not list Core's coin locks: %v", err)
-		return
+	c.fail("%d run%s stopped somewhere %s should not have:", len(unfinished),
+		prose.Plural(len(unfinished)), prose.IsAre(len(unfinished)))
+	for _, run := range unfinished {
+		c.say("    %s — %s", run.ID, run.State)
 	}
-	var orphans []bitcoind.Outpoint
-	for _, op := range locks {
-		if _, ours := claimed[op]; !ours {
-			orphans = append(orphans, op)
-		}
-	}
-	sort.Slice(orphans, func(i, j int) bool { return orphans[i].String() < orphans[j].String() })
-	switch {
-	case len(orphans) == 0 && len(locks) > 0:
-		c.say("Core holds %d coin lock%s, all of them claimed by a run above",
-			len(locks), prose.Plural(len(locks)))
-	case len(orphans) > 0:
-		c.warn("Core holds %d locked coin%s that no run in this journal claims. A "+
-			"wallet that will not spend its own money, with nothing on disk saying "+
-			"why, is exactly what a crash between walletcreatefundedpsbt and the "+
-			"journal write leaves behind.", len(orphans), prose.Plural(len(orphans)))
-		for _, op := range orphans {
-			c.say("    %s", op.String())
-		}
-		c.fix("bitcoin-cli -rpcwallet=%q lockunspent true '%s'",
-			cfg.Bitcoind.Wallet, lockJSON(orphans))
-		c.say("Core validates the whole list before applying any of it, and " +
-			"refuses an entry already in the requested state, so one stale outpoint " +
-			"frees nothing. The locks are memory-only: a Core restart clears them " +
-			"all at once.")
-	}
-}
-
-func lockJSON(ops []bitcoind.Outpoint) string {
-	parts := make([]string, 0, len(ops))
-	for _, op := range ops {
-		parts = append(parts, fmt.Sprintf(`{"txid":"%s","vout":%d}`, op.TxID, op.Vout))
-	}
-	return "[" + strings.Join(parts, ",") + "]"
+	c.fix("winthistle recover")
 }
 
 func port(addr string) string {

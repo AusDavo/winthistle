@@ -96,13 +96,13 @@ Two of these cost real debugging time; both fail in ways that look like your cod
 
 ## What regtest cannot test
 
-The **descriptor-import rescan** and the **prune-horizon check**. There is no
-history here to rescan, so a right birthday and a wrong one find precisely the
-same nothing, and this node cannot be made meaningfully pruned.
+Nothing this build does. The **descriptor-import rescan** and the
+**prune-horizon check** could not be reached here — there is no history to
+rescan, so a right birthday and a wrong one find precisely the same nothing, and
+this node cannot be made meaningfully pruned — and a second harness in
+`signet/` existed for them. Both paths belonged to `winthistle setup` and to the
+descriptor import, which item 5 of `docs/replan-2026-08.md` deleted, so the
+signet harness went with them.
 
-Both live in [`signet/`](../signet/) instead: two bitcoinds, one unpruned and one
-pruned, and no LND at all — neither path involves one. It costs a real block
-download, so its tests are off unless `WINTHISTLE_SIGNET=1` is set.
-
-Neither harness substitutes for the mainnet cold probe, which proves your node,
+This harness does not substitute for the mainnet cold probe, which proves your node,
 your peers, your devices.

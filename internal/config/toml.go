@@ -262,6 +262,10 @@ func (d *document) unknown(known map[string]bool) []string {
 // enough that anybody with a configuration from before the change gets the
 // sentence rather than the shrug. Nothing reads these but the refusal.
 var retiredSections = map[string]string{
+	"bitcoind": "is gone: this tool dials no Bitcoin node. It built the batch " +
+		"with Core once — coin selection, change derivation, the fee estimate and " +
+		"testmempoolaccept — and it does none of those now. Your wallet builds the " +
+		"transaction and this tool checks it. Delete the block.",
 	"signer": "is gone: it named the m cold-storage devices a signing round " +
 		"went out to, and there is no such round left. The batch is signed once, " +
 		"in your own wallet, and reaches this tool through the file --psbt names. " +

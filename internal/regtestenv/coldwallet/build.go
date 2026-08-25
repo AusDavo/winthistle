@@ -17,6 +17,22 @@ type Output struct {
 	AmountSat int64
 }
 
+// FundingOutputsOf pairs each funding address with its amount, which is the
+// output list a transaction paying this batch has to carry.
+//
+// It was arm.Streams.FundingOutputs, which put this package's two-field type
+// into the application's dependency graph for the sake of a method only the
+// harness ever called. It takes the two slices rather than the streams because
+// internal/arm's own tests are one of the callers, and a function here that
+// named arm.Stream would be an import cycle in that test binary.
+func FundingOutputsOf(addresses []string, amountsSat []int64) []Output {
+	out := make([]Output, 0, len(addresses))
+	for i, addr := range addresses {
+		out = append(out, Output{Address: addr, AmountSat: amountsSat[i]})
+	}
+	return out
+}
+
 // BuildRequest is step 4 of the sequence, directed mode: everything Core needs
 // to turn the plan's outputs into one unsigned PSBT.
 //

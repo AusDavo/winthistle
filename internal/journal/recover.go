@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
@@ -27,7 +26,6 @@ type Run struct {
 	UpdatedAt time.Time
 	Channels  []Channel
 	Signers   []Signer
-	Locks     []Lock
 }
 
 // Channel is one member of the batch, with whatever handles exist for it yet.
@@ -49,12 +47,6 @@ type Signer struct {
 	Label     string
 	State     SignerState
 	UpdatedAt time.Time
-}
-
-// Lock is one of Core's coin locks held for this run.
-type Lock struct {
-	Outpoint bitcoind.Outpoint
-	Released bool
 }
 
 // Load reads one run back out of the journal.
@@ -82,9 +74,6 @@ func (j *Journal) Load(ctx context.Context, runID string) (*Run, error) {
 		return nil, err
 	}
 	if err := j.loadSigners(ctx, &r); err != nil {
-		return nil, err
-	}
-	if err := j.loadLocks(ctx, &r); err != nil {
 		return nil, err
 	}
 	return &r, nil
@@ -191,11 +180,6 @@ func (r *Run) AbortTarget() (abort.Target, error) {
 			t.Shims = append(t.Shims, c.PendingChanID)
 		}
 	}
-	for _, l := range r.Locks {
-		if !l.Released {
-			t.Locks = append(t.Locks, l.Outpoint)
-		}
-	}
 	return t, nil
 }
 
@@ -209,7 +193,7 @@ func (r *Run) AbortTarget() (abort.Target, error) {
 //
 // Safe to call twice. Everything underneath it is.
 func (j *Journal) Recover(ctx context.Context, cli lnrpc.LightningClient,
-	core abort.LockReleaser, runID string, confirm abort.Confirmation) (*abort.Report, error) {
+	runID string, confirm abort.Confirmation) (*abort.Report, error) {
 
 	r, err := j.Load(ctx, runID)
 	if err != nil {
@@ -228,7 +212,7 @@ func (j *Journal) Recover(ctx context.Context, cli lnrpc.LightningClient,
 		}
 	}
 
-	rep, runErr := abort.Run(ctx, cli, core, target, confirm)
+	rep, runErr := abort.Run(ctx, cli, target, confirm)
 
 	// Recorded whether or not the abort succeeded: what did work must not have
 	// to be discovered again.
@@ -263,28 +247,6 @@ func (j *Journal) recordAbort(ctx context.Context, runID string, rep *abort.Repo
 		for _, c := range rep.Cancelled {
 			if err := j.setChannelState(ctx, tx, runID, c.ID, ChanCancelled); err != nil {
 				return err
-			}
-		}
-		for _, op := range rep.LocksFreed {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE locks SET released = 1 WHERE run_id = ? AND txid = ? AND vout = ?`,
-				runID, op.TxID, op.Vout)
-			if err != nil {
-				return fmt.Errorf("recording the release of %s in run %s: %w", op, runID, err)
-			}
-		}
-
-		// Core's locks are memory-only, so "we did not free it" and "nothing is
-		// holding it" are the same end state — ReleaseLocks reports only what it
-		// actually freed, and filters out everything Core was not holding. On a
-		// clean abort, then, nothing of this run's is locked any more, and
-		// saying so is what stops every later recovery re-listing the same
-		// outpoints forever.
-		if rep.Clean() {
-			_, err := tx.ExecContext(ctx,
-				`UPDATE locks SET released = 1 WHERE run_id = ?`, runID)
-			if err != nil {
-				return fmt.Errorf("closing out the coin locks of run %s: %w", runID, err)
 			}
 		}
 		return j.touch(ctx, tx, runID)
@@ -345,31 +307,6 @@ func (j *Journal) loadSigners(ctx context.Context, r *Run) error {
 			Label:     label,
 			State:     SignerState(state),
 			UpdatedAt: parseTime(upd),
-		})
-	}
-	return rows.Err()
-}
-
-func (j *Journal) loadLocks(ctx context.Context, r *Run) error {
-	rows, err := j.db.QueryContext(ctx,
-		`SELECT txid, vout, released FROM locks WHERE run_id = ? ORDER BY txid, vout`, r.ID)
-	if err != nil {
-		return fmt.Errorf("reading the coin locks of run %s: %w", r.ID, err)
-	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var (
-			txid     string
-			vout     int64
-			released int
-		)
-		if err := rows.Scan(&txid, &vout, &released); err != nil {
-			return fmt.Errorf("reading the coin locks of run %s: %w", r.ID, err)
-		}
-		r.Locks = append(r.Locks, Lock{
-			Outpoint: bitcoind.Outpoint{TxID: txid, Vout: uint32(vout)},
-			Released: released != 0,
 		})
 	}
 	return rows.Err()

@@ -8,7 +8,6 @@ import (
 	"testing"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -54,14 +53,6 @@ func batch(t *testing.T, chanIDs []lnd.PendingChanID) []journal.NewChannel {
 	return out
 }
 
-func locks(n int) []bitcoind.Outpoint {
-	out := make([]bitcoind.Outpoint, 0, n)
-	for i := range n {
-		out = append(out, bitcoind.Outpoint{TxID: fixtureTxID, Vout: uint32(i)})
-	}
-	return out
-}
-
 // The whole healthy sequence, in order, with the states the journal is supposed
 // to derive for itself checked at each step.
 //
@@ -81,10 +72,6 @@ func TestJournalWalksARunThroughToPublished(t *testing.T) {
 	}
 	if got := load(t, j, runID).State; got != journal.StateArming {
 		t.Fatalf("a fresh run is %s, want %s", got, journal.StateArming)
-	}
-
-	if err := j.RecordLocks(ctx, runID, locks(2)); err != nil {
-		t.Fatalf("RecordLocks: %v", err)
 	}
 
 	// The txid is pinned before the first psbt_verify, because that call does not
@@ -158,9 +145,9 @@ func TestJournalWalksARunThroughToPublished(t *testing.T) {
 	if r.TxID != fixtureTxID || r.RawTx == "" {
 		t.Fatalf("the signed transaction did not survive: txid=%q raw=%q", r.TxID, r.RawTx)
 	}
-	if len(r.Channels) != 3 || len(r.Locks) != 2 || len(r.Signers) != 2 {
-		t.Fatalf("run reads back as %d channels, %d locks, %d signers",
-			len(r.Channels), len(r.Locks), len(r.Signers))
+	if len(r.Channels) != 3 || len(r.Signers) != 2 {
+		t.Fatalf("run reads back as %d channels, %d signers",
+			len(r.Channels), len(r.Signers))
 	}
 	// Two rows for one signer label, not three: the second write updates.
 	for _, s := range r.Signers {
@@ -265,9 +252,6 @@ func TestAbortTargetSplitsArmedChannelsFromUnfinishedShims(t *testing.T) {
 	if err := j.Begin(ctx, runID, batch(t, chanIDs)); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.RecordLocks(ctx, runID, locks(2)); err != nil {
-		t.Fatal(err)
-	}
 	if err := j.MarkVerified(ctx, runID, chanIDs[1]); err != nil {
 		t.Fatal(err)
 	}
@@ -285,9 +269,6 @@ func TestAbortTargetSplitsArmedChannelsFromUnfinishedShims(t *testing.T) {
 	}
 	if len(target.Shims) != 2 {
 		t.Fatalf("want 2 shims to cancel, got %v", target.Shims)
-	}
-	if len(target.Locks) != 2 {
-		t.Fatalf("want 2 coin locks to free, got %v", target.Locks)
 	}
 }
 
@@ -337,14 +318,13 @@ func TestAbortTargetRefusesARunThatMayBePublic(t *testing.T) {
 			}
 
 			// And Recover must not reach the RPCs at all.
-			ln, core := &fakeLN{}, &fakeCore{}
-			_, err := j.Recover(ctx, ln, core, runID, alwaysConfirm)
+			ln := &fakeLN{}
+			_, err := j.Recover(ctx, ln, runID, alwaysConfirm)
 			if !errors.Is(err, journal.ErrMayBePublished) {
 				t.Fatalf("Recover: want ErrMayBePublished, got %v", err)
 			}
-			if ln.calls != 0 || core.calls != 0 {
-				t.Fatalf("Recover touched the node: %d lnd calls, %d core calls",
-					ln.calls, core.calls)
+			if ln.calls != 0 {
+				t.Fatalf("Recover touched the node: %d lnd calls", ln.calls)
 			}
 		})
 	}
@@ -418,16 +398,13 @@ func TestRecoverExecutesTheAbortAndSettlesTheRun(t *testing.T) {
 	if err := j.Begin(ctx, runID, batch(t, chanIDs)); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.RecordLocks(ctx, runID, locks(2)); err != nil {
-		t.Fatal(err)
-	}
 	armed := lnd.ChannelPoint{TxID: fixtureTxID, Index: 0}
 	if err := j.MarkPending(ctx, runID, chanIDs[0], armed); err != nil {
 		t.Fatal(err)
 	}
 
-	ln, core := &fakeLN{}, &fakeCore{}
-	rep, err := j.Recover(ctx, ln, core, runID, alwaysConfirm)
+	ln := &fakeLN{}
+	rep, err := j.Recover(ctx, ln, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("Recover: %v", err)
 	}
@@ -436,9 +413,6 @@ func TestRecoverExecutesTheAbortAndSettlesTheRun(t *testing.T) {
 	}
 	if len(rep.Abandoned) != 1 || len(rep.Cancelled) != 1 {
 		t.Fatalf("report is %+v", rep)
-	}
-	if len(rep.LocksFreed) != 2 {
-		t.Fatalf("freed %d of 2 coin locks", len(rep.LocksFreed))
 	}
 
 	r := load(t, j, runID)
@@ -455,47 +429,49 @@ func TestRecoverExecutesTheAbortAndSettlesTheRun(t *testing.T) {
 			t.Errorf("%d channels are %s, want %d", got[st], st, n)
 		}
 	}
-	for _, l := range r.Locks {
-		if !l.Released {
-			t.Errorf("coin lock %s is still journalled as held", l.Outpoint)
-		}
-	}
 
 	// Second time round: nothing left, and nothing asked of the node.
-	ln2, core2 := &fakeLN{}, &fakeCore{}
-	rep2, err := j.Recover(ctx, ln2, core2, runID, alwaysConfirm)
+	ln2 := &fakeLN{}
+	rep2, err := j.Recover(ctx, ln2, runID, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("second Recover should be a no-op, got: %v", err)
 	}
-	if len(rep2.Abandoned) != 0 || len(rep2.Cancelled) != 0 || len(rep2.LocksFreed) != 0 {
+	if len(rep2.Abandoned) != 0 || len(rep2.Cancelled) != 0 {
 		t.Fatalf("second Recover did work that was already done: %+v", rep2)
 	}
-	if core2.calls != 0 {
-		t.Fatalf("second Recover asked Core to unlock %d times — with an empty list "+
-			"that is a wallet-wide unlock", core2.calls)
+	if ln2.calls != 0 {
+		t.Fatalf("second Recover made %d calls for work already recorded", ln2.calls)
 	}
 }
 
 // An abort that fails partway must leave the run in aborting, not aborted, and
 // must record the half that worked.
+//
+// The failing step used to be Core's lock release, which ran last. There are no
+// coin locks, so the specimen is the abandon, which runs first — and that is the
+// harder half of the same property: the shim cancel behind it must still happen
+// and must still be recorded, rather than being skipped because the step in
+// front of it failed.
 func TestRecoverLeavesAFailedAbortOpen(t *testing.T) {
 	ctx := context.Background()
 	j := open(t)
-	chanIDs := ids(t, 1)
+	chanIDs := ids(t, 2)
 	const runID = "run-stuck"
 
 	if err := j.Begin(ctx, runID, batch(t, chanIDs)); err != nil {
 		t.Fatal(err)
 	}
-	if err := j.RecordLocks(ctx, runID, locks(1)); err != nil {
+	// One channel reached chan_pending, so the abort has an abandon to attempt;
+	// the other never did, so it has a shim to cancel behind it.
+	armed := lnd.ChannelPoint{TxID: fixtureTxID, Index: 0}
+	if err := j.MarkPending(ctx, runID, chanIDs[0], armed); err != nil {
 		t.Fatal(err)
 	}
 
-	ln := &fakeLN{}
-	core := &fakeCore{err: errors.New("bitcoind is not answering")}
-	rep, err := j.Recover(ctx, ln, core, runID, alwaysConfirm)
+	ln := &fakeLN{abandonErr: errors.New("lnd is not answering")}
+	rep, err := j.Recover(ctx, ln, runID, alwaysConfirm)
 	if err == nil {
-		t.Fatal("Recover reported success despite a failed lock release")
+		t.Fatal("Recover reported success despite a failed abandon")
 	}
 	if len(rep.Cancelled) != 1 {
 		t.Fatalf("the shim cancel that did work was not reported: %+v", rep)
@@ -505,11 +481,14 @@ func TestRecoverLeavesAFailedAbortOpen(t *testing.T) {
 	if r.State != journal.StateAborting {
 		t.Fatalf("run is %s, want %s so a retry can find it", r.State, journal.StateAborting)
 	}
-	if r.Channels[0].State != journal.ChanCancelled {
-		t.Errorf("the cancelled shim was not recorded: %s", r.Channels[0].State)
+	cancelled := 0
+	for _, c := range r.Channels {
+		if c.State == journal.ChanCancelled {
+			cancelled++
+		}
 	}
-	if r.Locks[0].Released {
-		t.Error("the coin lock is journalled as freed, but Core refused")
+	if cancelled != 1 {
+		t.Errorf("%d channels are cancelled, want the one shim: %+v", cancelled, r.Channels)
 	}
 	if len(mustUnfinished(t, j)) != 1 {
 		t.Error("a half-finished abort is not listed for recovery")
@@ -531,9 +510,6 @@ func TestWritesToAnUnknownRunAreRefused(t *testing.T) {
 
 	if _, err := j.Load(ctx, "nope"); !errors.Is(err, journal.ErrNoRun) {
 		t.Fatalf("Load: want ErrNoRun, got %v", err)
-	}
-	if err := j.RecordLocks(ctx, "nope", locks(1)); !errors.Is(err, journal.ErrNoRun) {
-		t.Fatalf("RecordLocks: want ErrNoRun, got %v", err)
 	}
 	if err := j.RecordSigner(ctx, "nope", "coldcard", journal.SignerPartial); !errors.Is(err, journal.ErrNoRun) {
 		t.Fatalf("RecordSigner: want ErrNoRun, got %v", err)
@@ -582,13 +558,17 @@ func alwaysConfirm(context.Context, abort.BluntRequest) (bool, error) { return t
 // interface means any other call panics rather than returning a plausible zero.
 type fakeLN struct {
 	lnrpc.LightningClient
-	calls   int
-	cancels int
+	calls      int
+	cancels    int
+	abandonErr error
 }
 
 func (f *fakeLN) AbandonChannel(context.Context, *lnrpc.AbandonChannelRequest,
 	...grpc.CallOption) (*lnrpc.AbandonChannelResponse, error) {
 	f.calls++
+	if f.abandonErr != nil {
+		return nil, f.abandonErr
+	}
 	return &lnrpc.AbandonChannelResponse{Status: "abandoned"}, nil
 }
 
@@ -602,17 +582,4 @@ func (f *fakeLN) FundingStateStep(context.Context, *lnrpc.FundingTransitionMsg,
 		return nil, errors.New("no funding intent found for pendingChannelID(...)")
 	}
 	return &lnrpc.FundingStateStepResp{}, nil
-}
-
-type fakeCore struct {
-	calls int
-	err   error
-}
-
-func (f *fakeCore) ReleaseLocks(_ context.Context, ops []bitcoind.Outpoint) ([]bitcoind.Outpoint, error) {
-	f.calls++
-	if f.err != nil {
-		return nil, f.err
-	}
-	return ops, nil
 }

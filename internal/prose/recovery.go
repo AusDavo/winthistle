@@ -152,25 +152,6 @@ func Recovery(r *journal.Run, now time.Time) string {
 				"record, not a job."))
 	}
 
-	if len(r.Locks) > 0 {
-		held := 0
-		for _, l := range r.Locks {
-			if !l.Released {
-				held++
-			}
-		}
-		if held > 0 {
-			b.WriteString("\n")
-			b.WriteString(Para(fmt.Sprintf(
-				"%d of this run's coin%s %s still locked in Core. A locked coin is "+
-					"not lost and not spent — it is a wallet that will decline to "+
-					"spend its own money and not say why. Core's locks live in "+
-					"memory, so a restart clears them all at once and this list "+
-					"becomes stale rather than wrong.",
-				held, Plural(held), IsAre(held))))
-		}
-	}
-
 	b.WriteString("\n")
 	b.WriteString(signerNote(r))
 	b.WriteString("\n")
@@ -244,17 +225,6 @@ func recoveryPlan(r *journal.Run, pending, shims []journal.Channel) string {
 			"Abandon %d channel%s that reached chan_pending. Not free — see below.",
 			len(pending), Plural(len(pending)))))
 	}
-	held := 0
-	for _, l := range r.Locks {
-		if !l.Released {
-			held++
-		}
-	}
-	if held > 0 {
-		b.WriteString(Bullet(fmt.Sprintf(
-			"Release %d coin lock%s in Core.", held, Plural(held))))
-	}
-
 	if len(pending) > 0 {
 		b.WriteString("\n")
 		b.WriteString(Para(
@@ -358,8 +328,6 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 	if alreadyGone > 0 {
 		b.WriteString(fmt.Sprintf("  %-24s  %d\n", "shims already gone", alreadyGone))
 	}
-	b.WriteString(fmt.Sprintf("  %-24s  %d\n", "coin locks freed", len(rep.LocksFreed)))
-
 	b.WriteString("\n")
 	if rep.Clean() && err == nil {
 		b.WriteString(Para(

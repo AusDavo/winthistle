@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 	"github.com/AusDavo/winthistle/internal/reserve"
 )
 

@@ -25,13 +25,8 @@ address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/winthistle.macaroon"
 
-[bitcoind]
-address = "127.0.0.1:8332"
-cookie  = "/core/.cookie"
-wallet  = "winthistle-cold"   # trailing comment
-
 [server]
-journal = "/state/runs.db"
+journal = "/state/runs.db"   # trailing comment
 
 [limits]
 require_confirmed_inputs = true
@@ -49,8 +44,8 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	if cfg.LND.Address != "127.0.0.1:10009" {
 		t.Errorf("lnd address is %q", cfg.LND.Address)
 	}
-	if cfg.Bitcoind.Wallet != "winthistle-cold" {
-		t.Errorf("a trailing comment leaked into the wallet name: %q", cfg.Bitcoind.Wallet)
+	if cfg.Server.Journal != "/state/runs.db" {
+		t.Errorf("a trailing comment leaked into the journal path: %q", cfg.Server.Journal)
 	}
 	if cfg.Limits.MinConfirmations() != 1 {
 		t.Error("require_confirmed_inputs did not become a confirmation floor")
@@ -73,11 +68,6 @@ func TestTheDefaultsAreTheOnesTheCodeAlreadyHas(t *testing.T) {
 address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/m.macaroon"
-
-[bitcoind]
-address = "127.0.0.1:8332"
-cookie  = "/core/.cookie"
-wallet  = "cold"
 
 [server]
 journal = "/state/runs.db"
@@ -138,11 +128,6 @@ address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/m.macaroon"
 
-[bitcoind]
-address = "127.0.0.1:8332"
-cookie  = "/core/.cookie"
-wallet  = "cold"
-
 [server]
 journal = "/state/runs.db"
 
@@ -198,9 +183,9 @@ func TestWhatElseIsRefused(t *testing.T) {
 				"/creds/admin.macaroon", 1),
 			want: "admin.macaroon",
 		},
-		"no credentials for core": {
-			body: strings.Replace(good, `cookie  = "/core/.cookie"`, "", 1),
-			want: "cookie, or user and pass",
+		"a fourth section that was retired": {
+			body: good + "\n[bitcoind]\naddress = \"127.0.0.1:8332\"\n",
+			want: "dials no Bitcoin node",
 		},
 		"a second key that was retired": {
 			body: strings.Replace(good, "[limits]",

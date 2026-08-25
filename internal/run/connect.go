@@ -4,14 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 )
 
-// Connect opens everything a run, a bump or a recovery needs, and returns the
-// function that closes it.
+// Connect opens everything a run or a recovery needs, and returns the function
+// that closes it.
+//
+// One socket and one file: LND, and the run journal. Bitcoin Core was dialled
+// here too, for the fee estimate and for testmempoolaccept, and item 5 of
+// docs/replan-2026-08.md removed both.
 //
 // It lives here rather than in cmd/winthistle because it is the same set of
 // connections for every command that touches a batch, and because a test that
@@ -32,19 +35,6 @@ func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 			cfg.LND.Address, err)
 	}
 	d.LND = cli
-
-	// Node has no wallet scope — estimatesmartfee and testmempoolaccept — and
-	// Wallet is bound to the watch-only cold wallet.
-	nodeCfg := cfg.Bitcoind
-	nodeCfg.Wallet = ""
-	if d.Node, err = bitcoind.New(nodeCfg); err != nil {
-		cli.Close()
-		return d, nil, err
-	}
-	if d.Wallet, err = bitcoind.New(cfg.Bitcoind); err != nil {
-		cli.Close()
-		return d, nil, err
-	}
 
 	j, err := journal.Open(ctx, cfg.Server.Journal)
 	if err != nil {

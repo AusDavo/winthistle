@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -18,7 +17,6 @@ import (
 type armedBatch struct {
 	Channels []lnd.ChannelPoint
 	Streams  []*regtestenv.Stream
-	Locks    []bitcoind.Outpoint
 	RawTx    string
 	TxID     string
 }
@@ -26,7 +24,7 @@ type armedBatch struct {
 // target is the batch as an abort would see it after a total failure: every
 // channel armed, so every channel has to be abandoned rather than cancelled.
 func (b armedBatch) target() abort.Target {
-	return abort.Target{Channels: b.Channels, Locks: b.Locks}
+	return abort.Target{Channels: b.Channels}
 }
 
 // armBatch drives steps 2-7 for a whole batch: one funding stream per peer, ONE
@@ -81,7 +79,6 @@ func armBatch(t *testing.T, env *regtestenv.Env, peers []string) armedBatch {
 
 	b := armedBatch{
 		Streams: streams,
-		Locks:   funded.Inputs,
 		RawTx:   rawTx,
 		TxID:    txid,
 	}
@@ -277,16 +274,13 @@ func TestRunAbortsAPartiallyArmedBatch(t *testing.T) {
 
 	armed, _ := armOneChannel(t, env)
 	unfinished := env.OpenShimStream(t, env.Peers(t)[0], fixtureChannelSat)
-	funded := env.BuildFundingPSBT(t, env.Cold, []*regtestenv.Stream{unfinished}, 5)
-
 	target := abort.Target{
 		Channels: []lnd.ChannelPoint{armed},
 		Shims:    []lnd.PendingChanID{unfinished.PendingChanID},
-		Locks:    funded.Inputs,
 	}
 
 	alwaysConfirm := func(context.Context, abort.BluntRequest) (bool, error) { return true, nil }
-	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, target, alwaysConfirm)
+	rep, err := abort.Run(ctx, env.Alice.Lightning, target, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
@@ -296,24 +290,18 @@ func TestRunAbortsAPartiallyArmedBatch(t *testing.T) {
 	if len(rep.Abandoned) != 1 || len(rep.Cancelled) != 1 {
 		t.Fatalf("report incomplete: %+v", rep)
 	}
-	if len(rep.LocksFreed) != len(funded.Inputs) {
-		t.Fatalf("freed %d of %d coin locks", len(rep.LocksFreed), len(funded.Inputs))
-	}
 	if isPendingOpen(t, env, armed) {
 		t.Fatalf("%s is still pending after the abort", armed)
 	}
 
 	// Running the same abort again must be quiet, not an error: this is what a
 	// resumed recovery after a crash looks like.
-	rep2, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, target, alwaysConfirm)
+	rep2, err := abort.Run(ctx, env.Alice.Lightning, target, alwaysConfirm)
 	if err != nil {
 		t.Fatalf("second Run should be a no-op, got: %v", err)
 	}
 	if len(rep2.Cancelled) != 1 || !rep2.Cancelled[0].AlreadyGone {
 		t.Fatalf("second Run did not report the shim as already gone: %+v", rep2.Cancelled)
-	}
-	if len(rep2.LocksFreed) != 0 {
-		t.Fatalf("second Run freed %v, but nothing was locked", rep2.LocksFreed)
 	}
 }
 
@@ -360,7 +348,7 @@ func TestBatchArmsEveryChannelBeforeAnythingIsPublished(t *testing.T) {
 	// down is the same abort as for one channel, n times over — and it is what
 	// the mainnet cold probe will terminate through.
 	alwaysConfirm := func(context.Context, abort.BluntRequest) (bool, error) { return true, nil }
-	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, b.target(), alwaysConfirm)
+	rep, err := abort.Run(ctx, env.Alice.Lightning, b.target(), alwaysConfirm)
 	if err != nil {
 		t.Fatalf("aborting the armed batch: %v", err)
 	}

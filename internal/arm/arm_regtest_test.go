@@ -12,13 +12,13 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/arm"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -145,7 +145,7 @@ func drive(t *testing.T, n int) *window {
 	}
 	t.Logf("\n%s", w.plan.Document())
 
-	outputs := streams.FundingOutputs()
+	outputs := fundingOutputs(streams)
 	if topUp != nil {
 		outputs = append(outputs, coldwallet.Output{
 			Address: topUp.Address, AmountSat: topUp.AmountSat,
@@ -160,10 +160,6 @@ func drive(t *testing.T, n int) *window {
 	if err != nil {
 		t.Fatalf("building the batch transaction: %v", err)
 	}
-	if err := w.j.RecordLocks(ctx, w.runID, w.built.Inputs); err != nil {
-		t.Fatalf("journalling Core's coin locks: %v", err)
-	}
-
 	// Ours first. LND's psbt_verify looks for its own funding output and stops,
 	// so an output nobody named would pass all n of its checks.
 	v, err := w.plan.Verify(w.built.Raw)
@@ -324,19 +320,19 @@ func abortAtCleanup(t *testing.T, w *window) {
 		}
 		switch run.State {
 		case journal.StatePublishing, journal.StatePublished:
-			if _, err := w.j.Recover(ctx, w.env.Alice.Lightning, w.env.Cold,
+			if _, err := w.j.Recover(ctx, w.env.Alice.Lightning,
 				w.runID, blunt(t)); !errors.Is(err, journal.ErrMayBePublished) {
 				t.Errorf("the journal allowed a published run to be aborted: %v", err)
 			}
 			return
 		}
-		rep, err := w.j.Recover(ctx, w.env.Alice.Lightning, w.env.Cold, w.runID, blunt(t))
+		rep, err := w.j.Recover(ctx, w.env.Alice.Lightning, w.runID, blunt(t))
 		if err != nil {
 			t.Errorf("aborting run %s (%s): %v", w.runID, run.State, err)
 			return
 		}
-		t.Logf("cleanup: abandoned %d, cancelled %d, freed %d lock(s)",
-			len(rep.Abandoned), len(rep.Cancelled), len(rep.LocksFreed))
+		t.Logf("cleanup: abandoned %d, cancelled %d",
+			len(rep.Abandoned), len(rep.Cancelled))
 	})
 }
 
@@ -534,4 +530,16 @@ func TestAnArmedValueFromNowhereCarriesNoTransaction(t *testing.T) {
 	} else {
 		t.Logf("refused: %v", err)
 	}
+}
+
+// fundingOutputs is the harness reading the recipients off the open streams, the
+// way an operator reads them off the terminal at step 4.
+func fundingOutputs(streams *arm.Streams) []coldwallet.Output {
+	addrs := make([]string, 0, len(streams.All))
+	amounts := make([]int64, 0, len(streams.All))
+	for _, st := range streams.All {
+		addrs = append(addrs, st.FundingAddress)
+		amounts = append(amounts, st.FundingAmount)
+	}
+	return coldwallet.FundingOutputsOf(addrs, amounts)
 }

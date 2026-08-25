@@ -68,9 +68,9 @@ func main() {
 	}
 
 	// Ctrl-C during the armed window has to unwind rather than exit: there are
-	// peers holding reservations and a fence of coin locks in Core, and the
-	// deferred teardown is what releases both. So the signal cancels the
-	// context and the run reports what it took apart.
+	// peers holding reservations and, past step 6, channels LND is watching, and
+	// the deferred teardown is what takes them apart. So the signal cancels the
+	// context and the run reports what it removed.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 

@@ -68,9 +68,9 @@
 //
 // Any failure between arm.Open and the publish leaves peers holding
 // reservations and possibly channels holding commitment signatures. Nothing has
-// been broadcast, so the answer is always the same one — cancel the shims,
-// abandon what reached pending, release Core's locks — and this package takes
-// it rather than printing a suggestion. It goes through journal.Recover, which
+// been broadcast, so the answer is always the same one — abandon what reached
+// pending, cancel the shims — and this package takes it rather than printing a
+// suggestion. It goes through journal.Recover, which
 // is the same code winthistle recover runs, and which refuses outright to
 // abort a run that reached the publish call.
 package run
@@ -85,7 +85,6 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/arm"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
@@ -106,17 +105,6 @@ import (
 // configuration file to say where the harness is.
 type Deps struct {
 	LND *lnd.Client
-
-	// Node is Core with no wallet scope; Wallet is the watch-only cold wallet.
-	//
-	// Node is still on the batch's path in two places — the fee estimate the
-	// verifier judges against, and testmempoolaccept, which is the one pre-flight
-	// there is. Wallet is not: the only thing that reaches it is journal.Recover,
-	// releasing coin locks a run of an earlier build may have taken. Item 5 of
-	// docs/replan-2026-08.md removes Core, and it has to decide what replaces
-	// those rather than dropping them quietly.
-	Node   *bitcoind.Client
-	Wallet *bitcoind.Client
 
 	Journal *journal.Journal
 
@@ -667,10 +655,12 @@ func settlePhase(ctx context.Context, d Deps, o Options, armed *arm.Armed,
 	ctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 
-	result, err := settle.Settle(ctx, d.LND.Lightning, members(armed, p, o), settle.Options{
-		Chain:       d.Node,
-		FundingTxID: armed.TxID,
-	})
+	// No Chain: that was Bitcoin Core, and this build dials no Bitcoin node. LND
+	// moving a channel out of pending_open_channels is the authoritative signal
+	// and needs nobody's help; what is lost is the "2 of an expected 3" depth
+	// line, and settle.Options says so.
+	result, err := settle.Settle(ctx, d.LND.Lightning, members(armed, p, o),
+		settle.Options{FundingTxID: armed.TxID})
 	if result != nil {
 		fmt.Fprint(d.Out, result.Report())
 	}
@@ -738,7 +728,7 @@ func recoverRun(ctx context.Context, d Deps, o Options, res *Result) error {
 	section(d.Out, "Taking the batch apart")
 	fmt.Fprint(d.Out, prose.Recovery(run, time.Now()))
 
-	rep, err := d.Journal.Recover(ctx, d.LND.Lightning, d.Wallet, o.RunID, d.Confirm)
+	rep, err := d.Journal.Recover(ctx, d.LND.Lightning, o.RunID, d.Confirm)
 	res.Aborted = rep
 	fmt.Fprint(d.Out, prose.RecoveryOutcome(run, rep, err))
 	return err

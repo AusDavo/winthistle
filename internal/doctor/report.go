@@ -4,8 +4,6 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/AusDavo/winthistle/internal/bitcoind"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
@@ -84,37 +82,4 @@ func (r *Report) Summary() string {
 		}
 	}
 	return fmt.Sprintf("%d checks: %d failed, %d warned", len(r.Checks), failed, warned)
-}
-
-// describe is a descriptor in one line, read locally without asking Core.
-//
-// It names sortedmulti or multi explicitly, because that is the trap the design
-// singles out: the two produce entirely different addresses from identical
-// keys, they agree at about half of all indices for a 2-of-2, and neither the
-// import nor the balance tells them apart. Saying which one is in the wallet is
-// not a check — only the round-trip address comparison is — but an operator who
-// knows their wallet is sortedmulti and reads "multi" here has caught it.
-func describe(d bitcoind.WalletDescriptor) string {
-	shape := coldwallet.Inspect(d.Desc)
-
-	kind := "single-key"
-	switch {
-	case shape.SortedMulti:
-		kind = fmt.Sprintf("sortedmulti, %d keys", shape.Keys)
-	case shape.PlainMulti:
-		kind = fmt.Sprintf("multi (NOT sortedmulti), %d keys", shape.Keys)
-	}
-
-	extra := ""
-	if !shape.Ranged {
-		extra = ", not ranged"
-	}
-	if shape.Origins < shape.Keys {
-		extra += fmt.Sprintf(", %d of %d keys carry a key origin — a signer "+
-			"recognises its own key by that prefix", shape.Origins, shape.Keys)
-	}
-	if len(d.Range) == 2 {
-		extra += fmt.Sprintf(", range [%d,%d], next %d", d.Range[0], d.Range[1], d.Next)
-	}
-	return kind + extra
 }

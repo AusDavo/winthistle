@@ -7,10 +7,10 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -110,7 +110,7 @@ func TestSkipFinalizeReachesChanPendingWithNothingSigned(t *testing.T) {
 		t.Fatalf("asking the cold wallet for a change address: %v", err)
 	}
 
-	outputs := streams.FundingOutputs()
+	outputs := fundingOutputsIn(streams)
 	if topUp != nil {
 		outputs = append(outputs, coldwallet.Output{
 			Address: topUp.Address, AmountSat: topUp.AmountSat,
@@ -125,7 +125,6 @@ func TestSkipFinalizeReachesChanPendingWithNothingSigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("building the batch transaction: %v", err)
 	}
-	leftBehind.Locks = built.Inputs
 	t.Logf("unsigned batch transaction %s, %d channels, %d input(s) locked",
 		built.TxID, n, len(built.Inputs))
 
@@ -250,13 +249,13 @@ func abandonAtCleanup(t *testing.T, env *regtestenv.Env, target *abort.Target) {
 				req.Channel, req.Rejection)
 			return true, nil
 		})
-		rep, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, *target, blunt)
+		rep, err := abort.Run(ctx, env.Alice.Lightning, *target, blunt)
 		if err != nil {
 			t.Errorf("aborting what the test left behind: %v", err)
 		}
 		if rep != nil {
-			t.Logf("cleanup: abandoned %d, cancelled %d, freed %d lock(s)",
-				len(rep.Abandoned), len(rep.Cancelled), len(rep.LocksFreed))
+			t.Logf("cleanup: abandoned %d, cancelled %d",
+				len(rep.Abandoned), len(rep.Cancelled))
 		}
 	})
 }
@@ -271,4 +270,16 @@ func remove(ids []lnd.PendingChanID, id lnd.PendingChanID) []lnd.PendingChanID {
 		}
 	}
 	return out
+}
+
+// fundingOutputs is the harness reading the recipients off the open streams, the
+// way an operator reads them off the terminal at step 4.
+func fundingOutputsIn(streams *Streams) []coldwallet.Output {
+	addrs := make([]string, 0, len(streams.All))
+	amounts := make([]int64, 0, len(streams.All))
+	for _, st := range streams.All {
+		addrs = append(addrs, st.FundingAddress)
+		amounts = append(amounts, st.FundingAmount)
+	}
+	return coldwallet.FundingOutputsOf(addrs, amounts)
 }

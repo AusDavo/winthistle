@@ -117,9 +117,15 @@ func (e *Env) AcceptsToMempool(t *testing.T, rawTxHex string) (bool, string) {
 
 // ReleaseLocksAtCleanup gives Core's coin locks back when the test ends.
 //
-// Directed mode locks the batch's inputs at walletcreatefundedpsbt and the abort
-// path releases them; a test that leaves them held leaves a wallet that silently
-// refuses to spend its own money, and the next test sees "insufficient funds".
+// BuildPSBTPaying calls this for every transaction it builds, so an ordinary
+// fixture needs nothing; it is exported for the tests that call
+// coldwallet.Build or FenceOff directly. A test that leaves a lock held leaves
+// a wallet that silently refuses to spend its own money, and the next test in
+// the same binary sees "Insufficient funds" against a balance that is fine.
+//
+// Core's locks used to be released by the application's abort path, which is
+// why this was a thing a fixture had to remember rather than something the
+// builder did. The app takes no locks now, so the harness owns them.
 func (e *Env) ReleaseLocksAtCleanup(t *testing.T, wallet *bitcoind.Client,
 	ops []bitcoind.Outpoint) {
 

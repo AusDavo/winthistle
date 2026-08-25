@@ -11,9 +11,9 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 	lnrpc "github.com/lightningnetwork/lnd/lnrpc"
 )
 
@@ -203,6 +203,17 @@ func (e *Env) BuildPSBTPaying(t *testing.T, wallet *bitcoind.Client,
 	if err != nil {
 		t.Fatalf("building the batch transaction: %v", err)
 	}
+
+	// The harness owns the locks it takes now.
+	//
+	// walletcreatefundedpsbt is called with lockUnspents, so Core holds these
+	// coins unspendable, and until item 5 the application's abort path released
+	// them: every fixture that built a batch and then aborted got its coins back
+	// as a side effect of the thing it was testing. The app selects no coins and
+	// dials no Bitcoin node, so nothing releases them any more — and a leaked
+	// lock does not announce itself, it starves the next test in the same
+	// binary with "Insufficient funds" from a wallet whose balance is fine.
+	e.ReleaseLocksAtCleanup(t, wallet, built.Inputs)
 
 	return FundedPSBT{
 		Base64:  built.PSBT,

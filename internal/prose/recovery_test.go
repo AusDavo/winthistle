@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 )
@@ -134,9 +133,8 @@ func TestTheOutcomeScreenReportsAPartialAbortHonestly(t *testing.T) {
 			Channel:   lnd.ChannelPoint{TxID: fakeTxID, Index: 0},
 			UsedBlunt: true,
 		}},
-		Cancelled:  []abort.ShimOutcome{{AlreadyGone: true}},
-		LocksFreed: []bitcoind.Outpoint{{TxID: fakeTxID, Vout: 3}},
-		Failures:   []error{errors.New("cancelling shim aabb: rpc error")},
+		Cancelled: []abort.ShimOutcome{{AlreadyGone: true}},
+		Failures:  []error{errors.New("cancelling shim aabb: rpc error")},
 	}
 	got := RecoveryOutcome(run(journal.StateAborting), rep, errors.New("abort did not fully complete"))
 

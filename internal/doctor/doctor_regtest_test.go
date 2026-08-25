@@ -48,10 +48,11 @@ func TestDoctorReadsTheWholeSetup(t *testing.T) {
 	for _, c := range report.Checks {
 		byName[c.Name] = c
 	}
+	// Six checks, not nine. "Bitcoin Core", "the cold wallet" and "the coins"
+	// went with the Bitcoin node this build no longer dials.
 	for _, name := range []string{
-		"winthistle.toml", "LND", "the macaroon", "Bitcoin Core",
-		"the cold wallet", "the coins", "the anchor reserve", "the fee rate",
-		"the peers", "the run journal",
+		"winthistle.toml", "LND", "the macaroon", "the anchor reserve",
+		"the fee rate", "the peers", "the run journal",
 	} {
 		if _, ok := byName[name]; !ok {
 			t.Errorf("no check called %q ran", name)

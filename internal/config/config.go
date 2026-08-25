@@ -48,7 +48,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/policy"
 )
@@ -64,11 +63,10 @@ type Config struct {
 	// Path is where it was read from, so a report can say which file it means.
 	Path string
 
-	LND      lnd.Config
-	Bitcoind bitcoind.Config
-	Server   Server
-	Limits   Limits
-	Fees     Fees
+	LND    lnd.Config
+	Server Server
+	Limits Limits
+	Fees   Fees
 }
 
 // Server is the [server] block.
@@ -132,8 +130,7 @@ type Fees struct {
 }
 
 var knownSections = map[string]bool{
-	"lnd": true, "bitcoind": true, "server": true,
-	"limits": true, "fees": true,
+	"lnd": true, "server": true, "limits": true, "fees": true,
 }
 
 // Load reads winthistle.toml.
@@ -172,21 +169,6 @@ func Load(path string) (*Config, error) {
 	mac, err := l.str(path, "macaroon", "")
 	fail(err)
 	c.LND = lnd.Config{Address: addr, TLSCert: p(cert), Macaroon: p(mac)}
-
-	b := doc.section("bitcoind")
-	baddr, err := b.str(path, "address", "")
-	fail(err)
-	cookie, err := b.str(path, "cookie", "")
-	fail(err)
-	user, err := b.str(path, "user", "")
-	fail(err)
-	pass, err := b.str(path, "pass", "")
-	fail(err)
-	wallet, err := b.str(path, "wallet", "")
-	fail(err)
-	c.Bitcoind = bitcoind.Config{
-		Address: baddr, Cookie: p(cookie), User: user, Pass: pass, Wallet: wallet,
-	}
 
 	s := doc.section("server")
 	journal, err := s.str(path, "journal", DefaultJournal)
@@ -246,14 +228,6 @@ func (c *Config) validate(path string, doc *document) []string {
 			"close a channel or widen its own permissions")
 	}
 
-	need(c.Bitcoind.Address != "", "[bitcoind] address is required: the host:port "+
-		"of Core's JSON-RPC listener. Directed mode builds the batch with Core, and "+
-		"there is no other builder in this build")
-	need(c.Bitcoind.Wallet != "", "[bitcoind] wallet is required: the name of the "+
-		"watch-only descriptor wallet holding the cold storage descriptors")
-	need(c.Bitcoind.Cookie != "" || (c.Bitcoind.User != "" && c.Bitcoind.Pass != ""),
-		"[bitcoind] needs either cookie, or user and pass together")
-
 	need(c.Server.Journal != "", "[server] journal is required: where to keep the "+
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
@@ -309,11 +283,6 @@ const Example = `[lnd]
 address  = "127.0.0.1:10009"
 tls_cert = "~/.lnd/tls.cert"
 macaroon = "~/.lnd/winthistle.macaroon"   # baked, not admin
-
-[bitcoind]
-address = "127.0.0.1:8332"
-cookie  = "~/.bitcoin/.cookie"
-wallet  = "winthistle-cold"
 
 [server]
 journal = "~/.winthistle/runs.db"

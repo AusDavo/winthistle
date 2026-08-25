@@ -204,10 +204,11 @@ func (j *Journal) Close() error { return j.db.Close() }
 // journal is read by humans during a recovery and a reversed txid there is the
 // worst place to discover the convention.
 //
-// # Four tables this build no longer writes
+// # Five tables this build no longer writes
 //
-// `bumps`, `bump_signers` and `bump_locks` went with `winthistle bump`, and
-// `setups` went with `winthistle setup`. The reasoning that put them here is
+// `bumps`, `bump_signers` and `bump_locks` went with `winthistle bump`,
+// `setups` went with `winthistle setup`, and `locks` went with the last thing
+// that took a coin lock in Bitcoin Core. The reasoning that put them here is
 // worth keeping, because it is the rule for the next table: Open runs a single
 // CREATE TABLE IF NOT EXISTS block and there is no version table and no
 // migration machinery, so an ALTER would silently not reach a journal written by
@@ -218,8 +219,15 @@ func (j *Journal) Close() error { return j.db.Close() }
 // outcome rather than an oversight: nothing in this build can be confused by
 // them, and an operator's record of a child they really did broadcast, or of a
 // wallet they really did compare addresses against, is not something to destroy
-// on their behalf. `locks` is in the same position — nothing has written it
-// since the app stopped selecting coins — but it is still read, so it stays.
+// on their behalf.
+//
+// `locks` is the one that could have been read rather than dropped, and was not.
+// Nothing has written a lock row since the app stopped selecting coins, so on a
+// journal this build made the list is always empty; and Core's locks are
+// memory-only, so a lock a run of an earlier build took is released by the next
+// restart of the node holding it. Carrying a reader for it would have meant
+// carrying a Bitcoin Core client through the whole abort path for a list that is
+// empty and a lock that expires on its own.
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
     id         TEXT PRIMARY KEY,
@@ -247,14 +255,6 @@ CREATE TABLE IF NOT EXISTS signers (
     state      TEXT NOT NULL,
     updated_at TEXT NOT NULL,
     PRIMARY KEY (run_id, label)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS locks (
-    run_id   TEXT    NOT NULL REFERENCES runs(id),
-    txid     TEXT    NOT NULL,
-    vout     INTEGER NOT NULL,
-    released INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (run_id, txid, vout)
 ) STRICT;
 
 `

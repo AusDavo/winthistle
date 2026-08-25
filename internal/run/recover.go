@@ -64,7 +64,7 @@ func RecoverOne(ctx context.Context, d Deps, runID string) (*abort.Report, error
 		return nil, err
 	}
 
-	rep, err := d.Journal.Recover(ctx, d.LND.Lightning, d.Wallet, runID, d.Confirm)
+	rep, err := d.Journal.Recover(ctx, d.LND.Lightning, runID, d.Confirm)
 	fmt.Fprint(d.Out, prose.RecoveryOutcome(run, rep, err))
 	return rep, err
 }

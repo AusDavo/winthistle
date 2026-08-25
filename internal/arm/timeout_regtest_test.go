@@ -163,14 +163,13 @@ func TestOnePeersWindowExpiringLeavesTheRestOfTheBatchArmed(t *testing.T) {
 			"channels armed — I-1 is broken", txID)
 	}
 
-	// The teardown, which is the whole cost of the scenario: one abandon, one
-	// shim cancel that may already be gone, and the coins back.
+	// The teardown, which is the whole cost of the scenario: one abandon and one
+	// shim cancel that may already be gone.
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	rep, err := abort.Run(ctx, env.Alice.Lightning, env.Cold, abort.Target{
+	rep, err := abort.Run(ctx, env.Alice.Lightning, abort.Target{
 		Channels: []lnd.ChannelPoint{cp},
 		Shims:    []lnd.PendingChanID{lapsing.PendingChanID},
-		Locks:    funded.Inputs,
 	}, func(context.Context, abort.BluntRequest) (bool, error) { return true, nil })
 	if err != nil {
 		t.Fatalf("tearing the half-armed batch down: %v", err)

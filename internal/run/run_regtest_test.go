@@ -13,10 +13,10 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
+	"github.com/AusDavo/winthistle/internal/regtestenv/coldwallet"
 	"github.com/AusDavo/winthistle/internal/run"
 )
 
@@ -118,7 +118,7 @@ func setup(t *testing.T, peers []string, amounts []int64) (
 
 	out := new(bytes.Buffer)
 	d := run.Deps{
-		LND: env.Alice, Node: env.Node, Wallet: env.Cold,
+		LND:     env.Alice,
 		Journal: j,
 		Signing: &sparrow{t: t, env: env, feeRate: cfg.Fees.TargetSatPerVB},
 		Out:     out, Confirm: blunt(t),
