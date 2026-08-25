@@ -160,6 +160,8 @@ func drive(t *testing.T, n int) *window {
 	if err != nil {
 		t.Fatalf("building the batch transaction: %v", err)
 	}
+	env.ReleaseLocksAtCleanup(t, env.Cold, w.built.Inputs)
+
 	// Ours first. LND's psbt_verify looks for its own funding output and stops,
 	// so an output nobody named would pass all n of its checks.
 	v, err := w.plan.Verify(w.built.Raw)

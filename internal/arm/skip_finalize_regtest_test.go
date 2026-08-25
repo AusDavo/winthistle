@@ -125,6 +125,7 @@ func TestSkipFinalizeReachesChanPendingWithNothingSigned(t *testing.T) {
 	if err != nil {
 		t.Fatalf("building the batch transaction: %v", err)
 	}
+	env.ReleaseLocksAtCleanup(t, env.Cold, built.Inputs)
 	t.Logf("unsigned batch transaction %s, %d channels, %d input(s) locked",
 		built.TxID, n, len(built.Inputs))
 

@@ -10,12 +10,11 @@ already have a wallet; keep using it.
 
 > ### Status: works on regtest, never run on mainnet. Do not use.
 >
-> The direction changed on 2026-08-25 and the code has not caught up yet. What
-> this README describes is what the tool is *becoming* — see
+> The direction changed on 2026-08-25 and the code has caught up. What this
+> README describes is what the tool now is, bar one item — see
 > [`docs/replan-2026-08.md`](docs/replan-2026-08.md), which is the current plan
-> and says plainly which parts are not built. The commands that exist today are
-> `setup`, `doctor`, `run`, `bump`, `recover` and `serve`; the first, third and
-> last of those are being cut or reshaped.
+> and says plainly which part is not built. The commands are `run`, `doctor` and
+> `recover`, plus `print-macaroon-command` and two `example-*` printers.
 >
 > The central safety property below is verified in LND's source and observed on
 > regtest, most recently on 2026-08-25 with *n* = 2 channels reaching
@@ -234,6 +233,25 @@ against.
 This is why the single-sig question stopped mattering. It used to be the one
 place where a design property rested on your setup rather than on structure. It
 now rests on nothing, because nothing needs it.
+
+## You tell it the fee rate; it does not go and ask
+
+`[fees] target_sat_per_vb` in `winthistle.toml`, or `--fee-rate` for one run.
+There is no default and a missing one is refused at load time.
+
+That is deliberate rather than lazy. It used to come from Bitcoin Core's
+`estimatesmartfee`, and this build does not talk to a Bitcoin node at all — and a
+fee API is the one substitute it will not reach for, because a fee API is handed
+the size of what you are building and the moment you are building it, which
+together are most of what this tool exists not to leak.
+
+It is not a worse answer either. This program does not build the transaction and
+does not choose the fee; Sparrow does, at step 4, with whatever estimate you
+trust. What step 5 needs is something to hold the built transaction to, and the
+rate you said you were aiming at is a stronger thing to check against than a
+number fetched on your behalf. A transaction paying more than a quarter either
+side of it is reported. Everything else here works the same way: you declare the
+batch, it checks the transaction.
 
 ## Every batch should have a change output
 

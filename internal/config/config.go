@@ -63,21 +63,22 @@ type Config struct {
 	// Path is where it was read from, so a report can say which file it means.
 	Path string
 
-	LND    lnd.Config
-	Server Server
-	Limits Limits
-	Fees   Fees
+	LND     lnd.Config
+	Journal Journal
+	Limits  Limits
+	Fees    Fees
 }
 
-// Server is the [server] block.
+// Journal is the [journal] block.
 //
-// One key left in it. bind went with the local web UI: a key that names a socket
-// nothing opens is the thing this package's own copy calls worse than no key at
-// all, so it is retired by name rather than accepted and ignored.
-type Server struct {
-	// Journal is the run journal's SQLite file. It holds no key material and it
-	// is the one piece of state worth backing up.
-	Journal string
+// It was [server], with bind beside it, until the local web UI went. A section
+// named for a component that no longer exists is the same defect as a key that
+// changes nothing, so it is renamed and the old spelling is retired by name.
+// docs/design.html has always shown it as [journal] path.
+type Journal struct {
+	// Path is the run journal's SQLite file. It holds no key material and it is
+	// the one piece of state worth backing up.
+	Path string
 }
 
 // Limits is the [limits] block.
@@ -130,7 +131,7 @@ type Fees struct {
 }
 
 var knownSections = map[string]bool{
-	"lnd": true, "server": true, "limits": true, "fees": true,
+	"lnd": true, "journal": true, "limits": true, "fees": true,
 }
 
 // Load reads winthistle.toml.
@@ -170,10 +171,10 @@ func Load(path string) (*Config, error) {
 	fail(err)
 	c.LND = lnd.Config{Address: addr, TLSCert: p(cert), Macaroon: p(mac)}
 
-	s := doc.section("server")
-	journal, err := s.str(path, "journal", DefaultJournal)
+	jr := doc.section("journal")
+	journalPath, err := jr.str(path, "path", DefaultJournal)
 	fail(err)
-	c.Server = Server{Journal: p(journal)}
+	c.Journal = Journal{Path: p(journalPath)}
 
 	lim := doc.section("limits")
 	if lim.has("allow_rbf") {
@@ -228,7 +229,7 @@ func (c *Config) validate(path string, doc *document) []string {
 			"close a channel or widen its own permissions")
 	}
 
-	need(c.Server.Journal != "", "[server] journal is required: where to keep the "+
+	need(c.Journal.Path != "", "[journal] path is required: where to keep the "+
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
 
@@ -284,8 +285,8 @@ address  = "127.0.0.1:10009"
 tls_cert = "~/.lnd/tls.cert"
 macaroon = "~/.lnd/winthistle.macaroon"   # baked, not admin
 
-[server]
-journal = "~/.winthistle/runs.db"
+[journal]
+path = "~/.winthistle/runs.db"
 
 [limits]
 require_confirmed_inputs = true

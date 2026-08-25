@@ -388,8 +388,8 @@ address  = %q
 tls_cert = %q
 macaroon = %q
 
-[server]
-journal = %q
+[journal]
+path = %q
 
 [limits]
 require_confirmed_inputs = true

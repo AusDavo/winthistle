@@ -39,80 +39,74 @@ no signing.** That is the whole point of the inversion.
 ## Status
 
 **What is built and exercised against live regtest**, and is the guide to what
-exists: `winthistle setup`, `run`, `bump`, `doctor`, `recover` and `serve` all
-work against the cluster in `regtest/`. `internal/arm` runs the **inverted**
-sequence — `skip_finalize` at verify, the *n* receipts before anything is signed,
-one publish — and the I-1 gate is observed at *n* = 3 with nothing signed when it
-opens. `run` **builds nothing and signs nothing**: it prints the recipients, reads
-the unsigned transaction back from `--psbt FILE`, and reads the signed one from
-`FILE-signed.psbt`. `internal/combine` has twenty adversarial tests on inbound
-PSBTs. `internal/plan` has the batch verifier. `winthistle serve` carries a
-loopback bind, a startup token, strict `Origin` and `Host` checks and no CORS, and
-can open a batch — asking the page for the transaction and then for the
-signatures — run a setup and a bump, and serve the journal read-only. The signet
-harness is two bitcoinds and no LND. None of that is broken, and none of it should
-be described as broken.
+exists: `winthistle run`, `doctor` and `recover` work against the cluster in
+`regtest/`, and those three plus `print-macaroon-command` and the two
+`example-*` printers are the whole command set. `internal/arm` runs the
+**inverted** sequence — `skip_finalize` at verify, the *n* receipts before
+anything is signed, one publish — and the I-1 gate is observed at *n* = 3 with
+nothing signed when it opens. `run` **builds nothing and signs nothing**: it
+prints the recipients, reads the unsigned transaction back from `--psbt FILE`,
+and reads the signed one from `FILE-signed.psbt`. `internal/combine` has twenty
+adversarial tests on inbound PSBTs. `internal/plan` has the batch verifier. None
+of that is broken, and none of it should be described as broken.
 
-**What the replan cuts, and which item deletes it.** Nothing has been deleted
-yet — this is a description of intent, not of the tree:
+**Items 1 to 5 of the replan are done, and item 5 deleted 28,267 lines.** The
+tree went from 55,670 Go lines to 28,881. Read
+`docs/replan-2026-08.md`'s "Item 3, as built", "Item 4, as built" and "Item 5, as
+built" for the account; the short version:
 
-- ~~**Item 3** changes `internal/arm` to the new sequence.~~ **Done, 2026-08-26**
-  — see `docs/replan-2026-08.md`'s "Item 3, as built". `arm.Verify` sends
-  `skip_finalize` on all *n* and pins the txid before the first call;
-  `arm.Receipts` collects the receipts and is the gate; `arm.Finalize` is gone and
-  there is **no `psbt_finalize` call anywhere in this build**; `arm.Publish` takes
-  the signed bytes as a parameter and refuses any whose txid is not the pinned
-  one. The journal runs arming → armed → signing → publishing → published.
+- ~~**Item 3** changes `internal/arm` to the new sequence.~~ **Done.**
+  `arm.Verify` sends `skip_finalize` on all *n* and pins the txid before the first
+  call; `arm.Receipts` collects the receipts and is the gate; `arm.Finalize` is
+  gone and there is **no `psbt_finalize` call anywhere in this build**;
+  `arm.Publish` takes the signed bytes as a parameter and refuses any whose txid
+  is not the pinned one. The journal runs arming → armed → signing → publishing →
+  published.
 - ~~**Item 4** adds the `--psbt` path to `run` and stops calling `coldwallet`.~~
-  **Done, 2026-08-26** — see `docs/replan-2026-08.md`'s "Item 4, as built".
-  `run.SigningWallet` is the seam (`Built` at step 4, `Signed` at step 7), with
-  `run.FileWallet` behind `--psbt FILE` and a two-question page wallet in
-  `internal/webrun`. `internal/run` does not import `internal/coldwallet`, which
-  survives **inside the harness** as the stand-in for Sparrow. `setup.Check` and
-  `rehearsal.Gate` are no longer called: both were about machinery the app has
-  given up, not about the batch.
-
-  **The collision item 3 left open is settled.** `combine` is now *the acceptance
-  check on an inbound PSBT*, and its package comment says so. `combine.Accept` is
-  the happy path — one wallet, one file, complete witnesses or a complete set of
-  partials — and it is the whole of `Complete` bar the merge. `Merge` still
-  refuses a finalized packet, and the reason is mechanical rather than custodial:
-  a merge unions partial signatures, finalization discards them, so a device that
-  finalizes on its own leaves the other devices nothing to add to. That is still
-  true of the CPFP child, which is the only multi-device round left. The same
-  correction went into `internal/signers` and into `journal.SignerState`, which
-  gained `SignerSigned` for the batch and kept `SignerPartial` for the child.
-
-  **One new refusal, and it is I-1.** `combine.Unsigned` refuses a step-4 packet
-  that carries any signature. Step 4 is *before* the gate: a wallet that signs
-  there leaves the operator holding a broadcastable funding transaction while
-  nothing has reached `chan_pending`, and Sparrow's broadcast button is two clicks
-  from its signing one. That is the last place I-1 can be defeated from outside.
-
-  **The change output is recognised, not named.** The app does not build the
-  transaction, so it does not know the change address, and an output the plan does
-  not name is an `UnnamedOutput` refusal. `plan.RecogniseChangeIn` reads the master
-  fingerprints off the transaction's own inputs and accepts an output carrying
-  those on branch 1 — the evidence a hardware signer uses. It is weaker than
-  naming the script and the report says so; `run --change ADDRESS` names it
-  instead, and is the answer for a wallet that writes no key origins.
-- **Item 5** deletes `coldwallet`, `setup` and the `setups` table, `bump`,
-  `rehearsal`, `signers`' multi-device round, `server`, `webrun`, `signet/`,
-  `doctor`'s Core checks, and `internal/bitcoind` from the application.
+  **Done.** `run.SigningWallet` is the seam (`Built` at step 4, `Signed` at step
+  7), with `run.FileWallet` behind `--psbt FILE`. `combine` is *the acceptance
+  check on an inbound PSBT*: `combine.Accept` is the batch's path and takes
+  complete witnesses; `combine.Unsigned` refuses a step-4 packet that carries any
+  signature, which is I-1 at the last place it can be defeated from outside; and
+  the change output is *recognised* rather than named — `plan.RecogniseChangeIn`
+  reads the master fingerprints off the transaction's own inputs and accepts an
+  output carrying those on branch 1, with `run --change ADDRESS` as the stronger
+  override.
+- ~~**Item 5** deletes the cut packages.~~ **Done, 2026-08-26.** `coldwallet`'s
+  setup half, `setup` and the `setups` table, `bump`, `rehearsal`, `signers`,
+  `server`, `webrun`, `signet/` and `signetenv`, `fees`, `doctor`'s Core checks,
+  the coin-lock machinery, and Bitcoin Core from the application entirely.
   `internal/bitcoind` and the simulated multisig cold wallet survive **inside
-  the harness** as the stand-in for Sparrow.
+  `internal/regtestenv`** as the stand-in for Sparrow — the cold wallet is
+  literally there now, at `internal/regtestenv/coldwallet`.
 - **Item 6** demotes the fee and change findings to reports, and removes
-  `Replaceable`.
+  `Replaceable`. **This is the only one left**, and it is small.
 
-**Two publish call sites exist today** and `Method.CallSites` pins the count at
-2. The replan takes it to 1, *after* `internal/bump` is deleted in item 5. Do not
-change the pin before then.
+**Three things item 5 decided, which the code now depends on:**
 
-What survives: `arm` · `plan` · `combine` · `peers` · `reserve` · `settle` ·
-`journal` · `methods` · `lnd` · `prose` · `config`. As of item 4 those are what
-`internal/run` imports, plus `abort`, `fees` and `bitcoind` — the last two only
-for the fee estimate and `testmempoolaccept`, which is item 5's open question —
-and `rehearsal` for the `Signers` type the CPFP child still needs.
+1. **The fee rate is declared, not fetched.** `[fees] target_sat_per_vb`, with
+   `run --fee-rate N` overriding it. `internal/fees` and Core's
+   `estimatesmartfee` are gone, and nothing replaced them, because the
+   no-third-party rule below forbids the obvious substitute. It is not a worse
+   answer: the app does not build the transaction and does not choose the fee, so
+   what the verifier needs is something to hold the built transaction to, and the
+   rate the operator declared is exactly that. **A rate that quietly becomes zero
+   is the default this project must not ship**, and two independent refusals stand
+   against it — `config.Load` on a missing key, `plan.Build` on a non-positive
+   target.
+2. **There is no pre-flight.** `testmempoolaccept` went with Core. What survives
+   is narrower and is not nothing: `combine.Accept` executes every input's witness
+   against its own script. What is lost is node policy — min relay fee,
+   standardness, ancestor limits — and `plan.Verify`'s `Verification.Unchecked`
+   says so, naming `testmempoolaccept` and saying this build does not run it.
+3. **`Method.CallSites` is 1.**
+
+**One `PublishTransaction` call site exists** and `Method.CallSites` pins it at 1.
+
+What survives, and what `internal/run` imports: `arm` · `plan` · `combine` ·
+`peers` · `reserve` · `settle` · `journal` · `methods` · `lnd` · `prose` ·
+`config` · `abort`. Plus `doctor` and `policy` outside the run path, and
+`internal/bitcoind` and `internal/regtestenv/coldwallet` inside the harness only.
 
 **What is still missing is the mainnet cold probe.** The safety model below is
 verified against LND source *and* against a running node — but never against
@@ -260,7 +254,7 @@ can sign our inputs, and there is no code path in this repository that replaces 
 funding transaction.
 
 **The `Replaceable` sequence-number refusal is a lint, and it is slated for
-removal in item 6. It is still there today** (`internal/plan/verify.go:302`), and
+removal in item 6. It is still there today** (`internal/plan/verify.go`), and
 until item 6 it still refuses. Core 29's full-RBF is unconditional — verified
 live: `mempoolfullrbf` does not exist even as a hidden debug option
 (`bitcoind -help-debug` has no such flag), and `getmempoolinfo` reports
@@ -273,12 +267,17 @@ What the invariant covers, and what it does not:
 
 - **The funding transaction: never.** *n* peers hold commitment signatures
   against its outpoints. Replacing it destroys the batch.
-- **The CPFP child: always.** `settle.buildChildAt` sets `plan.MaxBIP125Sequence`
-  and `replaceable: true`, and `internal/bump`'s verifier *requires* it. Nobody
-  has committed to anything about a child, so replacing one moves nothing anyone
-  depends on. **`bump` goes in item 5**, and with it the second verifier; until
-  then both rules are stated at once by having two verifiers rather than one
-  verifier with a flag on it.
+- **The CPFP child: always** — when there is one, and this build does not make
+  one. `settle.buildChildAt` set `plan.MaxBIP125Sequence` and `replaceable: true`,
+  and `internal/bump`'s verifier *required* it: nobody has committed to anything
+  about a child, so replacing one moves nothing anyone depends on, and a batch
+  needing two lifts gets an ordinary RBF of the child rather than a grandchild.
+  Two verifiers enforcing opposite rules was how both rules were expressible at
+  once. **Item 5 deleted the child, the second verifier and
+  `plan.MaxBIP125Sequence`.** One rule, one verifier, and nothing in this
+  repository constructs a replaceable transaction of any kind. An operator who
+  needs a child builds it in their own wallet, and `internal/settle`'s
+  funding-horizon screen says so.
 
 If a change ever makes a *funding* transaction replaceable, that is the invariant
 breaking and the answer is to stop, not to edit this section.
@@ -288,7 +287,7 @@ breaking and the answer is to stop, not to edit this section.
 ## Why the change output is required
 
 The batch verifier refuses a transaction with no change output, or with change
-too small to fund a child that lifts the package to `Fee.cpfpTarget()`.
+too small to fund a child that lifts the package to `Fee.CPFPTarget()`.
 
 **That gate is real today, and item 6 demotes it to a report.** `ChangeMissing`,
 `ChangeTooSmall`, `FeeTooLow` and `FeeTooHigh` move to `Verification.Unchecked`,
@@ -337,10 +336,10 @@ at risk. It does not, and an operator who believes it does will reach, under
 pressure, for the one thing I-4 forbids.
 
 **That copy is still in the code.** Three strings still say it, two of them
-operator-facing: `internal/plan/plan.go:395` ("change is the only way a stuck
-batch can be accelerated", an error message), `internal/plan/report.go:101` (the
-same claim, in a plan-report bullet) and `internal/plan/size.go:246` ("a batch
-with nothing to rescue it", a doc comment). Fixing them is item 6's business,
+operator-facing: `internal/plan/plan.go` ("change is the only way a stuck batch
+can be accelerated", an error message), `internal/plan/report.go` (the same claim,
+in a plan-report bullet) and `internal/plan/size.go` ("a batch with nothing to
+rescue it", a doc comment). Fixing them is item 6's business,
 alongside the demotion. Until then this file and that copy disagree, and this
 file is right.
 
@@ -378,11 +377,13 @@ a relaxation of I-4. No code path here builds one, and none may be added.
   left there is nothing to keep apart, and the number is the whole claim — which
   is a reason to guard `CallSites` harder rather than to relax it.
 
-  `testmempoolaccept` validates without relaying and has been the only pre-flight.
-  **Its only production caller is `internal/rehearsal`, which item 5 deletes, and
-  it needs Core, which item 5 also removes** — so after item 5 there is no
-  pre-flight at all. That is a real consequence to decide on, not a detail to
-  paper over.
+  `testmempoolaccept` validated without relaying and was the only pre-flight.
+  **It is gone with Core, and there is no pre-flight at all.** This file used to
+  say its only production caller was `internal/rehearsal`; that was wrong — the
+  one on the batch's path was in `run.armWindow`, between `combine.Accept` and the
+  publish, and it is the one that mattered. What survives is `combine.Accept`
+  executing every input's witness against its own script; what is lost is node
+  policy, and `plan.Verify`'s `Verification.Unchecked` names it.
 
 - **Bumping the funding transaction, by any route.** I-4. Nothing in this
   repository replaces a parent.
@@ -406,12 +407,15 @@ a relaxation of I-4. No code path here builds one, and none may be added.
   log exactly the amounts, peers and timing we are trying not to leak. The rule
   is "no sockets of our own", not "no network": LND talking to peers is the point.
 
-  **Fee rates came from Core's `estimatesmartfee`, and item 5 removes Core.** The
-  replan does not say what replaces it, and `internal/fees` appears on neither
-  its survive list nor its goes list. Sparrow picks the fee at step 4, but
-  `plan.Fee.TargetSatPerVB` still needs a number to judge against, and this rule
-  forbids the obvious substitute. **Open question — decide it, do not let a
-  third-party call in by default.**
+  **Fee rates came from Core's `estimatesmartfee`, and item 5 removed Core.**
+  Nothing replaced it, because this rule forbids the obvious substitute. The rate
+  is **declared**: `[fees] target_sat_per_vb`, overridable with
+  `run --fee-rate N`. That is not a weaker answer than fetching one — the app does
+  not build the transaction and does not choose the fee, so what the verifier
+  needs is something to hold the built transaction to, and the rate the operator
+  said they were aiming at is exactly that. **Do not reopen this by adding a fee
+  API**, and do not let the number default to zero: `config.Load` and
+  `plan.Build` each refuse that independently, and both refusals are the point.
 
 - **Hardcoding the macaroon permission list in docs.** Generate it from the
   method registry (`winthistle print-macaroon-command`) so it cannot drift. It
@@ -430,8 +434,10 @@ From `docs/replan-2026-08.md`, which is the document that describes the future.
 2. ~~Rewrite the docs to this direction.~~ **Done.**
 3. ~~Change `arm` to the new sequence.~~ **Done, 2026-08-26.**
 4. ~~Add the `--psbt` path to `run`, stop calling `coldwallet`.~~ **Done, 2026-08-26.**
-5. Delete the cut packages.
-6. Demote the fee and change findings, remove `Replaceable`.
+5. ~~Delete the cut packages.~~ **Done, 2026-08-26.** 28,267 lines deleted, 846
+   added, five commits. See `docs/replan-2026-08.md`'s "Item 5, as built".
+6. Demote the fee and change findings, remove `Replaceable`. **The only one
+   left, and it is small.**
 
 Modify in place, on a branch, keeping the tool working at every commit. The
 packages that survive are the ones that were expensive to get right and are
@@ -465,17 +471,30 @@ abort path*.
 - **Simulated multisig cold wallet** — two key-enabled Core wallets, xpubs
   assembled into `wsh(sortedmulti(2,…))`, imported watch-only, signed via
   `walletprocesspsbt` in each and `combinepsbt`. No hardware, fully scriptable.
-  It lives in `regtest/cold-wallet.py` and `internal/regtestenv/cold.go`, and it
-  **survives item 5 as a harness fixture** — the stand-in for Sparrow, since a
-  regtest test still needs something to build and sign a funding transaction.
-  That is the harness playing the operator's part, not a back door for directed
-  mode.
+  It lives in `regtest/cold-wallet.py`, `internal/regtestenv/cold.go` and
+  `internal/regtestenv/coldwallet/`, and it **survived item 5 as a harness
+  fixture** — the stand-in for Sparrow, since a regtest test still needs something
+  to build and sign a funding transaction. That is the harness playing the
+  operator's part, not a back door for a mode where the app builds the batch.
+  `internal/coldwallet` is where the builder used to live; item 5 moved
+  `build.go` and `coins.go` into `internal/regtestenv/coldwallet` and deleted the
+  rest.
+
+  **The harness owns its coin locks now.** `walletcreatefundedpsbt` is called with
+  `lockUnspents`, and until item 5 the *application's* abort path released those
+  locks, so every fixture got its coins back as a side effect of the thing it was
+  testing. The app takes no locks, so `Env.BuildPSBTPaying` registers the release
+  itself. A leaked lock does not announce itself: it starves the next test in the
+  same binary with "Insufficient funds" against a wallet whose balance is fine.
 
   **Since item 4 it plays Sparrow properly, which means it combines outside the
   app.** `Env.SignLikeSparrow` collects both halves and unions and finalizes them
   itself, so what a test hands to `combine.Accept` is one packet with a complete
   witness — the input the production path will actually get.
-  `Env.SignWithColdWallet` still returns *m* partials, for the CPFP child.
+  `Env.SignWithColdWallet` still returns *m* partials and
+  `Env.SignLikeSparrow` still calls `combine.Merge` — which is now the *only*
+  caller of the multi-packet path, and the reason `combine.Merge` and its
+  finalized-input refusal stay.
   `Env.RecipientsIn` reads the recipients off the printed step-4 table the way an
   operator reads them off a terminal, which is also the only test there is that
   the table is legible.
@@ -484,16 +503,15 @@ abort path*.
   used to say "this is what CI uses" and `README.md` said the same. There is no
   `.github/`, no CI configuration of any kind. Run it with `make test`.
 
-- **signet, in `signet/`** — Core only, for the descriptor-import rescan over a
-  chain with real history and the prune-horizon check. **Slated for deletion in
-  item 5**, because both paths belong to `coldwallet` and `setup`, which go.
-  Measured costs are in `signet/README.md`; do not restate them here.
+- **signet, in `signet/`** — **deleted in item 5.** It was Core-only, for the
+  descriptor-import rescan over a chain with real history and for the
+  prune-horizon check, and both paths belonged to `coldwallet` and `setup`. There
+  is one harness now.
 
 - **mainnet cold probe** — commissioning only, per `docs/design.html`. Proves
-  this node, these peers, these devices. **No signet or regtest substitute for
-  it, and the replan does not change it:** `winthistle run` stopped before step
-  8, against real peers, with coins that never move. This is the one thing still
-  missing.
+  this node, these peers, these devices. **No regtest substitute for it, and the
+  replan does not change it:** `winthistle run` stopped before step 8, against
+  real peers, with coins that never move. This is the one thing still missing.
 
 ---
 

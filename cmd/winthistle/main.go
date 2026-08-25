@@ -257,7 +257,7 @@ func recoverCmd(ctx context.Context, args []string) error {
 	// Listing needs nothing but the journal, and that is the point: the screen
 	// that decides what to do next is readable on a node that is down.
 	if fs.NArg() == 0 {
-		j, err := journal.Open(ctx, cfg.Server.Journal)
+		j, err := journal.Open(ctx, cfg.Journal.Path)
 		if err != nil {
 			return err
 		}

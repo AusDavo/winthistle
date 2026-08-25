@@ -25,8 +25,8 @@ address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/winthistle.macaroon"
 
-[server]
-journal = "/state/runs.db"   # trailing comment
+[journal]
+path = "/state/runs.db"   # trailing comment
 
 [limits]
 require_confirmed_inputs = true
@@ -44,8 +44,8 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	if cfg.LND.Address != "127.0.0.1:10009" {
 		t.Errorf("lnd address is %q", cfg.LND.Address)
 	}
-	if cfg.Server.Journal != "/state/runs.db" {
-		t.Errorf("a trailing comment leaked into the journal path: %q", cfg.Server.Journal)
+	if cfg.Journal.Path != "/state/runs.db" {
+		t.Errorf("a trailing comment leaked into the journal path: %q", cfg.Journal.Path)
 	}
 	if cfg.Limits.MinConfirmations() != 1 {
 		t.Error("require_confirmed_inputs did not become a confirmation floor")
@@ -69,8 +69,8 @@ address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/m.macaroon"
 
-[server]
-journal = "/state/runs.db"
+[journal]
+path = "/state/runs.db"
 
 [fees]
 target_sat_per_vb = 12.0
@@ -82,8 +82,8 @@ target_sat_per_vb = 12.0
 		t.Error("require_confirmed_inputs defaulted to false. An unconfirmed " +
 			"parent can be replaced, which moves our input, which moves the txid")
 	}
-	if cfg.Server.Journal != "/state/runs.db" {
-		t.Errorf("the journal path read back as %q", cfg.Server.Journal)
+	if cfg.Journal.Path != "/state/runs.db" {
+		t.Errorf("the journal path read back as %q", cfg.Journal.Path)
 	}
 }
 
@@ -128,8 +128,8 @@ address  = "127.0.0.1:10009"
 tls_cert = "/creds/tls.cert"
 macaroon = "/creds/m.macaroon"
 
-[server]
-journal = "/state/runs.db"
+[journal]
+path = "/state/runs.db"
 
 [limits]
 allow_rbf = `+value+`
@@ -173,10 +173,9 @@ func TestWhatElseIsRefused(t *testing.T) {
 		"an unknown section": {
 			body: good + "\n[wallet]\nname = \"x\"\n", want: "not a section",
 		},
-		"a key that was retired": {
-			body: strings.Replace(good, "[server]",
-				"[server]\nbind = \"127.0.0.1:7420\"", 1),
-			want: "there is no socket left for this to name",
+		"a section that was renamed": {
+			body: good + "\n[server]\njournal = \"/state/runs.db\"\n",
+			want: "is [journal] path now",
 		},
 		"admin.macaroon": {
 			body: strings.Replace(good, "/creds/winthistle.macaroon",
@@ -197,8 +196,8 @@ func TestWhatElseIsRefused(t *testing.T) {
 			want: "nothing estimates now",
 		},
 		"a key set twice": {
-			body: strings.Replace(good, "[server]",
-				"[server]\njournal = \"/a.db\"", 1),
+			body: strings.Replace(good, "[journal]",
+				"[journal]\npath = \"/a.db\"", 1),
 			want: "set twice",
 		},
 		"a section that was retired": {
@@ -230,8 +229,8 @@ address = "127.0.0.1:10009"
 [bitcoind]
 address = "127.0.0.1:8332"
 
-[server]
-journal = "/state/runs.db"
+[journal]
+path = "/state/runs.db"
 `))
 	if err == nil {
 		t.Fatal("a file missing four required keys was accepted")

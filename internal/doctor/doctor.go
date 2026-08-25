@@ -199,14 +199,14 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) *Report {
 // openJournal makes the directory and opens the file, which is the one thing
 // doctor creates: a journal that does not exist yet is not a fault.
 func openJournal(ctx context.Context, cfg *config.Config) (*journal.Journal, error) {
-	if dir := filepath.Dir(cfg.Server.Journal); dir != "" {
+	if dir := filepath.Dir(cfg.Journal.Path); dir != "" {
 		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return nil, fmt.Errorf("making %s: %w", dir, err)
 		}
 	}
-	j, err := journal.Open(ctx, cfg.Server.Journal)
+	j, err := journal.Open(ctx, cfg.Journal.Path)
 	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", cfg.Server.Journal, err)
+		return nil, fmt.Errorf("opening %s: %w", cfg.Journal.Path, err)
 	}
 	return j, nil
 }
@@ -571,7 +571,7 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		c.fail("%v", openErr)
 		return
 	}
-	c.say("    %s", cfg.Server.Journal)
+	c.say("    %s", cfg.Journal.Path)
 
 	unfinished, err := j.Unfinished(ctx)
 	if err != nil {

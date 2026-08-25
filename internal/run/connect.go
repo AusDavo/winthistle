@@ -36,11 +36,11 @@ func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 	}
 	d.LND = cli
 
-	j, err := journal.Open(ctx, cfg.Server.Journal)
+	j, err := journal.Open(ctx, cfg.Journal.Path)
 	if err != nil {
 		cli.Close()
 		return d, nil, fmt.Errorf("opening the run journal at %s: %w",
-			cfg.Server.Journal, err)
+			cfg.Journal.Path, err)
 	}
 	d.Journal = j
 

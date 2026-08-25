@@ -262,6 +262,9 @@ func (d *document) unknown(known map[string]bool) []string {
 // enough that anybody with a configuration from before the change gets the
 // sentence rather than the shrug. Nothing reads these but the refusal.
 var retiredSections = map[string]string{
+	"server": "is gone, and its one surviving key moved: the run journal's path " +
+		"is [journal] path now. A section named for a component that no longer " +
+		"exists is the same defect as a key that changes nothing.",
 	"bitcoind": "is gone: this tool dials no Bitcoin node. It built the batch " +
 		"with Core once — coin selection, change derivation, the fee estimate and " +
 		"testmempoolaccept — and it does none of those now. Your wallet builds the " +
@@ -287,9 +290,6 @@ var retiredKeys = map[string]string{
 		"the window it bounded no longer contains a signing round. The batch is " +
 		"signed at step 7, after every channel has reached chan_pending, so a slow " +
 		"round costs time and cannot cost the batch. Delete the line.",
-	"server.bind": "is gone: the local web UI went with it, and there is no " +
-		"socket left for this to name. `winthistle run` is the front door. Delete " +
-		"the line; [server] journal stays.",
 }
 
 // The accessors below all mark the key used, so unknown can tell the difference
