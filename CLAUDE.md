@@ -364,27 +364,19 @@ a relaxation of I-4. No code path here builds one, and none may be added.
   missing or duplicated one. Chaining defeats the check that the app exists for.
 
 - **Any broadcast path that could carry a funding transaction outside the gate.**
-  There are **exactly two** calls to `WalletKit.PublishTransaction`, and the count
-  is enforced: `Method.CallSites` pins it at 2 and
-  `TestEveryLNDCallSiteIsRegistered` fails on a third.
+  There is **exactly one** call to `WalletKit.PublishTransaction` — `arm.Publish`,
+  the funding transaction, behind the I-1 gate — and the count is enforced:
+  `Method.CallSites` pins it at 1 and `TestEveryLNDCallSiteIsRegistered` fails on
+  a second.
 
-  1. `arm.Publish` — the funding transaction, behind the I-1 gate.
-  2. `bump.Publish` — the CPFP child of a batch that is already public. It has no
-     gate to sit behind and needs none: by the time a child can be built the
-     parent is in a mempool and every channel reached `chan_pending` before that.
-
-  What keeps them apart is the type system. `arm.Publish` takes an `*arm.Armed`
-  and `bump.Publish` takes a `*bump.Signed`, and each is filled by exactly one
-  constructor. `bump.Signed` carries its raw transaction in an unexported field.
-  `arm.Armed` no longer can — after the inversion the signed bytes arrive at the
-  publish call from outside, because this program never held them — so what it
-  carries unexported is the *n* `chan_pending` receipts, one per channel, that
-  only `arm.Receipts` fills, and `arm.Publish` re-derives the txid from the bytes
-  it is handed and refuses any that do not hash to the pinned one. Neither line
-  can be handed the other's transaction.
-
-  **Item 5 takes this to one.** Change `CallSites`, this bullet and
-  `docs/design.html` in the same commit as the deletion, or do not change it.
+  It was two until item 5. The second was `bump.Publish`, the CPFP child of a
+  batch that was already public, and what kept the two apart was the type system:
+  each call took a type that exactly one constructor fills. `arm.Armed` still
+  carries the *n* `chan_pending` receipts in an unexported map that only
+  `arm.Receipts` fills, and `arm.Publish` still re-derives the txid from the bytes
+  it is handed and refuses any that do not hash to the pinned one. With one line
+  left there is nothing to keep apart, and the number is the whole claim — which
+  is a reason to guard `CallSites` harder rather than to relax it.
 
   `testmempoolaccept` validates without relaying and has been the only pre-flight.
   **Its only production caller is `internal/rehearsal`, which item 5 deletes, and

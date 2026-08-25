@@ -261,7 +261,12 @@ func (d *document) unknown(known map[string]bool) []string {
 // A key belongs here for one release cycle of this file's own making — long
 // enough that anybody with a configuration from before the change gets the
 // sentence rather than the shrug. Nothing reads these but the refusal.
-var retiredSections = map[string]string{}
+var retiredSections = map[string]string{
+	"signer": "is gone: it named the m cold-storage devices a signing round " +
+		"went out to, and there is no such round left. The batch is signed once, " +
+		"in your own wallet, and reaches this tool through the file --psbt names. " +
+		"Delete the block.",
+}
 
 var retiredKeys = map[string]string{
 	"server.bind": "is gone: the local web UI went with it, and there is no " +

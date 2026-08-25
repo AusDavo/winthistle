@@ -5,8 +5,10 @@
 // applies the policy and knows what LND does with it; internal/plan renders
 // the batch plan and has to show the policy beside the amount, because the two
 // are one decision — where the money goes, and what it will charge to route.
-// internal/settle already imports internal/plan for the CPFP arithmetic, so the
-// type cannot live in either of them without a cycle.
+// internal/settle imported internal/plan for the CPFP arithmetic when it built
+// the child, so the type could not live in either of them without a cycle. That
+// import is gone with the child; a shared type between two packages that both
+// render it is still the right shape, and moving it now would be churn.
 //
 // # Why the plan document is the right place to review it
 //

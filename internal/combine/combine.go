@@ -44,13 +44,16 @@
 // a complete set of partials — the whole of Complete bar the merge.
 //
 // Merge and Complete are the multi-packet path. btcd's psbt package has no
-// Combine, so unioning n partially-signed packets into one is ours. The CPFP
-// child still goes out to m devices and comes back in m pieces (internal/bump),
-// and the harness plays the operator with two Core wallets, so this path is not
-// vestigial. A packet that arrives *finalized* is still refused there, and the
-// reason is now mechanical rather than custodial: finalization discards the
-// partial signatures, so there is nothing left to union with anybody else's, and
-// a device that finalized on its own has ended a round the other devices were
+// Combine, so unioning n partially-signed packets into one is ours. Nothing in
+// the application takes this path any more — the CPFP child was its last caller
+// and it is deleted — but the harness does: regtestenv.SignWithColdWallet plays
+// the operator with two Core wallets and comes back in two pieces. That is the
+// only thing keeping it, and it is enough: it is how the merge rules are
+// exercised at all, and Accept is a call into merge with one part in it. A
+// packet that arrives *finalized* is still refused there, and the reason is
+// mechanical rather than custodial: finalization discards the partial
+// signatures, so there is nothing left to union with anybody else's, and a
+// device that finalized on its own has ended a round the other devices were
 // still in. Accept is where a complete witness is the expected input.
 //
 // # This answers docs/design.html's finalizepsbt question by not asking it
@@ -115,16 +118,18 @@ var (
 	// about a witness script, a redeem script, a derivation or a UTXO.
 	ErrConflictingField = errors.New("this device disagrees with an earlier packet")
 
-	// ErrAlreadyFinalized means a device in a multi-device round returned a
-	// finalized input.
+	// ErrAlreadyFinalized means one packet of a multi-packet merge arrived with
+	// a finalized input.
 	//
-	// This used to be I-2 — a finalized input is a complete witness, so that
-	// device held a broadcastable transaction, and the app had to be the only
+	// This used to be I-2 — a finalized input is a complete witness, so whoever
+	// sent it held a broadcastable transaction, and the app had to be the only
 	// party ever in that position. I-2 is dissolved and the refusal is not: a
 	// merge unions partial signatures, finalization discards them, so a finalized
-	// packet has nothing left to union with the other devices' and the round it
-	// was part of is over. Accept is the entry point where a complete witness is
-	// the expected input; Merge is not.
+	// packet has nothing left to union with the rest and the round it was part of
+	// is over. Accept is the entry point where a complete witness is the expected
+	// input; Merge is not. No production caller reaches this today — the harness
+	// is what still merges — and it is a rule about merging rather than a rule
+	// about a caller, so it holds for whatever merges next.
 	ErrAlreadyFinalized = errors.New("this device returned a finalized input, " +
 		"and a finalized input has no partial signatures left to combine with the " +
 		"other devices'")
@@ -434,10 +439,10 @@ func mergeInput(dst *psbt.PInput, src psbt.PInput, label, where string,
 	if isFinal(src) {
 		if final == refuseFinalized {
 			return 0, deviceErr(label, where, fmt.Errorf("%w. This round collects a "+
-				"partial signature from each device and unions them here, so a device "+
-				"that finalizes on its own leaves the others nothing to add to. Nothing "+
-				"is lost: no transaction has been published, so this is one more "+
-				"signing round with that device told not to finalize",
+				"partial signature from each source and unions them here, so one that "+
+				"finalizes on its own leaves the rest nothing to add to. Nothing is "+
+				"lost: no transaction has been published, so this is one more signing "+
+				"round with that device told not to finalize",
 				ErrAlreadyFinalized))
 		}
 		// The finished witness, carried as it arrived. mergeScript rather than

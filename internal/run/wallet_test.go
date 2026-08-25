@@ -184,8 +184,7 @@ func TestTheFileTransportReadsBothEncodings(t *testing.T) {
 //
 // A signed file left by an earlier attempt must not be read as this one's. The
 // unsigned path is guaranteed fresh by NewFileWallet; this one the app names
-// itself, so clearing it is the app's to do — the same rule internal/signers'
-// file handshake has always followed.
+// itself, so clearing it is the app's to do.
 func TestStepSevenClearsTheAnswerBeforeAskingTheQuestion(t *testing.T) {
 	dir := t.TempDir()
 	out := new(bytes.Buffer)

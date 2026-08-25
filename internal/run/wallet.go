@@ -28,16 +28,16 @@ import (
 // program does neither: it does not build the transaction and it does not hold a
 // key. What it does is refuse the ones that are wrong.
 //
-// # Why this is not the Signers seam
+// # Why this replaced the m-device seam
 //
-// Signers hands out m devices, each returning a partial signature, and the
-// rehearsal measures the round they make. That shape had a reason and the reason
-// is gone: I-2 is dissolved, so the packet no longer has to come back in pieces,
-// and the round is no longer inside the window a rehearsal could predict. It also
-// never had a step 4 — there is no call on it that means "give me a transaction
-// you funded yourself" — so half of this seam could not have been built out of it
-// however the other half went. Signers survives for the CPFP child, which still
-// is a multi-device round.
+// The seam before this one handed out m devices, each returning a partial
+// signature, and a dress rehearsal measured the round they made. That shape had
+// a reason and the reason is gone: I-2 is dissolved, so the packet no longer has
+// to come back in pieces, and the round is no longer inside a window anything
+// could usefully predict. It also never had a step 4 — there was no call on it
+// meaning "give me a transaction you funded yourself" — so half of this seam
+// could not have been built out of it however the other half went. It is
+// deleted, along with the CPFP child that was its last caller.
 type SigningWallet interface {
 	// Built is step 4: the funded, unsigned PSBT paying every recipient in pay.
 	// It must be unsigned — see FileWallet.Built for why that is I-1 rather than

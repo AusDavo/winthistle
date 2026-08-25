@@ -198,11 +198,4 @@ func TestSetupsAreNotRuns(t *testing.T) {
 	if len(runs) != 0 {
 		t.Errorf("a setup answer showed up as %d unfinished run(s)", len(runs))
 	}
-	bumps, err := j.UnfinishedBumps(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(bumps) != 0 {
-		t.Errorf("a setup answer showed up as %d unfinished bump(s)", len(bumps))
-	}
 }

@@ -125,9 +125,12 @@ const (
 //     return a complete transaction would be a signer that could publish. I-2 is
 //     dissolved: the gate closed at step 6, before anything was signed, so a
 //     wallet holding a signed batch front-runs nothing.
-//   - SignerPartial is the CPFP child, which still goes out to m devices and
-//     comes back in m pieces. It also appears in journals earlier builds wrote,
-//     where it meant one device of m in a batch round.
+//   - SignerPartial has no writer in this build. It was the CPFP child, which
+//     went out to m devices and came back in m pieces, and that round is deleted.
+//     The constant stays because journals earlier builds wrote carry the value,
+//     both from a child and from a batch round of before the inversion, and a
+//     recovery screen that could not name it would render somebody's real run as
+//     a state this build does not recognise.
 //
 // Anything reading these back must handle both, and prose.signerNote is the only
 // thing that does. There is no CHECK constraint and no migration table, so an
@@ -140,54 +143,6 @@ const (
 	SignerSigned   SignerState = "signed"
 	SignerPartial  SignerState = "partial"
 	SignerDeclined SignerState = "declined"
-)
-
-// BumpState is how far one CPFP child has got.
-//
-// Shorter than State, because a child has less to go wrong. There is no gate to
-// count to: I-1 is about the funding transaction, and by the time a child exists
-// its parent is already public and every channel in the batch is already
-// recoverable. What the states carry instead is the same write-before-the-RPC
-// discipline, for the one reason that still applies — a child found in
-// BumpPublishing may be in a mempool, and an operator has to be able to tell
-// that from one that never went out.
-type BumpState string
-
-const (
-	// BumpBuilding: the row exists and the change outpoint is claimed. Written
-	// before walletcreatefundedpsbt, so a crash inside that call leaves a lock
-	// this journal admits to rather than an orphan only Core knows about.
-	BumpBuilding BumpState = "building"
-
-	// BumpSigning: the child is built and its PSBT is out with the signers.
-	BumpSigning BumpState = "signing"
-
-	// BumpSigned: the partials are merged, finalized in-app and verified, and
-	// the raw transaction is on disk.
-	BumpSigned BumpState = "signed"
-
-	// BumpPublishing is written before PublishTransaction is called. A child in
-	// this state may be public.
-	BumpPublishing BumpState = "publishing"
-
-	// BumpPublished: the publish call returned without error.
-	BumpPublished BumpState = "published"
-
-	// BumpAbandoned: given up on, and its coin lock released. Nothing was
-	// broadcast — or if it was, the state would be one of the two above.
-	BumpAbandoned BumpState = "abandoned"
-
-	// BumpSuperseded: this child was published and a later child of the same
-	// change outpoint replaced it. The CPFP child is built BIP-125 replaceable,
-	// so a second lift is an ordinary replacement rather than a grandchild, and
-	// this is what the replaced one becomes once the replacement is out.
-	//
-	// It is a state rather than a deletion because the row is a record: those
-	// bytes really were broadcast, and a journal that removed them would be
-	// claiming they never existed. Adding it needed no schema change — the column
-	// is TEXT and the value is new — which is the only kind of growth this
-	// journal supports.
-	BumpSuperseded BumpState = "superseded"
 )
 
 // Journal is an open run journal.
@@ -249,29 +204,22 @@ func (j *Journal) Close() error { return j.db.Close() }
 // journal is read by humans during a recovery and a reversed txid there is the
 // worst place to discover the convention.
 //
-// # Why a bump gets its own tables
+// # Three tables this build no longer writes
 //
-// A CPFP child is a second transaction against the same run, with its own
-// signing round and its own coin lock, and there were two other places to put
-// it. Neither works.
+// `bumps`, `bump_signers` and `bump_locks` went with `winthistle bump`, and the
+// reasoning that put them there is worth keeping because it is the rule for the
+// next table: Open runs a single CREATE TABLE IF NOT EXISTS block and there is
+// no version table and no migration machinery, so an ALTER would silently not
+// reach a journal written by an earlier build. Grow this schema with new
+// tables, never with new columns.
 //
-// A second row in `runs` does not, because `runs` is the I-1 gate's state
-// machine and a bump is not on it. Begin refuses a run with no channels — "a
-// batch with no channels in it is not a batch" — so a bump row would need
-// fictional ones; Unfinished would list it; Run.AbortTarget would build a batch
-// abort for it; and Recover would run abort.Run over it. That is three special
-// cases in the recovery path, which is the one path whose value comes from being
-// uniform.
-//
-// Extra columns on `signers` and `locks` do not either, and that one is a fact
-// rather than a preference: Open runs a single CREATE TABLE IF NOT EXISTS block
-// and there is no version table and no migration machinery, so an ALTER would
-// silently not reach a journal written by an earlier build. New tables are the
-// only shape that works on an operator's existing file.
-//
-// So each of the three mirrors the shape of its batch counterpart, and Bump
-// carries its own small state machine: no shims, no channels, no peers, and an
-// abort that is one action rather than three.
+// That same absence is why deleting the three from this block does not drop
+// them from a journal already on disk. They stay there, unread, and that is the
+// intended outcome: nothing in this build can be confused by them, and an
+// operator's record of a child they really did broadcast is not something to
+// destroy on their behalf. `locks` is in the same position — nothing writes it
+// since the app stopped selecting coins — but it is still read, so it stays
+// here.
 //
 // # And why the setup answer is in here at all
 //
@@ -285,7 +233,7 @@ func (j *Journal) Close() error { return j.db.Close() }
 // tool's whole durable state: it is opened by every command, it is the one thing
 // the design tells an operator to back up, its columns are STRICT so a typo
 // cannot land as an integer, and it already holds the other record that must
-// never be rewritten (see BumpSuperseded). A second store would be a second
+// never be rewritten. A second store would be a second
 // format, a second set of permissions and a second way to be half-written, in
 // exchange for nothing.
 //
@@ -328,45 +276,6 @@ CREATE TABLE IF NOT EXISTS locks (
     vout     INTEGER NOT NULL,
     released INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (run_id, txid, vout)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS bumps (
-    run_id            TEXT    NOT NULL REFERENCES runs(id),
-    seq               INTEGER NOT NULL,
-    state             TEXT    NOT NULL,
-    parent_txid       TEXT    NOT NULL,
-    parent_vsize_vb   INTEGER NOT NULL,
-    parent_fee_sat    INTEGER NOT NULL,
-    change_txid       TEXT    NOT NULL,
-    change_vout       INTEGER NOT NULL,
-    change_sat        INTEGER NOT NULL,
-    target_sat_per_vb REAL    NOT NULL,
-    child_txid        TEXT,
-    child_fee_sat     INTEGER,
-    raw_tx            TEXT,
-    created_at        TEXT    NOT NULL,
-    updated_at        TEXT    NOT NULL,
-    PRIMARY KEY (run_id, seq)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS bump_signers (
-    run_id     TEXT    NOT NULL,
-    seq        INTEGER NOT NULL,
-    label      TEXT    NOT NULL,
-    state      TEXT    NOT NULL,
-    updated_at TEXT    NOT NULL,
-    PRIMARY KEY (run_id, seq, label),
-    FOREIGN KEY (run_id, seq) REFERENCES bumps(run_id, seq)
-) STRICT;
-
-CREATE TABLE IF NOT EXISTS bump_locks (
-    run_id   TEXT    NOT NULL,
-    seq      INTEGER NOT NULL,
-    txid     TEXT    NOT NULL,
-    vout     INTEGER NOT NULL,
-    released INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (run_id, seq, txid, vout),
-    FOREIGN KEY (run_id, seq) REFERENCES bumps(run_id, seq)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS setups (
@@ -418,21 +327,6 @@ var (
 	// this run's channels. Recording it would give the run a rebroadcast duty for
 	// bytes nothing depends on and would leave the real commitment unnamed.
 	ErrTxIDMoved = errors.New("the run's pinned txid does not match")
-
-	// ErrNoBump means the journal has no such CPFP child.
-	ErrNoBump = errors.New("no such bump in the journal")
-
-	// ErrNotPublic means a bump was asked for against a run whose funding
-	// transaction never reached the publish call. There is nothing in any
-	// mempool to accelerate, and a child of a transaction nobody has is a
-	// transaction that can never confirm.
-	ErrNotPublic = errors.New("the run's funding transaction was never published")
-
-	// ErrBumpNotSigned means a child was about to be broadcast before it was
-	// combined, finalized and verified in-app. The same shape as ErrNotArmed and
-	// for the same reason: the write that says a transaction is ready to go out
-	// is the one that has to have landed before it does.
-	ErrBumpNotSigned = errors.New("the CPFP child is not signed and verified")
 )
 
 func now() string { return time.Now().UTC().Format(time.RFC3339Nano) }

@@ -96,7 +96,6 @@ import (
 	"github.com/AusDavo/winthistle/internal/peers"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
-	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/AusDavo/winthistle/internal/settle"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -111,16 +110,14 @@ import (
 type Deps struct {
 	LND *lnd.Client
 
-	// Node is Core with no wallet scope, for the fee estimate and
-	// testmempoolaccept. Wallet is the watch-only cold wallet.
+	// Node is Core with no wallet scope; Wallet is the watch-only cold wallet.
 	//
-	// Neither is on the batch's path any more. Node still answers the fee estimate
-	// the verifier judges against and the one pre-flight there is, and Wallet is
-	// only reached by journal.Recover, which releases coin locks a run of an
-	// earlier build may have taken. Both are here because Connect fills them and
-	// `winthistle bump` is built out of the same struct; item 5 of
-	// docs/replan-2026-08.md is what removes Core, and it has to decide what
-	// replaces those two things rather than dropping them quietly.
+	// Node is still on the batch's path in two places — the fee estimate the
+	// verifier judges against, and testmempoolaccept, which is the one pre-flight
+	// there is. Wallet is not: the only thing that reaches it is journal.Recover,
+	// releasing coin locks a run of an earlier build may have taken. Item 5 of
+	// docs/replan-2026-08.md removes Core, and it has to decide what replaces
+	// those rather than dropping them quietly.
 	Node   *bitcoind.Client
 	Wallet *bitcoind.Client
 
@@ -129,12 +126,6 @@ type Deps struct {
 	// Signing is the wallet at steps 4 and 7: the thing that builds the
 	// transaction and then signs it. Required.
 	Signing SigningWallet
-
-	// Signers hands out the devices for one round, and the batch no longer has
-	// one. It is kept because `winthistle bump` is composed out of this struct and
-	// the CPFP child *is* still a multi-device round — see SigningWallet for why
-	// the batch could not have been built on this seam. Nil is fine for a run.
-	Signers Signers
 
 	// Out is where the operator-facing reports go.
 	Out io.Writer
@@ -146,23 +137,6 @@ type Deps struct {
 	// costs an abort that has to be finished by hand rather than one that
 	// removes something it should not have.
 	Confirm abort.Confirmation
-}
-
-// Signers is where a multi-device round's partial signatures come from.
-//
-// The batch does not have one any more — see SigningWallet — and this survives
-// for the CPFP child, which does. It stays in this package rather than moving to
-// internal/bump because `winthistle bump` is composed out of the same Deps the
-// run is, so the two front doors keep dialling one set of connections rather than
-// two. Item 5 is what removes it.
-//
-// Round takes a name because a device's transport must not be recomputed between
-// rounds, and because a transport that writes files has to keep two rounds apart:
-// a signature over one round's packet, picked up as the other's, is refused by
-// internal/combine as a moved txid — at the worst moment, blaming the device.
-type Signers interface {
-	Round(name string) []rehearsal.Device
-	Labels() []string
 }
 
 // Options are the run.

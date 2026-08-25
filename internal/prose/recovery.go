@@ -598,9 +598,10 @@ func signerNote(r *journal.Run) string {
 		counts = append(counts, fmt.Sprintf("%d signed", signed))
 	}
 	if partial > 0 {
-		// Only a journal an earlier build wrote, or a CPFP child's round, puts a
-		// batch signer here. Said in its own words rather than folded into "signed",
-		// because a partial signature is not a transaction.
+		// Nothing in this build writes this state: it is a journal an earlier build
+		// wrote, from a CPFP child's round or from a batch round of before the
+		// inversion. Said in its own words rather than folded into "signed", because
+		// a partial signature is not a transaction.
 		counts = append(counts, fmt.Sprintf("%d returned a partial signature", partial))
 	}
 	if awaiting > 0 {

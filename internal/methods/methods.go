@@ -102,7 +102,9 @@ type Method struct {
 	// are, and until this field existed it was made in five prose comments and
 	// checked nowhere — a second caller passed TestEveryLNDCallSiteIsRegistered
 	// silently, because that test groups by method and asserts non-empty in both
-	// directions without ever counting.
+	// directions without ever counting. The count is 1 now, and the field matters
+	// more rather than less for that: with two lines there was a type system
+	// keeping them apart as well, and with one there is only the number.
 	CallSites int
 }
 
@@ -361,18 +363,17 @@ var registry = []Method{
 		Name:      "/walletrpc.WalletKit/PublishTransaction",
 		Use:       InApp,
 		Ops:       []Op{{"onchain", "write"}},
-		CallSites: 2,
+		CallSites: 1,
 		Why: "arm.Publish: step 8, the funding transaction's single publish, gated " +
-			"on n of n chan_pending. And bump.Publish: the CPFP child of a batch " +
-			"that is already public, which has no I-1 gate to sit behind because " +
-			"the parent is already in a mempool and the child cannot strand " +
-			"anybody. Two call sites and no more — CallSites is what enforces that. " +
-			"Each takes a distinct type that only one constructor fills: " +
-			"bump.Signed carries its raw transaction unexported, and arm.Armed " +
-			"carries the chan_pending receipts unexported and will not publish " +
-			"bytes that do not hash to the txid LND pinned. So neither line can be " +
-			"handed the other's transaction. Deliberately not on the never-list — " +
-			"see forbidden.",
+			"on n of n chan_pending. One call site and no more — CallSites is what " +
+			"enforces that. It was two until the CPFP child went, and the child was " +
+			"kept apart from this one by the type system rather than by care: " +
+			"arm.Publish takes an *arm.Armed, which carries the chan_pending " +
+			"receipts in an unexported map only arm.Receipts fills, and it " +
+			"re-derives the txid from the bytes it is handed and refuses any that " +
+			"do not hash to the one LND pinned. With one line left there is nothing " +
+			"to keep apart, and the count is now the whole claim. Deliberately not " +
+			"on the never-list — see forbidden.",
 	},
 	{
 		Name: "/walletrpc.WalletKit/ReleaseOutput",

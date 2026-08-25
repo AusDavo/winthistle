@@ -19,9 +19,9 @@
 // in docs/design.html's example block, and it is not a setting. I-4 is that
 // replacing the funding transaction moves every outpoint and destroys every
 // channel in the batch, so the funding transaction's replaceability is off at
-// construction and there is no code path that reads a preference about it. (The
-// CPFP child is replaceable, deliberately and unconditionally — see
-// plan.MaxBIP125Sequence — which is also not a preference.) Honouring the key would be
+// construction and there is no code path that reads a preference about it — nor
+// any code path that builds a replaceable transaction of any kind, now the CPFP
+// child is gone. Honouring the key would be
 // a lie and ignoring it silently would be worse, because an operator who wrote
 // allow_rbf = true and saw the run proceed would reasonably conclude it had
 // been honoured.
@@ -72,7 +72,6 @@ type Config struct {
 	Server   Server
 	Limits   Limits
 	Fees     Fees
-	Signers  []Signer
 }
 
 // Server is the [server] block.
@@ -119,22 +118,9 @@ type Fees struct {
 	Mode         string
 }
 
-// Signer is one cold-storage device and how to reach it.
-type Signer struct {
-	// Label is what the operator calls it. It is what the journal records, what
-	// a refusal names, and it never has to be unique to a key.
-	Label string
-
-	// Command is a shell command that reads a base64 PSBT on stdin and writes
-	// the signed one on stdout. Empty means the file handshake instead — see
-	// internal/signers, which is also where the reason this is not a "sign for
-	// me" API is written down.
-	Command string
-}
-
 var knownSections = map[string]bool{
 	"lnd": true, "bitcoind": true, "server": true,
-	"limits": true, "fees": true, "signer": true,
+	"limits": true, "fees": true,
 }
 
 // Load reads winthistle.toml.
@@ -224,14 +210,6 @@ func Load(path string) (*Config, error) {
 	fail(err)
 	c.Fees = Fees{FloorSatPerVB: floor, TargetBlocks: int(target), Mode: mode}
 
-	for _, t := range doc.array("signer") {
-		label, err := t.str(path, "label", "")
-		fail(err)
-		command, err := t.str(path, "command", "")
-		fail(err)
-		c.Signers = append(c.Signers, Signer{Label: label, Command: command})
-	}
-
 	errs = append(errs, doc.unknown(knownSections)...)
 	errs = append(errs, c.validate(path, doc)...)
 	if len(errs) > 0 {
@@ -299,22 +277,6 @@ func (c *Config) validate(path string, doc *document) []string {
 			"CONSERVATIVE and ECONOMICAL", c.Fees.Mode))
 	}
 
-	labels := map[string]bool{}
-	for i, s := range c.Signers {
-		line := doc.array("signer")[i].line
-		if s.Label == "" {
-			out = append(out, fmt.Sprintf("%s: this [[signer]] has no label. The "+
-				"label is what a refusal names, and with m devices in a room \"a "+
-				"device returned a different transaction\" is a hunt",
-				where(path, line)))
-			continue
-		}
-		if labels[s.Label] {
-			out = append(out, fmt.Sprintf("%s: two signers are called %q",
-				where(path, line), s.Label))
-		}
-		labels[s.Label] = true
-	}
 	return out
 }
 
@@ -352,9 +314,9 @@ func resolve(base, path string) string {
 // Example is the file `winthistle doctor` prints when there is none.
 //
 // It is the same block as docs/design.html's, minus allow_rbf, which this tool
-// refuses — see the package comment — and plus the two keys the design's block
-// did not have: the fee floor, which has no default and is what stands in when
-// Core cannot estimate, and the signers.
+// refuses — see the package comment — and plus the one key the design's block did
+// not have: the fee floor, which has no default and is what stands in when Core
+// cannot estimate.
 const Example = `[lnd]
 address  = "127.0.0.1:10009"
 tls_cert = "~/.lnd/tls.cert"
@@ -377,12 +339,6 @@ floor_sat_per_vb = 2.0                # no default: see winthistle doctor
 target_blocks    = 6
 mode             = "CONSERVATIVE"
 
-[[signer]]
-label   = "cold1"
-command = "my-signer cold1"           # reads a base64 PSBT, writes one back
-
-[[signer]]
-label   = "cold2"
 `
 
 // PolicyDefaults is what a batch file's [policy] block starts from when it says

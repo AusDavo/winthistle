@@ -1,11 +1,11 @@
 // Command winthistle is the local, guided tool for batch-opening Lightning
 // channels from cold storage.
 //
-// Six commands, and the order they are in is the order they are used: setup
+// Five commands, and the order they are in is the order they are used: setup
 // builds the watch-only wallet from the cold wallet's descriptors,
 // print-macaroon-command bakes the credential, doctor checks both, run opens the
-// batch, bump accelerates one that went out too cheap, and recover takes apart a
-// run that stopped somewhere it should not have.
+// batch, and recover takes apart a run that stopped somewhere it should not
+// have.
 //
 // There is one front door now. The local web UI is gone: it was a second
 // renderer of the same reports and a second place for the copy to be wrong, and
@@ -29,11 +29,9 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/bitcoind"
-	"github.com/AusDavo/winthistle/internal/bump"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/doctor"
-	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/prose"
@@ -51,8 +49,6 @@ Commands:
                            open the batch: Phase 0, the armed window, Phase 2.
                            --psbt is where you save the transaction you build
                            in Sparrow, and where the signed one is read back
-  bump RUN-ID              build, sign and broadcast a CPFP child of a stalled
-                           batch. Never a replacement — see I-4
   recover [RUN-ID]         list runs that stopped, or take one apart
   print-macaroon-command   print the lncli bakemacaroon line for this build
   example-config           print a winthistle.toml to start from
@@ -70,8 +66,8 @@ chan_pending before the transaction is allowed to reach the network.
 
 The sequence is the peer pre-flight, the fee source and the reserve check for
 Phase 0; the armed window, the wallet's two visits and the single publish for
-Phase 1; the confirmation watch, the policy pass and the CPFP child for Phase 2;
-and the abort and recovery paths under all of it. See HANDOFF.md.
+Phase 1; and the confirmation watch and the policy pass for Phase 2, with the
+abort and recovery paths under all of it. See HANDOFF.md.
 `
 
 func main() {
@@ -97,8 +93,6 @@ func main() {
 		err = doctorCmd(ctx, os.Args[2:])
 	case "run":
 		err = runCmd(ctx, os.Args[2:])
-	case "bump":
-		err = bumpCmd(ctx, os.Args[2:])
 	case "recover":
 		err = recoverCmd(ctx, os.Args[2:])
 	case "example-config":
@@ -329,10 +323,7 @@ func runCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	// The signers still come from the configuration, and the batch no longer uses
-	// them: `winthistle bump` is built out of the same Deps and the CPFP child is
-	// still a multi-device round. An empty [[signer]] list is fine for a run now.
-	d, closeAll, err := connect(ctx, cfg, "")
+	d, closeAll, err := connect(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -365,79 +356,6 @@ func runCmd(ctx context.Context, args []string) error {
 	})
 	if res != nil {
 		fmt.Printf("\nrun %s\n", res.RunID)
-	}
-	return err
-}
-
-// bumpCmd is `winthistle bump`: the CPFP child of a batch that went out too
-// cheap.
-//
-// It takes a run id rather than a txid, and that is the interface rather than a
-// convenience. The journal is what says a transaction was actually published,
-// what its change output was, and whether an earlier child of it is already
-// holding a coin lock — and a bump built without any of that would be a
-// transaction with no record of why it exists.
-func bumpCmd(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("bump", flag.ContinueOnError)
-	cfgPath := fs.String("config", config.DefaultPath, "winthistle.toml")
-	target := fs.Float64("target", 0, "the sat/vB to lift the batch and its child "+
-		"to together — not the child's own rate. Zero asks Core, through the same "+
-		"estimator the batch used")
-	buildOnly := fs.Bool("build-only", false, "build and verify the child, and ask "+
-		"no device for anything. The arithmetic is the part that can be wrong")
-	abandon := fs.Bool("abandon", false, "give up on this run's unfinished child "+
-		"and release the coin lock it is holding on the batch's change output")
-	psbtDir := fs.String("psbt-dir", "", "where to write PSBTs for signers that "+
-		"have no command (default: alongside the journal)")
-	yes := fs.Bool("yes", false, "do not ask before the signing round")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	if fs.NArg() != 1 {
-		return errors.New("bump needs the id of the run whose batch it is " +
-			"accelerating: `winthistle recover` lists them")
-	}
-	runID := fs.Arg(0)
-
-	cfg, err := loadConfig(*cfgPath)
-	if err != nil {
-		return err
-	}
-	d, closeAll, err := connect(ctx, cfg, *psbtDir)
-	if err != nil {
-		return err
-	}
-	defer closeAll()
-
-	deps := bump.Deps{
-		LND:       d.LND.Lightning,
-		Publisher: d.LND.WalletKit,
-		Node:      d.Node,
-		Wallet:    d.Wallet,
-		Journal:   d.Journal,
-		Signers:   d.Signers,
-		Out:       os.Stdout,
-	}
-	if !*yes {
-		deps.Approve = approve
-	}
-
-	if *abandon {
-		return bump.Give(ctx, deps, runID)
-	}
-
-	res, err := bump.Do(ctx, deps, bump.Options{
-		RunID:          runID,
-		TargetSatPerVB: *target,
-		BuildOnly:      *buildOnly,
-		Fees: fees.Request{
-			TargetBlocks:  cfg.Fees.TargetBlocks,
-			Mode:          cfg.Fees.Mode,
-			FloorSatPerVB: cfg.Fees.FloorSatPerVB,
-		},
-	})
-	if res != nil && res.Seq > 0 {
-		fmt.Printf("\nrun %s, bump %d\n", res.RunID, res.Seq)
 	}
 	return err
 }
@@ -477,7 +395,7 @@ func recoverCmd(ctx context.Context, args []string) error {
 		return nil
 	}
 
-	d, closeAll, err := connect(ctx, cfg, "")
+	d, closeAll, err := connect(ctx, cfg)
 	if err != nil {
 		return err
 	}
@@ -492,8 +410,7 @@ func recoverCmd(ctx context.Context, args []string) error {
 // The dialling itself lives in internal/run so that every command that touches a
 // batch opens the same connections the same way. What stays here is the part
 // that is genuinely a terminal's — stdout, and the two prompts that read stdin.
-func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
-	run.Deps, func(), error) {
+func connect(ctx context.Context, cfg *config.Config) (run.Deps, func(), error) {
 
 	d, closeAll, err := run.Connect(ctx, cfg)
 	if err != nil {
@@ -501,11 +418,6 @@ func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
 	}
 	d.Out = os.Stdout
 	d.Confirm = confirmBlunt
-
-	if d.Signers, err = run.ConfiguredSigners(cfg, psbtDir, os.Stdout); err != nil {
-		closeAll()
-		return d, nil, err
-	}
 	return d, closeAll, nil
 }
 
@@ -526,16 +438,6 @@ func connect(ctx context.Context, cfg *config.Config, psbtDir string) (
 func confirmBlunt(_ context.Context, req abort.BluntRequest) (bool, error) {
 	fmt.Print(prose.BluntConfirmation(req))
 	return ask("Abandon it with i_know_what_i_am_doing?")
-}
-
-// approve is the ordinary yes/no in front of a signing round.
-//
-// Not the same kind of prompt as confirmBlunt, and it does not pretend to be:
-// nothing after this point can lose the batch. What it is protecting is the
-// operator's evening — a bump is a second cold-wallet session, and the screen
-// above it is the arithmetic they are agreeing to pay.
-func approve(_ context.Context, question string) (bool, error) {
-	return ask(question)
 }
 
 // stdin is read through one buffered reader for the life of the process. A

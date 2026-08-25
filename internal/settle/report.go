@@ -14,7 +14,7 @@ import (
 // Far apart on purpose. The horizon is 2016 blocks — about two weeks — and a
 // batch that is anywhere near it has been stuck for so long that the operator
 // needs telling long before it is urgent. Below Urgent there is roughly a day
-// left, which is still several CPFP attempts.
+// left, which is still time to build and confirm a CPFP child.
 const (
 	HorizonWarn   = 432 // ~3 days
 	HorizonUrgent = 144 // ~1 day
@@ -283,70 +283,12 @@ func horizonNote(r *Result) string {
 			"holding a channel the peer has forgotten.", ForgetHorizonBlocks)))
 	b.WriteString("\n")
 	b.WriteString(prose.Bullet(
-		"Build the CPFP child from the change output. It is the only acceleration " +
-			"available and it costs one cold-wallet signing round."))
+		"Build a CPFP child spending the change output, in your own wallet. It is " +
+			"the only acceleration available, and this tool does not build it: it " +
+			"holds no keys and selects no coins. The change output is named in the " +
+			"plan and in the run journal."))
 	b.WriteString(prose.Bullet(
 		"Never a replacement. Replacing the funding transaction changes every " +
 			"outpoint in it and destroys every channel in the batch (I-4)."))
-	return b.String()
-}
-
-// Report is the operator-facing text for one CPFP child.
-func (c *Child) Report(parent Parent, target float64) string {
-	if c == nil {
-		return prose.Para("No child was built.")
-	}
-	var b strings.Builder
-
-	parentRate := float64(parent.FeeSat) / float64(parent.VsizeVB)
-
-	b.WriteString("A CPFP child, unsigned. It spends the batch's change output and\n")
-	b.WriteString("pays the remainder back to the cold wallet.\n\n")
-
-	b.WriteString(prose.Table([]prose.Row{
-		prose.Note("the batch pays", parent.FeeSat,
-			fmt.Sprintf("%.2f sat/vB over %d vB", parentRate, parent.VsizeVB)),
-		prose.Note("this child pays", c.FeeSat,
-			fmt.Sprintf("over %d vB", c.VsizeVB)),
-		prose.Note("the pair pays", c.PackageFeeSat,
-			fmt.Sprintf("%.2f sat/vB over %d vB", c.PackageRate, c.PackageVsizeVB)),
-		prose.Line("change spent", parent.ChangeSat),
-		prose.Line("returned to cold storage", c.OutputSat),
-	}))
-
-	b.WriteString(fmt.Sprintf("\n  %-24s  %s\n", "target",
-		fmt.Sprintf("%.2f sat/vB", target)))
-	b.WriteString(fmt.Sprintf("  %-24s  %s\n", "pays to", c.PaysTo))
-	b.WriteString("  child txid\n    " + c.TxID + "\n")
-
-	b.WriteString("\n")
-	b.WriteString(prose.Para(fmt.Sprintf(
-		"Core worked the fee out and this build checked it. walletcreatefundedpsbt "+
-			"charges the fee that lifts the whole unconfirmed package to the rate "+
-			"it is given, not the child's own rate, and the expression it uses is "+
-			"the same one internal/plan sizes the change output with. Core said %s; "+
-			"this build's own arithmetic wanted %s.",
-		prose.Sats(c.FeeSat), prose.Sats(c.RequiredFeeSat))))
-	b.WriteString("\n")
-	b.WriteString(prose.Para(
-		"The rate above is a floor rather than an estimate: the child's size is " +
-			"measured with the same upper bounds the batch verifier uses, so the " +
-			"transaction will pay at least this much per virtual byte."))
-	b.WriteString("\n")
-	b.WriteString(prose.Para(
-		"It spends one input and pays one output. add_inputs is off deliberately: " +
-			"a second, already-confirmed coin would make a cheaper child, and it " +
-			"would also let a miner take the child without the parent — which is " +
-			"the one thing a CPFP child must not allow."))
-	b.WriteString("\n")
-	b.WriteString(prose.Para(
-		"This needs a signing round. The change output belongs to cold storage, " +
-			"so accelerating the batch costs what the batch cost: every signer, in " +
-			"turn, returning a partial. There is no shortcut that does not amount " +
-			"to a hot key able to spend the batch's change."))
-	b.WriteString("\n")
-	b.WriteString(prose.Para(
-		"Nothing here replaces the funding transaction. There is no code path in " +
-			"this build that does (I-4)."))
 	return b.String()
 }

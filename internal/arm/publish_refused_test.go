@@ -145,7 +145,7 @@ func TestPublishRefusesATransactionWhoseTxidMoved(t *testing.T) {
 	other := wire.NewMsgTx(2)
 	other.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: wire.OutPoint{Index: 0},
-		Sequence:         plan.MaxBIP125Sequence,
+		Sequence:         plan.MaxNonReplaceableSequence - 1,
 	})
 	other.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
 	var raw bytes.Buffer

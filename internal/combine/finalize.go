@@ -180,13 +180,13 @@ func (f *Finalized) Base64() (string, error) { return f.packet.B64Encode() }
 // bytes, carrying each input's previous output and spend scripts, so a verifier
 // can classify the inputs and measure the size exactly rather than estimating.
 //
-// It exists because there is now more than one kind of transaction that has to
-// be re-checked after signing. Recheck below runs internal/plan's verifier over
-// exactly these bytes, and internal/bump's verifier runs over them too — the
-// CPFP child is one-in one-out and cannot go through a plan.Plan, which refuses
-// a batch with no channels in it, so it has a verifier of its own.
+// It exists because a signed transaction has to be re-checked against the plan
+// it was built for, and the check needs more than the raw bytes. Recheck below
+// runs internal/plan's verifier over exactly this view. It had a second consumer
+// once — the CPFP child, which is one-in one-out and cannot go through a
+// plan.Plan, so it carried a verifier of its own — and that is gone.
 //
-// The alternative was for that package to rebuild this view itself. Assembling
+// The alternative was for a caller to rebuild this view itself. Assembling
 // it is fiddly in a way that matters: btcd's finalizer replaces each input with
 // NewPsbtInput(nil, WitnessUtxo) plus the final witness, discarding the redeem
 // script, the witness script and any non-witness UTXO, which are precisely the
@@ -262,8 +262,8 @@ const SigningWalletLabel = "the signing wallet"
 //
 // It is not a weaker Complete. The base-packet guard, the txid pin, the UTXO
 // check, the field-conflict rules, the witness execution and the plan re-check
-// all run exactly as they do for a multi-device round. What is absent is the only
-// thing a single packet cannot need, which is a union.
+// all run exactly as they do when several packets come back. What is absent is
+// the only thing a single packet cannot need, which is a union.
 func Accept(p *plan.Plan, base, signed []byte) (*Finalized, *plan.Verification, error) {
 	merged, err := merge(base, []Part{{Label: SigningWalletLabel, PSBT: signed}},
 		carryFinalized)

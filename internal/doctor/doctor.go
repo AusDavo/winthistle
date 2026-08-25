@@ -232,27 +232,6 @@ func checkConfig(r *Report, cfg *config.Config) {
 	c.say("lnd %s, core %s, wallet %q", cfg.LND.Address, cfg.Bitcoind.Address,
 		cfg.Bitcoind.Wallet)
 	c.say("abort gate %s of the peers' 10m", cfg.Limits.AbortAfterSigning)
-	if len(cfg.Signers) == 0 {
-		c.fail("no [[signer]] blocks, so there is nothing to sign with. There must " +
-			"be exactly as many as the descriptor requires: btcd's finalizer wants " +
-			"exactly m signatures, so a 2-of-3 carrying three partials does not " +
-			"finalize at all.")
-		c.fix("# add to %s:\n[[signer]]\nlabel = \"cold1\"", cfg.Path)
-	} else {
-		c.say("signers: %s", strings.Join(labels(cfg.Signers), ", "))
-	}
-}
-
-func labels(sigs []config.Signer) []string {
-	out := make([]string, 0, len(sigs))
-	for _, s := range sigs {
-		if s.Command == "" {
-			out = append(out, s.Label+" (by file)")
-			continue
-		}
-		out = append(out, s.Label)
-	}
-	return out
 }
 
 func checkLND(ctx context.Context, r *Report, cfg *config.Config) *lnd.Client {
@@ -600,6 +579,19 @@ func checkColdWallet(ctx context.Context, r *Report, cfg *config.Config,
 // The record is keyed on the descriptors it was about, so it invalidates itself:
 // a confirmation from before a re-import describes descriptors this wallet no
 // longer derives from, and saying so is more useful than either believing it or
+// anyOurs reports whether this node opened any of these pending channels, which
+// is what makes `winthistle recover` the right thing to suggest: a channel we
+// opened and did not finish is one this tool may be able to take apart, and one
+// the peer opened is not ours to touch.
+func anyOurs(pending []peers.PendingOpen) bool {
+	for _, po := range pending {
+		if po.Ours {
+			return true
+		}
+	}
+	return false
+}
+
 // ignoring it.
 func checkAddressCheck(ctx context.Context, c *Check, cfg *config.Config,
 	node *bitcoind.Client, j *journal.Journal,
@@ -892,23 +884,6 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		}
 	}
 
-	// A CPFP child's lock has an owner too, and its owner is not in the list
-	// above: the run a child accelerates is published, and a published run is
-	// not unfinished. Without this every bump in progress makes the batch's
-	// change output read as an orphan — which is the one diagnosis on this
-	// screen that tells an operator to unlock a coin something is using.
-	bumps, err := j.UnfinishedBumps(ctx)
-	if err != nil {
-		c.fail("reading the journal's CPFP children: %v", err)
-		return
-	}
-	for _, b := range bumps {
-		for _, l := range b.Locks {
-			if !l.Released {
-				claimed[l.Outpoint] = fmt.Sprintf("%s bump %d", b.RunID, b.Seq)
-			}
-		}
-	}
 	if len(unfinished) > 0 {
 		c.fail("%d run%s stopped somewhere %s should not have:", len(unfinished),
 			prose.Plural(len(unfinished)), prose.IsAre(len(unfinished)))
@@ -918,23 +893,6 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		c.fix("winthistle recover")
 	} else {
 		c.say("no unfinished runs")
-	}
-
-	// A warning rather than a failure. An unfinished child costs a coin lock and
-	// nothing else — there is no peer holding a reservation and no channel in a
-	// half-open state — so it is a thing to tidy up rather than a thing that
-	// stops the next batch. The exception says itself: one that may be public.
-	if len(bumps) > 0 {
-		c.warn("%d CPFP child%s unfinished:", len(bumps),
-			pluralES(len(bumps)))
-		for _, b := range bumps {
-			note := ""
-			if b.MayBePublic() {
-				note = " — may already be in a mempool, so do not assume it is not"
-			}
-			c.say("    %s bump %d — %s%s", b.RunID, b.Seq, b.State, note)
-		}
-		c.fix("winthistle bump <run-id> --abandon")
 	}
 
 	if wallet == nil {
@@ -971,28 +929,6 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 			"frees nothing. The locks are memory-only: a Core restart clears them " +
 			"all at once.")
 	}
-}
-
-// pluralES is prose.Plural for a word that takes -es. "child" takes neither, so
-// this one carries the "ren" it needs.
-// anyOurs reports whether this node opened any of these pending channels, which
-// is what makes `winthistle recover` the right thing to suggest: a channel we
-// opened and did not finish is one this tool may be able to take apart, and one
-// the peer opened is not ours to touch.
-func anyOurs(pending []peers.PendingOpen) bool {
-	for _, po := range pending {
-		if po.Ours {
-			return true
-		}
-	}
-	return false
-}
-
-func pluralES(n int) string {
-	if n == 1 {
-		return ""
-	}
-	return "ren"
 }
 
 func lockJSON(ops []bitcoind.Outpoint) string {

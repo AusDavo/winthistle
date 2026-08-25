@@ -1016,12 +1016,12 @@ func TestThePolicySitsBesideTheAmount(t *testing.T) {
 
 // TestTheReportsFitThePane closes the gap that let a 79-character line ship.
 //
-// internal/setup, internal/bump and internal/doctor all measure their reports
-// against prose.PaneWidth. This package did not, and it renders two of the twelve
-// operator-facing screens: the plan document an operator approves before the cold
-// wallet comes out, and the verification an operator reads when something does
-// not match. A line one character over the pane in the second of those was found
-// by rendering the screen in a browser, which is a slower way to find it than a
+// internal/doctor and internal/settle measure their reports against
+// prose.PaneWidth. This package did not, and it renders the two operator-facing
+// screens that matter most: the plan document an operator approves before the
+// cold wallet comes out, and the verification an operator reads when something
+// does not match. A line one character over the pane in the second of those was found
+// by rendering the screen and reading it, which is a slower way to find it than a
 // test.
 //
 // Runes rather than bytes, deliberately. This copy is full of em dashes, and a

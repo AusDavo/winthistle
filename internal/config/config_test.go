@@ -43,12 +43,6 @@ floor_sat_per_vb = 2.5
 target_blocks    = 12
 mode             = "ECONOMICAL"
 
-[[signer]]
-label   = "cold1"
-command = "sign-with cold1"
-
-[[signer]]
-label = "cold2"
 `
 
 func TestATypicalFileReadsBack(t *testing.T) {
@@ -70,11 +64,6 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	}
 	if cfg.Fees.FloorSatPerVB != 2.5 || cfg.Fees.TargetBlocks != 12 {
 		t.Errorf("fees read back as %+v", cfg.Fees)
-	}
-	if len(cfg.Signers) != 2 || cfg.Signers[0].Label != "cold1" ||
-		cfg.Signers[1].Command != "" {
-
-		t.Errorf("signers read back as %+v", cfg.Signers)
 	}
 }
 
@@ -203,9 +192,9 @@ func TestWhatElseIsRefused(t *testing.T) {
 				"[server]\njournal = \"/a.db\"", 1),
 			want: "set twice",
 		},
-		"two signers with one name": {
-			body: strings.Replace(good, `label = "cold2"`, `label = "cold1"`, 1),
-			want: "two signers are called",
+		"a section that was retired": {
+			body: good + "\n[[signer]]\nlabel = \"cold1\"\n",
+			want: "there is no such round left",
 		},
 	}
 	for name, tc := range cases {

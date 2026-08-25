@@ -390,7 +390,6 @@ pass    = %q
 wallet  = %q
 
 [server]
-bind    = "127.0.0.1:7420"
 journal = %q
 
 [limits]
@@ -399,16 +398,10 @@ require_confirmed_inputs    = true
 
 [fees]
 floor_sat_per_vb = 1.0
-
-[[signer]]
-label = %q
-
-[[signer]]
-label = %q
 `,
 		aliceAddr, filepath.Join(e.Root, "regtest", "creds", "alice", "tls.cert"),
 		macPath, coreAddr, e.rpcUser, e.rpcPass, ColdWallet,
-		filepath.Join(dir, "runs.db"), Cold1, Cold2)
+		filepath.Join(dir, "runs.db"))
 
 	path := filepath.Join(dir, "winthistle.toml")
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

@@ -397,8 +397,9 @@ type AddressInfo struct {
 	// has to be sized against, and it is the reason this field exists: once an
 	// output is spent by an unconfirmed transaction Core drops it from
 	// listunspent, so listunspent's witnessScript is no longer reachable and this
-	// is the remaining route to the same bytes. See internal/bump, which needs it
-	// to size a replacement of a standing CPFP child.
+	// is the remaining route to the same bytes. Nothing in the application reads
+	// it now — the CPFP child that needed it to size a replacement is gone — and
+	// it stays because the harness parses the same response.
 	Hex string `json:"hex"`
 }
 
