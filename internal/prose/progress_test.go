@@ -45,11 +45,39 @@ func TestTheReceiptCountIsTwoOfThreeUntilTheThirdArrives(t *testing.T) {
 
 	got := Progress(r, time.Now(), 10*time.Minute)
 	mustContain(t, got, "receipts      2 of 3")
-	mustContain(t, got, "The funding transaction stays here until all 3 channels "+
-		"have their receipt")
+	mustContain(t, got, "Nothing goes out until all 3 channels have their receipt")
 	if strings.Contains(got, "the gate is open") {
 		t.Error("a two-of-three batch was described as through the gate")
 	}
+}
+
+// The two states on either side of the gate say different things about what
+// happens next, and getting them the wrong way round is a false "one step from
+// irreversible" warning.
+//
+// Before the inversion there was only one thing after the gate, so the screen
+// could say "publishing it is the next call" the moment the last receipt landed.
+// Now the signing round is in between: an armed run has the whole ceremony still
+// ahead of it, and a run in signing is the one with the publish next.
+func TestTheGateScreenSaysWhichSideOfTheSigningRoundItIsOn(t *testing.T) {
+	both := []journal.Channel{
+		chanAt(journal.ChanPending, 0, true), chanAt(journal.ChanPending, 1, true),
+	}
+
+	armed := Progress(live(journal.StateArmed, time.Minute, both...),
+		time.Now(), 10*time.Minute)
+	mustContain(t, armed, "the gate is open")
+	mustContain(t, armed, "Nothing is signed yet")
+	if strings.Contains(armed, "publishing it is the next call") {
+		t.Error("an armed batch was told the publish is next, with the whole " +
+			"signing round still to come:\n" + armed)
+	}
+
+	signing := Progress(live(journal.StateSigning, time.Minute, both...),
+		time.Now(), 10*time.Minute)
+	mustContain(t, signing, "the gate is open")
+	mustContain(t, signing, "out to be signed")
+	mustContain(t, signing, "cannot be taken back")
 }
 
 // HELD is the one line on this screen an operator looks at when nervous, so it
@@ -65,8 +93,8 @@ func TestHeldStopsSayingHeldTheMomentTheJournalIsUnsure(t *testing.T) {
 		gone  string
 	}{
 		{journal.StateArming, "HELD", "MAY BE PUBLIC"},
-		{journal.StateSigning, "HELD", "MAY BE PUBLIC"},
 		{journal.StateArmed, "HELD", "MAY BE PUBLIC"},
+		{journal.StateSigning, "HELD", "MAY BE PUBLIC"},
 		{journal.StatePublishing, "MAY BE PUBLIC", "HELD"},
 		{journal.StatePublished, "PUBLISHED", "HELD"},
 	} {

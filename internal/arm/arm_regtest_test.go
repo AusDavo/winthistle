@@ -1,6 +1,7 @@
 package arm_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -14,10 +15,13 @@ import (
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/journal"
+	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 	"github.com/AusDavo/winthistle/internal/reserve"
+	"github.com/btcsuite/btcd/wire"
+	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
 // fixtureChannelSat matches the other packages' fixtures, so a peer that accepts
@@ -46,22 +50,30 @@ func openJournal(t *testing.T) *journal.Journal {
 
 // window is one armed window driven as far as a test wants it.
 type window struct {
-	env     *regtestenv.Env
-	j       *journal.Journal
-	runID   string
-	streams *arm.Streams
-	plan    *plan.Plan
-	built   coldwallet.Built
-	final   *combine.Finalized
+	env      *regtestenv.Env
+	j        *journal.Journal
+	runID    string
+	streams  *arm.Streams
+	plan     *plan.Plan
+	built    coldwallet.Built
+	verified *arm.Verified
+	armed    *arm.Armed
+	final    *combine.Finalized
 }
 
 // drive runs steps 2 through 7 of the sequence for n channels, exactly as the
 // app does, stopping before the publish.
 //
 // Everything in here is app code: arm.Open for the streams, coldwallet.Build for
-// the transaction, plan for the verification, arm.Verify for LND's, the cold
-// wallet's two halves for the signatures, and internal/combine for the merge. The
-// only fixture-shaped parts are the peer choice and the journal's location.
+// the transaction, plan for the verification, arm.Verify for LND's with
+// skip_finalize, arm.Receipts for the gate, the cold wallet's two halves for the
+// signatures, and internal/combine for the merge. The only fixture-shaped parts
+// are the peer choice and the journal's location.
+//
+// The order is the inversion: the gate opens at arm.Receipts, before anything is
+// signed. After the replan the cold wallet is standing in for Sparrow — the
+// harness playing the operator's part — and the thing that matters about it here
+// is only that it returns a transaction with the same txid.
 func drive(t *testing.T, n int) *window {
 	t.Helper()
 	env := regtestenv.Start(t)
@@ -163,15 +175,37 @@ func drive(t *testing.T, n int) *window {
 			v.Report())
 	}
 
-	// Then LND's, for every stream, before anything is signed or finalized.
-	if err := arm.Verify(ctx, env.Alice.Lightning, w.j, w.runID, streams, w.built.Raw); err != nil {
-		t.Fatalf("psbt_verify: %v", err)
+	// Then LND's, for every stream, with skip_finalize — and then the receipts,
+	// with the mempool watched throughout. Nothing is signed in either step, and
+	// nothing may reach the network in either: that is I-1 and it is now the whole
+	// of what happens inside the peers' ten minutes.
+	verified, armed := armWatchingTheMempool(t, w)
+	w.verified, w.armed = verified, armed
+
+	if run, err := w.j.Load(ctx, w.runID); err != nil {
+		t.Fatalf("reading the run back: %v", err)
+	} else if run.State != journal.StateArmed {
+		t.Fatalf("after n of n chan_pending the run is %s, not %s", run.State,
+			journal.StateArmed)
+	} else if run.RawTx != "" {
+		t.Fatal("the run is armed and the journal already holds a raw transaction. " +
+			"The gate opens over an unsigned transaction; nothing has been signed yet")
+	}
+	if len(armed.Channels) != n {
+		t.Fatalf("armed %d channels of %d", len(armed.Channels), n)
+	}
+	t.Logf("%d of %d channels recoverable by force-close at %s, nothing signed",
+		len(armed.Channels), n, verified.TxID)
+
+	// Step 7, with clock A already stopped. The journal refuses this write unless
+	// the batch is armed, so it is also the assertion that it is.
+	if err := w.j.MarkSigning(ctx, w.runID); err != nil {
+		t.Fatalf("MarkSigning: %v", err)
 	}
 	if run, err := w.j.Load(ctx, w.runID); err != nil {
 		t.Fatalf("reading the run back: %v", err)
 	} else if run.State != journal.StateSigning {
-		t.Fatalf("after n of n psbt_verify the run is %s, not %s", run.State,
-			journal.StateSigning)
+		t.Fatalf("the run is %s, not %s", run.State, journal.StateSigning)
 	}
 
 	// The signers. Two halves of a 2-of-2, neither of which can complete the
@@ -197,8 +231,9 @@ func drive(t *testing.T, n int) *window {
 	}
 	w.final = final
 
-	if final.TxID != w.built.TxID {
-		t.Fatalf("I-3: txid moved from %s to %s", w.built.TxID, final.TxID)
+	if final.TxID != verified.TxID {
+		t.Fatalf("I-3: the txid LND pinned was %s and the signing round returned %s",
+			verified.TxID, final.TxID)
 	}
 	if ok, why := env.AcceptsToMempool(t, hex.EncodeToString(final.RawTx)); !ok {
 		t.Fatalf("testmempoolaccept refused the batch: %s", why)
@@ -206,6 +241,68 @@ func drive(t *testing.T, n int) *window {
 	assertMempoolEmpty(t, env, final.TxID, "after combining and finalizing in-app")
 
 	return w
+}
+
+// armWatchingTheMempool runs steps 5 and 6 with the mempool polled throughout.
+//
+// This is where the old fixture watched psbt_finalize, and the assertion has
+// moved with the step rather than been dropped: psbt_verify with skip_finalize is
+// now the call that completes LND's funding flow, so it is the call at which
+// "all but the last" would have broadcast. Nothing may be in the mempool while it
+// runs — and nothing could be, because the transaction has no witnesses yet,
+// which is a second reason on top of no_publish rather than a replacement for it.
+//
+// Polling rather than hooking, because there is nothing to hook: both calls are
+// deliberately straight lines.
+func armWatchingTheMempool(t *testing.T, w *window) (*arm.Verified, *arm.Armed) {
+	t.Helper()
+	ctx := harnessCtx(t)
+
+	stop := make(chan struct{})
+	watched := make(chan error, 1)
+	go func() {
+		for {
+			select {
+			case <-stop:
+				watched <- nil
+				return
+			default:
+			}
+			// Not InMempool: t.Fatalf from a goroutine that is not the test's own
+			// runs runtime.Goexit on the wrong one.
+			present, err := w.env.TryInMempool(w.built.TxID)
+			switch {
+			case err != nil:
+				watched <- fmt.Errorf("polling the mempool: %w", err)
+				return
+			case present:
+				watched <- fmt.Errorf("%s reached the mempool while the batch was "+
+					"being armed. no_publish is set on every stream precisely so "+
+					"that nothing broadcasts here", w.built.TxID)
+				return
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}()
+
+	verified, verr := arm.Verify(ctx, w.env.Alice.Lightning, w.j, w.runID,
+		w.streams, w.built.Raw)
+	var armed *arm.Armed
+	var rerr error
+	if verr == nil {
+		armed, rerr = arm.Receipts(ctx, w.env.Alice.Lightning, w.j, w.streams, verified)
+	}
+	close(stop)
+	if watchErr := <-watched; watchErr != nil {
+		t.Fatal(watchErr)
+	}
+	if verr != nil {
+		t.Fatalf("psbt_verify with skip_finalize: %v", verr)
+	}
+	if rerr != nil {
+		t.Fatalf("collecting the receipts: %v", rerr)
+	}
+	return verified, armed
 }
 
 // abortAtCleanup takes whatever the run left behind apart, through the journal's
@@ -272,24 +369,24 @@ func assertMempoolEmpty(t *testing.T, env *regtestenv.Env, txid, when string) {
 }
 
 // TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable is the
-// whole of I-1, end to end, against a live node.
+// whole of I-1, end to end, against a live node, in the inverted order.
 //
 // The assertion that matters is not that the publish works. It is *where* the
-// mempool is checked: after every psbt_finalize, including the last one, which is
-// precisely where LND's own "all but the last" idiom would have broadcast. The
-// transaction reaches the network on exactly one line of this test, and that line
-// is the only call to WalletKit.PublishTransaction in the repository.
+// mempool is checked: after every psbt_verify, including the last one, which is
+// precisely where LND's own "all but the last" idiom would have broadcast — and
+// again with the batch fully armed and signed. The transaction reaches the
+// network on exactly one line of this test, and that line is one of the two calls
+// to WalletKit.PublishTransaction in the repository.
+//
+// What is new is the order. Every channel reaches chan_pending over an unsigned
+// transaction, the signing round happens afterwards with no clock A running, and
+// only then does anything go out. drive() has already checked the journal at each
+// of those points; this test is what happens after them.
 func TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable(t *testing.T) {
 	w := drive(t, 3)
 	env, ctx := w.env, harnessCtx(t)
+	armed := w.armed
 
-	// Steps 7 and 8, one channel at a time, with the mempool checked after each.
-	// arm.Finalize does the finalizing; this callback is the test's own
-	// interleaved assertion.
-	armed, err := finalizeWatchingTheMempool(t, w)
-	if err != nil {
-		t.Fatalf("finalizing the batch: %v", err)
-	}
 	if len(armed.Channels) != 3 {
 		t.Fatalf("armed with %d channels, expected 3", len(armed.Channels))
 	}
@@ -306,38 +403,33 @@ func TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable(t *te
 		seen[cp.Index] = true
 	}
 
-	run, err := w.j.Load(ctx, w.runID)
-	if err != nil {
-		t.Fatalf("reading the run back: %v", err)
-	}
-	if run.State != journal.StateArmed {
-		t.Fatalf("the journal says %s, not %s", run.State, journal.StateArmed)
-	}
-	if run.RawTx != hex.EncodeToString(w.final.RawTx) {
-		t.Error("the journal's raw transaction is not the one that was finalized, " +
-			"so a rebroadcast after a crash would send different bytes")
-	}
 	if n := len(armed.Backup.GetMultiChanBackup().GetMultiChanBackup()); n == 0 {
-		t.Error("step 8 exported an empty multi-channel backup")
+		t.Error("no multi-channel backup was exported")
 	} else {
 		t.Logf("exported a %d-byte multi-channel backup covering %d singles", n,
 			len(armed.Backup.GetSingleChanBackups().GetChanBackups()))
 	}
 
 	// The last check before the line that cannot be undone.
-	assertMempoolEmpty(t, env, w.final.TxID, "with the batch fully armed and the "+
-		"backups exported")
+	assertMempoolEmpty(t, env, w.final.TxID, "with the batch fully armed, signed "+
+		"and the backups exported")
 
-	if err := arm.Publish(ctx, env.Alice.WalletKit, w.j, armed); err != nil {
+	if err := arm.Publish(ctx, env.Alice.WalletKit, w.j, armed, w.final.RawTx); err != nil {
 		t.Fatalf("publishing: %v", err)
 	}
 	if !env.InMempool(t, w.final.TxID) {
 		t.Fatalf("%s is not in the mempool after the publish call returned", w.final.TxID)
 	}
-	if run, err := w.j.Load(ctx, w.runID); err != nil {
+	run, err := w.j.Load(ctx, w.runID)
+	if err != nil {
 		t.Fatalf("reading the run back: %v", err)
-	} else if run.State != journal.StatePublished {
+	}
+	if run.State != journal.StatePublished {
 		t.Fatalf("after publishing the run is %s, not %s", run.State, journal.StatePublished)
+	}
+	if run.RawTx != hex.EncodeToString(w.final.RawTx) {
+		t.Error("the journal's raw transaction is not the one that was published, " +
+			"so a rebroadcast after a crash would send different bytes")
 	}
 	t.Logf("published %s: %s in %d channels, %s fee",
 		w.final.TxID, prose.Sats(3*fixtureChannelSat), 3, prose.Sats(w.final.FeeSat))
@@ -364,53 +456,6 @@ func TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable(t *te
 	}
 }
 
-// finalizeWatchingTheMempool runs arm.Finalize and checks the mempool after each
-// of LND's psbt_finalize calls.
-//
-// It reaches into the sequence by polling rather than by hooking, because there
-// is nothing to hook: arm.Finalize is deliberately a straight line. Polling in a
-// goroutine for the whole duration covers every gap between the finalizes,
-// including the one after the last, and the per-step check below is the same
-// assertion made where it is easiest to attribute.
-func finalizeWatchingTheMempool(t *testing.T, w *window) (*arm.Armed, error) {
-	t.Helper()
-	ctx := harnessCtx(t)
-
-	stop := make(chan struct{})
-	watched := make(chan error, 1)
-	go func() {
-		for {
-			select {
-			case <-stop:
-				watched <- nil
-				return
-			default:
-			}
-			// Not InMempool: t.Fatalf from a goroutine that is not the test's own
-			// runs runtime.Goexit on the wrong one.
-			present, err := w.env.TryInMempool(w.final.TxID)
-			switch {
-			case err != nil:
-				watched <- fmt.Errorf("polling the mempool: %w", err)
-				return
-			case present:
-				watched <- fmt.Errorf("%s reached the mempool during finalize. "+
-					"no_publish is set on every stream precisely so that nothing "+
-					"broadcasts here", w.final.TxID)
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
-	}()
-
-	armed, err := arm.Finalize(ctx, w.env.Alice.Lightning, w.j, w.runID, w.streams, w.final)
-	close(stop)
-	if watchErr := <-watched; watchErr != nil {
-		t.Fatal(watchErr)
-	}
-	return armed, err
-}
-
 // TestPublishRefusesABatchTheJournalDoesNotCallArmed.
 //
 // The journal is the component that decides whether every chan_pending arrived,
@@ -421,21 +466,17 @@ func TestPublishRefusesABatchTheJournalDoesNotCallArmed(t *testing.T) {
 	w := drive(t, 2)
 	env, ctx := w.env, harnessCtx(t)
 
-	armed, err := arm.Finalize(ctx, env.Alice.Lightning, w.j, w.runID, w.streams, w.final)
-	if err != nil {
-		t.Fatalf("finalizing: %v", err)
-	}
-
 	// A second run, sharing nothing but this journal, that never armed: the same
-	// Armed value pointed at a run the journal will not agree about.
+	// Armed value — receipts and all, because a struct copy carries unexported
+	// fields — pointed at a run the journal will not agree about.
 	stale := &arm.Armed{}
-	*stale = *armed
+	*stale = *w.armed
 	stale.RunID = w.runID + "-never-armed"
 	if err := w.j.Begin(ctx, stale.RunID, w.streams.NewChannels()); err != nil {
 		t.Fatalf("journalling the second run: %v", err)
 	}
 
-	err = arm.Publish(ctx, env.Alice.WalletKit, w.j, stale)
+	err := arm.Publish(ctx, env.Alice.WalletKit, w.j, stale, w.final.RawTx)
 	if !errors.Is(err, journal.ErrNotArmed) {
 		t.Fatalf("a run in %s was published, or refused for another reason: %v",
 			journal.StateArming, err)
@@ -444,33 +485,51 @@ func TestPublishRefusesABatchTheJournalDoesNotCallArmed(t *testing.T) {
 
 	assertMempoolEmpty(t, env, w.final.TxID, "after a refused publish")
 
-	// The real run is still armed and still abortable, which is what the cleanup
-	// then does.
+	// The real run is untouched — signing, because drive() took it through the
+	// gate and out to the wallet — and still abortable, which is what the
+	// cleanup then does. A refusal aimed at one run must not move another.
 	if run, err := w.j.Load(ctx, w.runID); err != nil {
 		t.Fatalf("reading the run back: %v", err)
-	} else if run.State != journal.StateArmed {
-		t.Fatalf("the armed run is now %s", run.State)
+	} else if run.State != journal.StateSigning {
+		t.Fatalf("the armed run is now %s, want %s", run.State, journal.StateSigning)
+	} else if _, err := run.AbortTarget(); err != nil {
+		t.Fatalf("the armed run is no longer abortable: %v", err)
 	}
 }
 
 // TestAnArmedValueFromNowhereCarriesNoTransaction.
 //
-// Publish takes an *arm.Armed and nothing else, and the raw transaction lives in
-// an unexported field. So the type system already says that a caller outside this
-// package cannot assemble something publishable — this is that statement as a
-// test, because it is the kind of property a later refactor could quietly remove
-// by exporting one field.
+// Publish takes an *arm.Armed and nothing else that proves the gate opened, and
+// the receipts live in an unexported map. So the type system already says that a
+// caller outside this package cannot assemble something publishable — this is
+// that statement as a test, because it is the kind of property a later refactor
+// could quietly remove by exporting one field.
+//
+// The bytes are real and the txid matches, so nothing else is standing in the
+// way: what refuses is the count of receipts against the count of channels.
 func TestAnArmedValueFromNowhereCarriesNoTransaction(t *testing.T) {
 	env := regtestenv.Start(t)
 	ctx := harnessCtx(t)
 	j := openJournal(t)
 
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 0},
+		Sequence:         plan.MaxNonReplaceableSequence,
+	})
+	tx.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
+	var raw bytes.Buffer
+	if err := tx.Serialize(&raw); err != nil {
+		t.Fatal(err)
+	}
+
 	forged := &arm.Armed{
 		RunID:    "forged",
-		TxID:     "0000000000000000000000000000000000000000000000000000000000000000",
-		Channels: nil,
+		TxID:     tx.TxHash().String(),
+		Channels: []lnd.ChannelPoint{{TxID: tx.TxHash().String(), Index: 0}},
+		Backup:   &lnrpc.ChanBackupSnapshot{},
 	}
-	if err := arm.Publish(ctx, env.Alice.WalletKit, j, forged); err == nil {
+	if err := arm.Publish(ctx, env.Alice.WalletKit, j, forged, raw.Bytes()); err == nil {
 		t.Fatal("an Armed built outside the gate was accepted")
 	} else {
 		t.Logf("refused: %v", err)

@@ -9,21 +9,23 @@ import (
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
-// reportArmed is the screen at the I-1 gate: every channel is recoverable, and
-// nothing has been broadcast.
+// reportArmed is the screen at the last reversible moment: every channel is
+// recoverable, the transaction is signed, and nothing has been broadcast.
 //
-// This is the last moment at which the batch costs nothing. Everything on it is
-// reversible until the next call, and everything after it is not, so the screen
-// says which channels exist, where their funds will be, and what the one
-// remaining action does.
+// The gate itself opened earlier — step 6, before the signing round, which is
+// where the armed window says so as it happens. This screen is the summary the
+// operator reads with one call left: everything on it is reversible, and
+// everything after it is not, so it says which channels exist, where their funds
+// will be, and what the one remaining action does.
 func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 	section(w, "Armed")
 
 	fmt.Fprint(w, prose.Para(fmt.Sprintf(
-		"All %d channel%s reached chan_pending, so every one of them is already "+
-			"recoverable: the peer has stored its commitment signature against an "+
-			"outpoint in this transaction, and a force-close would get the funds "+
-			"back even if this node vanished. Nothing is in any mempool.",
+		"All %d channel%s reached chan_pending before anything was signed, so every "+
+			"one of them is already recoverable: the peer has stored its commitment "+
+			"signature against an outpoint in this transaction, and a force-close "+
+			"would get the funds back even if this node vanished. Nothing is in any "+
+			"mempool.",
 		len(armed.Channels), prose.Plural(len(armed.Channels)))))
 
 	fmt.Fprintf(w, "\n  txid\n      %s\n\n", armed.TxID)
@@ -49,7 +51,7 @@ func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 // withheld is the cold probe's ending: the call that was not made.
 func withheld(armed *arm.Armed) string {
 	var b strings.Builder
-	section(&b, "Step 9 was not made")
+	section(&b, "Step 8 was not made")
 
 	b.WriteString(prose.Para("This run was asked to stop before publishing, so it " +
 		"did every step of the real sequence and then did not call " +
@@ -59,16 +61,18 @@ func withheld(armed *arm.Armed) string {
 		"gate rather than a rehearsal of it."))
 	b.WriteString("\n")
 	b.WriteString(prose.Para("What that proves is everything except the broadcast: " +
-		"these peers accepted these amounts, this cold wallet produced partial " +
-		"signatures that combine and finalize here, LND committed to the funding " +
-		"outpoints and returned every chan_pending, and the backups exported off " +
-		"pending channels."))
+		"these peers accepted these amounts, LND committed to the funding outpoints " +
+		"and returned every chan_pending over an unsigned transaction, the backups " +
+		"exported off pending channels, and the signing wallet then returned a " +
+		"transaction whose txid had not moved."))
 	b.WriteString("\n")
 	b.WriteString(prose.Para("The batch is now taken apart, which is the other half " +
 		"of what the probe proves. Nothing was published, so this costs nothing " +
 		"but the peers' patience — each peer keeps its side pending until it " +
 		"times out, roughly 2016 blocks from now, so a second probe against the " +
-		"same peer costs another of its pending-channel slots."))
+		"same peer costs another of its pending-channel slots. Each channel is " +
+		"abandoned rather than cancelled, because each one reached chan_pending, " +
+		"and LND wants its blunt flag for every one of them."))
 	return b.String()
 }
 
@@ -95,8 +99,9 @@ func mayBePublic(armed *arm.Armed, err error) string {
 	b.WriteString(prose.Bullet("If it is there, this is an ordinary settlement: " +
 		"every channel is recoverable and the batch simply needs to confirm."))
 	b.WriteString(prose.Bullet("If it is not, re-broadcast it yourself: " +
-		"bitcoin-cli sendrawtransaction <hex>, with the finalized transaction from " +
-		"the journal, which is why it is stored. winthistle will not make the call " +
+		"bitcoin-cli sendrawtransaction <hex>, with the signed transaction from " +
+		"the journal, which is why it is stored — or from Sparrow, which has the " +
+		"same bytes. winthistle will not make the call " +
 		"twice — the journal refuses a run that already reached it — and no_publish " +
 		"also gates LND's own rebroadcaster. That duty is yours."))
 	b.WriteString(prose.Bullet("Do not abandon these channels, and the tool will " +

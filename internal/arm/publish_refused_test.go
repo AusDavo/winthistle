@@ -1,7 +1,9 @@
 package arm
 
 import (
+	"bytes"
 	"context"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -10,17 +12,19 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
+	"github.com/AusDavo/winthistle/internal/plan"
+	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
 	"github.com/lightningnetwork/lnd/lnwallet"
 	"google.golang.org/grpc"
 )
 
-// In-package, because an Armed carrying a transaction is the thing no other
-// package can build — rawTx is unexported and only Finalize fills it, which is
-// what TestAnArmedValueFromNowhereCarriesNoTransaction pins from outside. Here
-// the point is the opposite: reach the RPC with a legitimate-looking Armed so the
-// two ways LND can refuse are exercised without a harness and without a peer.
+// In-package, because an Armed the gate agrees with is the thing no other
+// package can build — receipts is unexported and only Receipts fills it, which
+// is what TestAnArmedValueFromNowhereCarriesNoTransaction pins from outside.
+// Here the point is the opposite: reach the RPC with a legitimate Armed so the
+// ways LND can refuse are exercised without a harness and without a peer.
 type refusingPublisher struct {
 	err   error
 	inRep string // publish_error inside an otherwise successful response
@@ -37,11 +41,33 @@ func (p *refusingPublisher) PublishTransaction(_ context.Context,
 	return &walletrpc.PublishResponse{PublishError: p.inRep}, nil
 }
 
-const refusedTxID = "8f52b022b79c198551d965f6985ef85d879820fa1a3a4899b1349e32fe4063d9"
+// refusedTx is a real transaction, serialized, because Publish now re-derives the
+// txid from the bytes it is handed and refuses any that do not hash to the one
+// LND pinned. A fixture with a hand-written txid and unrelated bytes would fail
+// I-3 rather than reach the RPC.
+func refusedTx(t *testing.T) ([]byte, string) {
+	t.Helper()
+	tx := wire.NewMsgTx(2)
+	tx.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 0},
+		Sequence:         plan.MaxNonReplaceableSequence,
+	})
+	tx.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
+	var raw bytes.Buffer
+	if err := tx.Serialize(&raw); err != nil {
+		t.Fatalf("serializing the fixture transaction: %v", err)
+	}
+	return raw.Bytes(), tx.TxHash().String()
+}
 
-// armedRun builds a journal that agrees a two-channel batch is armed, and the
-// Armed value that goes with it.
-func armedRun(t *testing.T, runID string) (*journal.Journal, *Armed) {
+// armedRun builds a journal that agrees a two-channel batch is armed, the Armed
+// value that goes with it, and the transaction the signing wallet returned.
+//
+// The order is the production one: the txid is pinned before the verifies, the
+// receipts arrive, and nothing is signed until the gate is open. RecordFinalizedTx
+// is deliberately not called here — Publish makes that write itself, immediately
+// before the one that must land before the RPC.
+func armedRun(t *testing.T, runID string) (*journal.Journal, *Armed, []byte) {
 	t.Helper()
 	ctx := context.Background()
 
@@ -50,6 +76,8 @@ func armedRun(t *testing.T, runID string) (*journal.Journal, *Armed) {
 		t.Fatalf("opening the journal: %v", err)
 	}
 	t.Cleanup(func() { j.Close() })
+
+	rawTx, txid := refusedTx(t)
 
 	var chans []journal.NewChannel
 	var ids []lnd.PendingChanID
@@ -68,28 +96,93 @@ func armedRun(t *testing.T, runID string) (*journal.Journal, *Armed) {
 	if err := j.Begin(ctx, runID, chans); err != nil {
 		t.Fatalf("Begin: %v", err)
 	}
-	if err := j.RecordFinalizedTx(ctx, runID, refusedTxID, "0200000000ffffffff"); err != nil {
-		t.Fatalf("RecordFinalizedTx: %v", err)
+	if err := j.RecordPinnedTxID(ctx, runID, txid); err != nil {
+		t.Fatalf("RecordPinnedTxID: %v", err)
 	}
 
 	a := &Armed{
-		RunID: runID, TxID: refusedTxID,
-		rawTx:  []byte{0x02, 0x00, 0x00, 0x00},
-		Backup: &lnrpc.ChanBackupSnapshot{},
+		RunID: runID, TxID: txid,
+		Backup:   &lnrpc.ChanBackupSnapshot{},
+		receipts: map[lnd.PendingChanID]lnd.ChannelPoint{},
 	}
 	for i, id := range ids {
-		cp := lnd.ChannelPoint{TxID: refusedTxID, Index: uint32(i)}
+		if err := j.MarkVerified(ctx, runID, id); err != nil {
+			t.Fatalf("MarkVerified: %v", err)
+		}
+		cp := lnd.ChannelPoint{TxID: txid, Index: uint32(i)}
 		if err := j.MarkPending(ctx, runID, id, cp); err != nil {
 			t.Fatalf("MarkPending: %v", err)
 		}
 		a.Channels = append(a.Channels, cp)
+		a.receipts[id] = cp
 	}
 	if r, err := j.Load(ctx, runID); err != nil {
 		t.Fatal(err)
 	} else if r.State != journal.StateArmed {
 		t.Fatalf("the fixture run is %s, want %s", r.State, journal.StateArmed)
 	}
-	return j, a
+	return j, a, rawTx
+}
+
+// Publish refuses bytes that are not the transaction LND committed to.
+//
+// I-3, and after the inversion it is the only load-bearing check on what comes
+// back from the signing wallet: LND pinned the funding outpoints at psbt_verify,
+// so a transaction with a different txid does not contain them and broadcasting
+// it would leave every channel in the batch funding an outpoint that will never
+// exist. The check is made against the bytes rather than against the Armed's own
+// TxID field, because the field is what a caller fills in and the bytes are what
+// the network sees.
+func TestPublishRefusesATransactionWhoseTxidMoved(t *testing.T) {
+	ctx := context.Background()
+	runID := "txid-moved"
+	j, a, _ := armedRun(t, runID)
+
+	// The same transaction with one sequence number changed: still valid, still
+	// ours, and a different txid. This is exactly the malleation LND's own
+	// FinalizeRawTX would not have noticed — it compares outputs and input
+	// prevouts and says so.
+	other := wire.NewMsgTx(2)
+	other.AddTxIn(&wire.TxIn{
+		PreviousOutPoint: wire.OutPoint{Index: 0},
+		Sequence:         plan.MaxBIP125Sequence,
+	})
+	other.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
+	var raw bytes.Buffer
+	if err := other.Serialize(&raw); err != nil {
+		t.Fatal(err)
+	}
+
+	pub := &refusingPublisher{}
+	err := Publish(ctx, pub, j, a, raw.Bytes())
+	if !errors.Is(err, ErrTXIDMoved) {
+		t.Fatalf("error is %v, want it to wrap ErrTXIDMoved", err)
+	}
+	if pub.calls != 0 {
+		t.Errorf("PublishTransaction was called %d times; the refusal has to land "+
+			"before the RPC", pub.calls)
+	}
+	if !strings.Contains(err.Error(), other.TxHash().String()) ||
+		!strings.Contains(err.Error(), a.TxID) {
+		t.Errorf("the refusal does not name both txids, which is what tells an "+
+			"operator which of the two their wallet returned: %v", err)
+	}
+
+	run, err := j.Load(ctx, runID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if run.State != journal.StateArmed {
+		t.Errorf("the run is %s, want %s — nothing was published, so it is still "+
+			"abortable", run.State, journal.StateArmed)
+	}
+	if run.RawTx != "" {
+		t.Error("the rejected transaction reached the journal. The journal's raw " +
+			"transaction is what a rebroadcast would send")
+	}
+	if _, err := run.AbortTarget(); err != nil {
+		t.Errorf("AbortTarget refused a run that never reached publish: %v", err)
+	}
 }
 
 // A refused publish must leave the run unabortable, both ways LND can refuse.
@@ -169,9 +262,9 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			runID := "refused-" + t.Name()
-			j, a := armedRun(t, runID)
+			j, a, rawTx := armedRun(t, runID)
 
-			err := Publish(ctx, tc.pub, j, a)
+			err := Publish(ctx, tc.pub, j, a, rawTx)
 			if err == nil {
 				t.Fatal("a refused publish was reported as a success")
 			}
@@ -212,10 +305,10 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 func TestARefusedPublishKeepsTheTransactionToRebroadcast(t *testing.T) {
 	ctx := context.Background()
 	runID := "refused-keeps-tx"
-	j, a := armedRun(t, runID)
+	j, a, rawTx := armedRun(t, runID)
 
 	pub := &refusingPublisher{err: errors.New("bad-txns-inputs-missingorspent")}
-	if err := Publish(ctx, pub, j, a); err == nil {
+	if err := Publish(ctx, pub, j, a, rawTx); err == nil {
 		t.Fatal("expected a refusal")
 	}
 
@@ -227,16 +320,20 @@ func TestARefusedPublishKeepsTheTransactionToRebroadcast(t *testing.T) {
 		t.Fatal("the finalized transaction is gone from the journal, so there is " +
 			"nothing to re-broadcast — and LND will not do it either")
 	}
-	if run.TxID != refusedTxID {
-		t.Errorf("journalled txid %s, want %s", run.TxID, refusedTxID)
+	if run.TxID != a.TxID {
+		t.Errorf("journalled txid %s, want %s", run.TxID, a.TxID)
+	}
+	if run.RawTx != hex.EncodeToString(rawTx) {
+		t.Error("the journal's raw transaction is not the one Publish was handed, " +
+			"so a rebroadcast would send different bytes")
 	}
 }
 
 // After a refusal, there is no retry through this program — and the operator
 // copy has to say so, because "re-broadcast it" is the advice.
 //
-// MarkPublishing accepts only a run in armed, and a refused publish leaves the
-// run in publishing. That is deliberate rather than an oversight: the state is
+// MarkPublishing accepts a run in armed or signing and nothing else, and a
+// refused publish leaves the run in publishing. That is deliberate rather than an oversight: the state is
 // what stops an abort, and moving back out of it to allow a retry would be
 // moving back out of the only thing standing between a pending channel and an
 // abandon it must not have. But it means the raw transaction in the journal is
@@ -247,15 +344,15 @@ func TestARefusedPublishKeepsTheTransactionToRebroadcast(t *testing.T) {
 func TestARefusedPublishCannotBeRetriedThroughThisProgram(t *testing.T) {
 	ctx := context.Background()
 	runID := "refused-no-retry"
-	j, a := armedRun(t, runID)
+	j, a, rawTx := armedRun(t, runID)
 
 	pub := &refusingPublisher{err: lnwallet.ErrDoubleSpend}
-	if err := Publish(ctx, pub, j, a); err == nil {
+	if err := Publish(ctx, pub, j, a, rawTx); err == nil {
 		t.Fatal("expected a refusal")
 	}
 
 	// The same call again, as an operator would reach for it.
-	err := Publish(ctx, pub, j, a)
+	err := Publish(ctx, pub, j, a, rawTx)
 	if err == nil {
 		t.Fatal("a second publish was accepted. The run is in publishing, which " +
 			"is the state that refuses an abort — it must not also be a state a " +

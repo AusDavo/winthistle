@@ -86,6 +86,29 @@ func TestTheArmingRecoveryScreenSaysTheAbortIsFree(t *testing.T) {
 	mustNotContain(t, got, "Abandon")
 }
 
+// The mirror of the one above, and the reason it exists.
+//
+// Before the inversion a run in signing had verified every stream and reached
+// chan_pending on none of them, so this screen said the abort was free and
+// shim_cancel was the whole of it. Now signing is the state *after* the gate:
+// every channel is at chan_pending, so the abort is n abandons with LND's blunt
+// flag on each. The old copy would have told an operator a teardown costs nothing
+// at the moment it costs each peer a pending-channel slot for 2016 blocks, which
+// is the kind of wrong that gets acted on.
+func TestTheSigningRecoveryScreenDoesNotCallTheAbortFree(t *testing.T) {
+	got := Recovery(run(journal.StateSigning,
+		channel(journal.ChanPending, true),
+		channel(journal.ChanPending, true)), time.Now())
+
+	mustContain(t, got, "Abandon")
+	mustContain(t, got, "2016 blocks")
+	// The two facts that make the state legible: the gate closed before anything
+	// was asked of a wallet, and nothing went out.
+	mustContain(t, got, "already recoverable")
+	mustContain(t, got, "Nothing was broadcast")
+	mustNotContain(t, got, "cancellable for free")
+}
+
 // The blunt-flag prompt is the only place a human authorises something that
 // could lose funds if the premise were wrong. It has to say what the premise is
 // and what already checked it.
@@ -383,6 +406,9 @@ func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 	screens := map[string]string{
 		"arming": Recovery(run(journal.StateArming, channel(journal.ChanShimRegistered, false)), time.Now()),
 		"armed":  Recovery(run(journal.StateArmed, channel(journal.ChanPending, true)), time.Now()),
+		// Post-gate, and the longest of the pre-publish paragraphs, which is why
+		// it is measured rather than assumed to fit alongside the other two.
+		"signing": Recovery(run(journal.StateSigning, channel(journal.ChanPending, true)), time.Now()),
 		"published": Recovery(run(journal.StatePublished,
 			channel(journal.ChanPending, true)), time.Now()),
 		"half-aborted": Recovery(halfAborted(12), time.Now()),

@@ -30,21 +30,22 @@
 //     was made against the planned channel list; the streams are what actually
 //     opened, and a finding is about a particular count of announced channels.
 //   - the journal, at the publish call. arm.Publish will not accept anything
-//     but an *arm.Armed, and journal.MarkPublishing refuses a run the journal
-//     does not call armed. Neither is this package's to grant.
+//     but an *arm.Armed, and journal.MarkPublishing refuses a run whose channels
+//     are not all at chan_pending — it counts them itself. Neither is this
+//     package's to grant.
 //
 // # --stop-before-publish is not a second code path
 //
-// The mainnet cold probe runs the production flow and stops before step 9. I-1
+// The mainnet cold probe runs the production flow and stops before step 8. I-1
 // says the gate must be unreachable, so the probe cannot be a separate,
 // gentler route through the same steps: it is this route, with the last call
-// withheld. Concretely, everything up to and including arm.Finalize is
-// unconditional, and the flag is read once, after the batch is armed and the
-// backups are in hand, at the only if-statement in the sequence:
+// withheld. Concretely, everything up to and including the signing round is
+// unconditional, and the flag is read once, after the batch is armed and signed,
+// at the only if-statement in the sequence:
 //
-//	armed, err := arm.Finalize(...)     // steps 7 and 8, always
-//	if o.StopBeforePublish { ... }      // the call not made
-//	err = arm.Publish(...)              // step 9
+//	armed, final, err := armWindow(...)  // steps 2 to 7, always
+//	if o.StopBeforePublish { ... }       // the call not made
+//	err = arm.Publish(...)               // step 8
 //
 // What differs afterwards is not a code path but a fact: nothing was published,
 // so the run terminates through the abort path, which is what the probe is for.
@@ -221,7 +222,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return res, err
 	}
 
-	armed, err := armWindow(ctx, d, o, p, res)
+	armed, final, err := armWindow(ctx, d, o, p, res)
 	if err != nil {
 		// Nothing has been broadcast — that is what the armed window is defined
 		// by — so the answer is always the same, and it is taken rather than
@@ -257,7 +258,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return res, nil
 	}
 
-	if err := arm.Publish(ctx, d.LND.WalletKit, d.Journal, armed); err != nil {
+	if err := arm.Publish(ctx, d.LND.WalletKit, d.Journal, armed, final.RawTx); err != nil {
 		// Deliberately no abort here, and no attempt to decide whether the
 		// transaction went out. journal.MarkPublishing lands before the RPC, so
 		// this run is now in a state Run.AbortTarget refuses — abandoning a
@@ -465,10 +466,15 @@ func waitForPeers(ctx context.Context, d Deps, probes []peers.Probe) error {
 	}
 }
 
-// armWindow is steps 2 to 8. From arm.Open onwards there are n peers holding
+// armWindow is steps 2 to 7. From arm.Open onwards there are n peers holding
 // reservations and n clocks running.
+//
+// It returns the armed batch *and* the signed transaction, because after the
+// inversion those are two separate things produced at two separate times: the
+// batch is armed in step 6 over an unsigned transaction, and the bytes to
+// broadcast arrive in step 7 from something that is not this program.
 func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result) (
-	*arm.Armed, error) {
+	*arm.Armed, *combine.Finalized, error) {
 
 	section(d.Out, "Phase 1 — the armed window")
 
@@ -483,11 +489,11 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		// streams, so they go on disk before anything else happens — including
 		// before this function decides whether Open failed.
 		if jerr := d.Journal.Begin(ctx, o.RunID, streams.NewChannels()); jerr != nil {
-			return nil, fmt.Errorf("journalling the run: %w", jerr)
+			return nil, nil, fmt.Errorf("journalling the run: %w", jerr)
 		}
 	}
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	fmt.Fprintf(d.Out, "%d funding stream%s open, and the peers' ten minutes "+
 		"start now.\n", len(streams.All), prose.Plural(len(streams.All)))
@@ -495,7 +501,7 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	// The Phase 0 finding was about the batch the operator approved. These are
 	// the streams that actually opened.
 	if err := p.finding.StillApplies(streams.Batch()); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	batchPlan, err := streams.Plan(arm.Blueprint{
@@ -511,7 +517,7 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("assembling the plan: %w", err)
+		return nil, nil, fmt.Errorf("assembling the plan: %w", err)
 	}
 	section(d.Out, "The batch plan")
 	fmt.Fprint(d.Out, batchPlan.Document())
@@ -529,66 +535,91 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		MinConfirmations: o.Config.Limits.MinConfirmations(),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("building the batch transaction: %w", err)
+		return nil, nil, fmt.Errorf("building the batch transaction: %w", err)
 	}
 	if err := d.Journal.RecordLocks(ctx, o.RunID, built.Inputs); err != nil {
-		return nil, fmt.Errorf("journalling Core's coin locks: %w", err)
+		return nil, nil, fmt.Errorf("journalling Core's coin locks: %w", err)
 	}
 
 	// Ours first. LND's psbt_verify finds its own funding output and stops, so
 	// an output nobody named passes all n of its checks.
 	v, err := batchPlan.Verify(built.Raw)
 	if err != nil {
-		return nil, fmt.Errorf("verifying the transaction Core built: %w", err)
+		return nil, nil, fmt.Errorf("verifying the transaction Core built: %w", err)
 	}
 	fmt.Fprint(d.Out, v.Report())
 	if !v.OK() {
-		return nil, errors.New("the transaction does not match the plan")
+		return nil, nil, errors.New("the transaction does not match the plan")
 	}
 
-	// Then LND's, for every stream, before anything is signed or finalized.
-	if err := arm.Verify(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, built.Raw); err != nil {
-		return nil, err
+	// Then LND's, for every stream, with skip_finalize. Nothing is signed.
+	verified, err := arm.Verify(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, built.Raw)
+	if err != nil {
+		return nil, nil, err
 	}
 	fmt.Fprintf(d.Out, "\n%s", prose.Para(fmt.Sprintf("psbt_verify: all %d "+
-		"channels. LND has committed to the funding outpoints, and from here only "+
-		"signatures may be added.", len(streams.All))))
+		"channels, with skip_finalize. LND has committed to the funding outpoints "+
+		"of %s, and from here only signatures may be added.",
+		len(streams.All), verified.TxID)))
+
+	// Step 6, and it is the gate. Every channel becomes recoverable by
+	// force-close here, over a transaction nobody has signed.
+	armed, err := arm.Receipts(ctx, d.LND.Lightning, d.Journal, streams, verified)
+	if err != nil {
+		return nil, nil, err
+	}
+	fmt.Fprintf(d.Out, "\n%s", prose.Para(fmt.Sprintf("%d of %d channels reached "+
+		"chan_pending, with nothing signed. Every one of them is recoverable by "+
+		"force-close, the peers' ten minutes are no longer running, and nothing "+
+		"has been broadcast.", len(armed.Channels), len(streams.All))))
+
+	// Written before the round rather than after it, so a crash mid-signing is
+	// legible as one. The journal refuses this unless the batch is armed.
+	if err := d.Journal.MarkSigning(ctx, o.RunID); err != nil {
+		return nil, nil, fmt.Errorf("journalling the start of the signing round: %w", err)
+	}
 
 	parts, err := sign(ctx, d, o, built)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	final, recheck, err := combine.Complete(batchPlan, built.Raw, parts)
 	if err != nil {
-		return nil, fmt.Errorf("combining and finalizing in-app: %w", err)
+		return nil, nil, fmt.Errorf("combining and finalizing in-app: %w", err)
 	}
 	if !recheck.OK() {
 		fmt.Fprint(d.Out, recheck.Report())
-		return nil, errors.New("the finalized transaction does not match the plan")
+		return nil, nil, errors.New("the finalized transaction does not match the plan")
 	}
-	if final.TxID != built.TxID {
-		return nil, fmt.Errorf("I-3: the txid moved from %s to %s while it was "+
-			"being signed", built.TxID, final.TxID)
+	if final.TxID != verified.TxID {
+		return nil, nil, fmt.Errorf("I-3: the txid moved from %s to %s while it was "+
+			"being signed", verified.TxID, final.TxID)
 	}
 
 	// The only pre-flight there is, and specifically not a broadcast.
 	ok, why, _, err := d.Node.TestMempoolAccept(ctx, hex.EncodeToString(final.RawTx))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if !ok {
-		return nil, fmt.Errorf("testmempoolaccept would refuse this transaction: %s", why)
+		return nil, nil, fmt.Errorf("testmempoolaccept would refuse this transaction: %s", why)
 	}
 	fmt.Fprintf(d.Out, "testmempoolaccept: allowed. %s in fees, %d vB, %.2f sat/vB.\n",
 		prose.Sats(final.FeeSat), final.Vsize,
 		float64(final.FeeSat)/float64(final.Vsize))
 
-	return arm.Finalize(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, final)
+	return armed, final, nil
 }
 
 // sign is the signing round: the one part of the armed window whose duration
 // belongs to the operator and the devices, and the one the rehearsal measured.
+//
+// After the inversion it runs with the gate already open. Every channel reached
+// chan_pending before this function is called, so a slow round no longer risks
+// the batch — clock A has stopped and there is nothing left inside it. What a
+// slow round costs now is time against clock B, which is 2016 blocks rather than
+// ten minutes.
 func sign(ctx context.Context, d Deps, o Options, built coldwallet.Built) ([]combine.Part, error) {
 	section(d.Out, "The signing round")
 	devices := d.Signers.Round("batch")
@@ -627,9 +658,9 @@ func sign(ctx context.Context, d Deps, o Options, built coldwallet.Built) ([]com
 	elapsed := time.Since(started)
 	if elapsed > o.Config.Limits.AbortAfterSigning {
 		fmt.Fprint(d.Out, prose.Para(fmt.Sprintf("That round took %s, past the %s "+
-			"gate the rehearsal was measured against. Nothing is published and "+
-			"nothing is at risk, but the peers' windows may lapse before the batch "+
-			"is armed — if they do, the cost is one more signing round.",
+			"gate the rehearsal was measured against. The batch was already armed "+
+			"before this round started, so nothing lapsed and nothing is at risk — "+
+			"the gate is now a measurement rather than a deadline.",
 			elapsed.Round(time.Second), o.Config.Limits.AbortAfterSigning)))
 	}
 	return parts, nil
@@ -663,7 +694,7 @@ func settlePhase(ctx context.Context, d Deps, o Options, armed *arm.Armed,
 
 // members pairs each published channel with the policy chosen for it.
 //
-// By index, and that is sound rather than convenient: arm.Finalize appends one
+// By index, and that is sound rather than convenient: arm.Receipts appends one
 // channel point per stream in Streams.All order, and Streams.All is in the
 // order arm.Open was given the channels, which is the batch file's order.
 func members(armed *arm.Armed, p *prepared, o Options) []settle.Member {

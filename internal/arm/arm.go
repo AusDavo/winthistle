@@ -1,13 +1,36 @@
 // Package arm is the armed window: steps 2 through 9 of the sequence, and the
 // only place in this repo that can broadcast a transaction.
 //
-// Everything before it is repeatable and free. Phase 0 chose the peers, the
-// amounts, the coin set and the fee rate, checked the anchor reserve, and set
-// the cold wallet up; none of that opens a funding stream and none of it costs
-// anything to redo. From Open onwards there are n peers holding reservations and
-// n clocks running, and from the first Finalize onwards there are peers holding
-// commitment signatures against outpoints in a transaction only this process
-// has.
+// Everything before it is repeatable and free. Phase 0 chose the peers and the
+// amounts and checked the anchor reserve; none of that opens a funding stream and
+// none of it costs anything to redo. From Open onwards there are n peers holding
+// reservations and n clocks running, and from the first Verify onwards there are
+// peers storing commitment signatures against outpoints in a transaction nobody
+// has signed yet.
+//
+// # The inversion
+//
+// This package used to sign inside the peers' ten minutes and collect the
+// receipts afterwards. It now does the opposite, and that is the whole point:
+//
+//	5  psbt_verify with skip_finalize, all n     ← LND pins the outpoints
+//	6  n × chan_pending                          ← GATE OPEN, nothing signed
+//	7  sign, with no clock A running
+//	8  publish once, if the txid did not move
+//
+// What makes it possible is one line of LND. PsbtIntent.Verify ends
+// (chanfunding/psbt_assembler.go:290-304) with, when !shouldPublish &&
+// skipFinalize, i.FinalTX = packet.UnsignedTx, i.State = PsbtFinalized and
+// close(i.PsbtReady) — so the funding flow continues from the *unsigned*
+// transaction, CompileFundingTx sets the outpoint in stone from it, and
+// chan_pending arrives with nothing signed. Proved on regtest at n = 2:
+// TestSkipFinalizeReachesChanPendingWithNothingSigned.
+//
+// A consequence, not a detail: after a skip_finalize verify there is no
+// psbt_finalize to make. Both of LND's finalize entry points require
+// PsbtVerified and the state is already PsbtFinalized, so the call would return
+// "invalid state. got finalized expected verified". Receipts reads the stream;
+// it does not step the machine.
 //
 // # The gate
 //
@@ -15,42 +38,52 @@
 // enforce it here, and they are deliberately not the same thing said three times.
 //
 //  1. no_publish is set on every stream, in Open, with no way to unset it. That
-//     is what stops LND broadcasting on its own at psbt_finalize — NoFundingTxBit
-//     clears ChanType.HasFundingTx(), which is the condition gating the broadcast
-//     block in funderProcessFundingSigned, between CompleteReservation and the
-//     chan_pending emission.
-//  2. Publish will not accept anything but an *Armed, and Armed cannot be
-//     constructed outside this package with a transaction in it: the raw bytes
-//     live in an unexported field that only Finalize fills. So "there is no path
-//     to the publish call that skips the gate" is a fact about the type system
-//     rather than a convention.
-//  3. The journal refuses. MarkPublishing declines a run that is not armed, and
-//     it is the journal that decides whether a run is armed — MarkPending counts
-//     its own rows. No caller gets a vote, including this package.
+//     is what stops LND broadcasting on its own — NoFundingTxBit clears
+//     ChanType.HasFundingTx(), which is the condition gating the broadcast block
+//     in funderProcessFundingSigned, between CompleteReservation and the
+//     chan_pending emission. It is also what makes skip_finalize legal at all:
+//     PsbtFundingVerify refuses "skip_finalize for channel that did not set
+//     no_publish" (lnwallet/wallet.go:764). Verify asserts the flag on its own
+//     side rather than relying on that refusal.
+//
+//  2. Publish will not accept anything but an *Armed, and an Armed carrying a
+//     batch cannot be constructed outside this package: its receipts live in an
+//     unexported map that only Receipts fills, one entry per chan_pending it
+//     actually read. So "there is no path to the publish call that skips the
+//     gate" is a fact about the type system rather than a convention.
+//
+//     This used to be the raw transaction, which was unforgeable for the same
+//     reason. After the inversion the transaction arrives at the publish call
+//     from outside — it was signed in step 7, by something that is not this
+//     program — so the unforgeable thing has to be the receipts. Publish
+//     re-derives the txid from the bytes it is handed and refuses any that do
+//     not hash to the pinned one (I-3).
+//
+//  3. The journal refuses. MarkPublishing declines a run whose channels are not
+//     all pending, and it is the journal that counts them. No caller gets a
+//     vote, including this package.
 //
 // The third is the one that would still hold if this package were wrong.
 //
 // # What LND does not check, and therefore what we must
 //
-// It is tempting to read psbt_finalize as a second opinion on I-3. It is not.
-// PsbtIntent.FinalizeRawTX compares the outputs with psbt.VerifyOutputsEqual and
-// the input *previous outpoints* with psbt.VerifyInputPrevOutpointsEqual, and
-// stops there — "the fields in the PSBT part are allowed to change". Sequence
-// numbers, version and locktime live in the wire transaction rather than in the
-// PSBT part, and none of them is compared. Then CompileFundingTx takes the
-// channel point from i.FinalTX.TxHash(), the transaction we just handed it.
+// LND's own txid check is narrower than it sounds, and after the inversion it is
+// not in the path at all. PsbtIntent.FinalizeRawTX compares the outputs with
+// psbt.VerifyOutputsEqual and the input *previous outpoints* with
+// psbt.VerifyInputPrevOutpointsEqual, and stops there — "the fields in the PSBT
+// part are allowed to change". Sequence numbers, version and locktime live in
+// the wire transaction rather than in the PSBT part, and each moves the txid. We
+// no longer call it, so it is not even a second opinion: I-3 is ours alone, and
+// it is checked twice — internal/combine refuses a returned packet whose unsigned
+// txid moved, and Publish refuses bytes that do not hash to the txid LND pinned.
 //
-// So a returned transaction with different sequence numbers has a different txid
-// and LND would adopt it — including a transaction that is BIP-125 replaceable,
-// which is precisely what I-4 exists to prevent. Nor does LND check the
-// signatures: verifyInputsSigned only asserts that each input has *something*
-// attached. Both gaps are closed before LND is asked: internal/combine refuses a
-// returned packet whose unsigned txid moved and executes every witness against
-// its own script, and internal/plan refuses any input below sequence 0xfffffffe.
-// This package's job is to call them in the right order.
+// This is also why every input must be segwit. LND enforces it in Verify —
+// verifyAllInputsSegWit, called with "risk of malleability" — and it is what
+// makes an unsigned transaction's txid the final one.
 package arm
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"errors"
@@ -59,12 +92,12 @@ import (
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/coldwallet"
-	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/policy"
 	"github.com/AusDavo/winthistle/internal/reserve"
+	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"google.golang.org/grpc"
@@ -135,6 +168,19 @@ type Stream struct {
 	// a channel that never opens.
 	FundingAddress string
 	FundingAmount  int64
+
+	// noPublish records that this stream's shim set no_publish, which open does
+	// unconditionally. Verify refuses to send skip_finalize for a stream that
+	// does not have it.
+	//
+	// LND refuses the pair itself — PsbtFundingVerify checks skipFinalize &&
+	// ShouldPublishFundingTX() before it touches the intent — so this is a second
+	// statement of the same rule, on our side of the wire. It is worth having
+	// because it is the combination that would be dangerous: skip_finalize
+	// without no_publish would ask LND to arm a channel and broadcast, and the
+	// only reason that cannot happen today is a check in somebody else's
+	// codebase. If a parameter ever reaches Open, this refuses before the RPC.
+	noPublish bool
 
 	cancel context.CancelFunc
 	recv   lnrpc.Lightning_OpenChannelClient
@@ -422,171 +468,255 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 		Policy:         c.Policy,
 		FundingAddress: fund.GetFundingAddress(),
 		FundingAmount:  fund.GetFundingAmount(),
+		noPublish:      true,
 		cancel:         cancel,
 		recv:           recv,
 	}, nil
 }
 
-// Verify is step 5: show the unsigned transaction to every stream in the batch.
+// Verified is what step 5 produced: LND has pinned one funding outpoint per
+// stream, out of an unsigned transaction.
 //
-// Every one of them, and all of them before anything is finalized. That
-// ordering is not caution, it is what makes the batch possible: PsbtIntent.Verify
-// locates its own output with psbt.TxOutsEqual and never asserts that its output
-// is the only one, so n streams can each verify the same n-output transaction and
-// each commits to the same unsigned TXID.
+// It is the input to Receipts and it carries the outpoints the receipts will be
+// checked against. Holding one means the batch is committed in LND and not yet
+// committed anywhere else: no peer has answered, nothing is signed, and every
+// stream is still cancellable.
+type Verified struct {
+	RunID string
+
+	// TxID is the unsigned transaction's txid, which is the final one — every
+	// input is segwit, so witnesses cannot move it. This is the value LND
+	// committed to and the one I-3 pins.
+	TxID string
+
+	// outpoints is what each stream's funding address resolves to in that
+	// transaction, keyed by pending channel id. Unexported because it is
+	// evidence rather than data: Receipts checks each chan_pending against it,
+	// and a Verified assembled elsewhere would have nothing to check with.
+	outpoints map[lnd.PendingChanID]lnd.ChannelPoint
+}
+
+// Verify is step 5: show the unsigned transaction to every stream in the batch,
+// with skip_finalize, and let LND pin the funding outpoints.
 //
-// A refusal here costs nothing. Nothing has been signed, nothing has been
-// finalized, and shim_cancel still works after a successful psbt_verify — so a
-// batch that fails at this step is re-armable for the price of one signing round.
+// Every one of them, and all of them before any receipt is read. That ordering
+// is not caution, it is what makes the batch possible: PsbtIntent.Verify locates
+// its own output with psbt.TxOutsEqual and never asserts that its output is the
+// only one, so n streams can each verify the same n-output transaction and each
+// commits to the same unsigned TXID.
+//
+// # What skip_finalize does here
+//
+// It ends the flow rather than pausing it. With no_publish set — which Open sets
+// unconditionally — PsbtIntent.Verify assigns i.FinalTX = packet.UnsignedTx, sets
+// PsbtFinalized and closes PsbtReady, so the funding manager continues straight
+// on to funding_created and the peer's funding_signed. Every one of these calls
+// therefore *starts* a channel: there is no psbt_finalize to make afterwards, and
+// making one would be refused with "invalid state. got finalized expected
+// verified".
+//
+// So the txid goes into the journal before the first call, not after the last.
+// From that call onwards a peer may be storing a commitment signature against
+// these outpoints, and a run that loses the txid loses the only handle on what it
+// committed to.
+//
+// # What a refusal costs
+//
+// Little, and the same little for every channel. Nothing is signed, nothing is
+// broadcast, and a stream whose verify was refused is untouched — LND checks the
+// skip_finalize/no_publish pair before it advances the intent, so even that
+// refusal leaves a shim that shim_cancel still releases. A batch that fails here
+// is re-armable, and the price is a rebuild in Sparrow rather than a signing
+// round.
+//
 // It is also the step that can be refused for a reason that has nothing to do
 // with the transaction: psbt_verify runs enforceNewReservedValue over the node's
-// own hot wallet afterwards. internal/reserve predicts that before the cold
-// wallet is brought out.
+// own hot wallet. internal/reserve predicts that in Phase 0.
 //
-// Each success is journalled as it happens, and the journal moves the run to
-// signing once the last one lands. That is what makes a crash here legible: a
-// channel recorded as verified is one LND has committed an outpoint for, and a
-// channel still recorded as shim_registered is one that can be cancelled for
-// free — which is exactly the split abort.Target needs.
+// Each success is journalled as it happens. That is what makes a crash here
+// legible: a channel recorded as verified is one LND has committed an outpoint
+// for, and a channel still recorded as shim_registered is one that can be
+// cancelled for free — which is exactly the split abort.Target needs.
 func Verify(ctx context.Context, cli Client, j *journal.Journal, runID string,
-	s *Streams, psbtRaw []byte) error {
+	s *Streams, psbtRaw []byte) (*Verified, error) {
 
 	if len(psbtRaw) == 0 {
-		return fmt.Errorf("nothing to verify")
+		return nil, fmt.Errorf("nothing to verify")
 	}
+	if len(s.All) == 0 {
+		return nil, fmt.Errorf("no streams to verify against")
+	}
+
+	packet, err := psbt.NewFromRawBytes(bytes.NewReader(psbtRaw), false)
+	if err != nil {
+		return nil, fmt.Errorf("the transaction to verify does not parse as a PSBT: %w", err)
+	}
+	if err := packet.SanityCheck(); err != nil {
+		return nil, fmt.Errorf("the transaction to verify is a malformed PSBT: %w", err)
+	}
+	txid := packet.UnsignedTx.TxHash().String()
+
+	// Resolved before the first RPC, so a transaction that does not pay one of
+	// the streams is refused while every stream is still free to cancel.
+	expected, err := s.outpoints(packet.UnsignedTx, txid)
+	if err != nil {
+		return nil, err
+	}
+
+	// Before the first psbt_verify, because the first psbt_verify is what starts
+	// a peer storing a commitment signature against these outpoints.
+	if err := j.RecordPinnedTxID(ctx, runID, txid); err != nil {
+		return nil, fmt.Errorf("journalling the txid LND is about to pin: %w", err)
+	}
+
 	for _, st := range s.All {
+		// I-1, on our side of the wire. LND refuses this pair itself; asserting
+		// it here means a parameter that ever reaches Open cannot turn this into
+		// a request to arm a channel and broadcast it.
+		if !st.noPublish {
+			return nil, fmt.Errorf("the stream to %s (%s) did not set no_publish, "+
+				"and skip_finalize without it asks LND to broadcast the funding "+
+				"transaction itself. That breaches I-1 and this call will not make it",
+				short(st.Peer), st.PendingChanID)
+		}
 		_, err := cli.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
 			Trigger: &lnrpc.FundingTransitionMsg_PsbtVerify{
 				PsbtVerify: &lnrpc.FundingPsbtVerify{
 					PendingChanId: st.PendingChanID.Bytes(),
 					// LND parses raw bytes, not base64.
 					FundedPsbt: psbtRaw,
+					// The inversion. Safe only with no_publish, asserted above.
+					SkipFinalize: true,
 				},
 			},
 		})
 		if err != nil {
-			return fmt.Errorf("psbt_verify for the channel to %s (%s): %w",
+			return nil, fmt.Errorf("psbt_verify for the channel to %s (%s): %w",
 				short(st.Peer), st.PendingChanID, err)
 		}
 		if err := j.MarkVerified(ctx, runID, st.PendingChanID); err != nil {
-			return fmt.Errorf("journalling psbt_verify for %s: %w", st.PendingChanID, err)
+			return nil, fmt.Errorf("journalling psbt_verify for %s: %w", st.PendingChanID, err)
 		}
 	}
-	return nil
+	return &Verified{RunID: runID, TxID: txid, outpoints: expected}, nil
 }
 
 // Armed is the receipt that every channel in the batch is recoverable by
 // force-close, and the only thing Publish will accept.
 //
-// It cannot usefully be constructed outside this package: RawTx is unexported and
-// only Finalize sets it. That is I-1 in the type system — not a rule the publish
-// path remembers to check, but a value it cannot be called without.
+// It cannot usefully be constructed outside this package: receipts is unexported
+// and only Receipts fills it, one entry per chan_pending actually read. That is
+// I-1 in the type system — not a rule the publish path remembers to check, but a
+// value it cannot be called without.
 type Armed struct {
 	RunID string
 
 	// TxID and Channels are what the journal now holds: one transaction, n
-	// funding outpoints in it.
+	// funding outpoints in it. The transaction is unsigned at this point; the
+	// txid is final anyway.
 	TxID     string
 	Channels []lnd.ChannelPoint
 
-	// Backup is step 8's export, taken before the transaction reaches anyone's
+	// Backup is the export taken before the transaction reaches anyone's
 	// mempool. It is what recovers these channels if this node's channel
 	// database is lost, and the commitment signature it depends on lives in that
 	// database rather than in the protocol.
 	Backup *lnrpc.ChanBackupSnapshot
 
-	// rawTx is the transaction to broadcast. Unexported so that the only way to
-	// hold a publishable Armed is to have been through Finalize.
-	rawTx []byte
+	// receipts is one chan_pending per member of the batch, keyed by pending
+	// channel id, as Receipts read and journalled them. Unexported so that the
+	// only way to hold an Armed the gate agrees with is to have been through
+	// Receipts.
+	receipts map[lnd.PendingChanID]lnd.ChannelPoint
 }
 
 var (
-	// ErrReceiptMissing means a channel was finalized and no chan_pending
-	// arrived, and PendingChannels does not show it either. The batch is neither
-	// armed nor clean, and it must not be published.
-	ErrReceiptMissing = errors.New("a finalized channel produced no chan_pending")
+	// ErrReceiptMissing means a verified channel produced no chan_pending and
+	// PendingChannels does not show it either. The batch is neither armed nor
+	// clean, and it must not be published.
+	ErrReceiptMissing = errors.New("a verified channel produced no chan_pending")
 
 	// ErrOutpointMoved means LND's chan_pending named a different outpoint from
 	// the one the funding address resolves to in the transaction.
 	ErrOutpointMoved = errors.New("lnd reported a funding outpoint this transaction does not contain")
 )
 
-// Finalize is steps 7 and 8: finalize all n channels, collect all n
-// chan_pending, and export the channel backups.
+// Receipts is step 6, and it is the gate: collect all n chan_pending, then
+// export the channel backups.
 //
-// The order inside it is the part worth reading.
+// Nothing is sent to LND here. After a skip_finalize verify the funding flow is
+// already running on its own — LND has the unsigned transaction, has sent
+// funding_created, and is waiting on each peer's funding_signed — so this call
+// reads n streams and writes n journal rows. The receipt buffer is what makes
+// that safe to do after all n verifies rather than one at a time: LND gives each
+// stream a buffer of two updates and this flow produces exactly two, psbt_fund
+// (read in Open) and chan_pending. There is room for the receipt and no room for
+// anything else, which is why nothing may be added to the flow without moving
+// this read earlier.
 //
-// The finalized transaction goes into the journal *first*, before the first
-// psbt_finalize. From the moment LND is handed this transaction the peers begin
-// storing commitment signatures against its outpoints, and because no_publish
-// also gates rebroadcastFundingTx we own rebroadcast — so losing the bytes after
-// that point is the worst outcome available.
-//
-// Then one channel at a time: finalize, wait for its receipt, record it. Issuing
-// every finalize first and collecting afterwards would be marginally faster and
-// would leave up to n channels in the state "LND has the transaction and we do
-// not know whether it armed". Sequentially there is at most one, and this call
-// says which.
-//
-// The receipt is checked against the outpoint the funding address resolves to in
+// Each receipt is checked against the outpoint the funding address resolves to in
 // the transaction, rather than believed. That costs nothing and it is the only
-// independent confirmation available that LND put the channel where the plan
-// says it is.
-func Finalize(ctx context.Context, cli Client, j *journal.Journal, runID string,
-	s *Streams, f *combine.Finalized) (*Armed, error) {
+// independent confirmation available that LND put the channel where the plan says
+// it is.
+//
+// When this returns, every channel in the batch is recoverable by force-close and
+// nothing has been signed. Clock A has stopped and clock B — 2016 blocks from
+// broadcast — has not started, because there is nothing to broadcast yet.
+func Receipts(ctx context.Context, cli Client, j *journal.Journal, s *Streams,
+	v *Verified) (*Armed, error) {
 
-	if f == nil || len(f.RawTx) == 0 {
-		return nil, fmt.Errorf("nothing to finalize with")
+	if v == nil || len(v.outpoints) == 0 {
+		return nil, fmt.Errorf("nothing verified to collect receipts for")
 	}
 	if len(s.All) == 0 {
-		return nil, fmt.Errorf("no streams to finalize")
+		return nil, fmt.Errorf("no streams to read receipts from")
 	}
 
-	expected, err := s.outpoints(f.Tx, f.TxID)
-	if err != nil {
-		return nil, err
+	armed := &Armed{
+		RunID: v.RunID, TxID: v.TxID,
+		receipts: make(map[lnd.PendingChanID]lnd.ChannelPoint, len(s.All)),
 	}
-
-	if err := j.RecordFinalizedTx(ctx, runID, f.TxID, hex.EncodeToString(f.RawTx)); err != nil {
-		return nil, fmt.Errorf("journalling the finalized transaction before "+
-			"handing it to LND: %w", err)
-	}
-
-	armed := &Armed{RunID: runID, TxID: f.TxID, rawTx: f.RawTx}
 	for _, st := range s.All {
-		cp, err := finalizeOne(ctx, cli, st, f.RawTx, expected[st.PendingChanID])
+		want, ok := v.outpoints[st.PendingChanID]
+		if !ok {
+			return nil, fmt.Errorf("no verified outpoint for the channel to %s (%s), "+
+				"so its receipt cannot be checked against anything",
+				short(st.Peer), st.PendingChanID)
+		}
+		cp, err := receiptFor(ctx, cli, st, want)
 		if err != nil {
 			return nil, err
 		}
-		if err := j.MarkPending(ctx, runID, st.PendingChanID, cp); err != nil {
+		if err := j.MarkPending(ctx, v.RunID, st.PendingChanID, cp); err != nil {
 			return nil, fmt.Errorf("journalling chan_pending for the channel to %s "+
 				"(%s at %s): %w", short(st.Peer), st.PendingChanID, cp, err)
 		}
 		armed.Channels = append(armed.Channels, cp)
+		armed.receipts[st.PendingChanID] = cp
 	}
 
 	// The journal flipped the run to armed itself when the last row landed. Read
 	// it back rather than assuming: MarkPending counts, and this is the assertion
 	// that the count came out right.
-	run, err := j.Load(ctx, runID)
+	run, err := j.Load(ctx, v.RunID)
 	if err != nil {
 		return nil, fmt.Errorf("reading back run %s to confirm the batch is armed: %w",
-			runID, err)
+			v.RunID, err)
 	}
 	if run.State != journal.StateArmed {
-		return nil, fmt.Errorf("run %s reached the end of finalize in state %s "+
+		return nil, fmt.Errorf("run %s reached the end of the receipts in state %s "+
 			"rather than %s, so the batch is not fully armed and %w",
-			runID, run.State, journal.StateArmed, journal.ErrNotArmed)
+			v.RunID, run.State, journal.StateArmed, journal.ErrNotArmed)
 	}
 
-	// Step 8's other half. On pending channels, which is the case that matters:
-	// ExportAllChannelBackups goes through chanbackup.FetchStaticChanBackups
-	// over ChannelStateDB.FetchAllChannels, which is documented as "all open
-	// channels ... including pending open", so a channel that has only just
-	// reached chan_pending is in the snapshot.
+	// The backups, while every channel is pending and before anything is signed.
+	// ExportAllChannelBackups goes through chanbackup.FetchStaticChanBackups over
+	// ChannelStateDB.FetchAllChannels, which is documented as "all open channels
+	// ... including pending open", so a channel that has only just reached
+	// chan_pending is in the snapshot.
 	backup, err := cli.ExportAllChannelBackups(ctx, &lnrpc.ChanBackupExportRequest{})
 	if err != nil {
-		return nil, fmt.Errorf("exporting the channel backups before publishing: %w\n"+
+		return nil, fmt.Errorf("exporting the channel backups: %w\n"+
 			"The batch is armed and nothing has been broadcast, so this is safe to "+
 			"retry — but do not publish without the backups: the commitment "+
 			"signature that makes these channels recoverable lives in this node's "+
@@ -601,32 +731,19 @@ func Finalize(ctx context.Context, cli Client, j *journal.Journal, runID string,
 	return armed, nil
 }
 
-// finalizeOne finalizes one channel and waits for its receipt.
-func finalizeOne(ctx context.Context, cli Client, st *Stream, rawTx []byte,
+// receiptFor waits for one channel's chan_pending.
+func receiptFor(ctx context.Context, cli Client, st *Stream,
 	want lnd.ChannelPoint) (lnd.ChannelPoint, error) {
-
-	_, err := cli.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
-		Trigger: &lnrpc.FundingTransitionMsg_PsbtFinalize{
-			PsbtFinalize: &lnrpc.FundingPsbtFinalize{
-				PendingChanId: st.PendingChanID.Bytes(),
-				FinalRawTx:    rawTx,
-			},
-		},
-	})
-	if err != nil {
-		return lnd.ChannelPoint{}, fmt.Errorf("psbt_finalize for the channel to %s "+
-			"(%s): %w", short(st.Peer), st.PendingChanID, err)
-	}
 
 	upd, err := st.recv.Recv()
 	if err != nil {
-		// The finalize succeeded and the receipt did not arrive. LND may or may
+		// The verify succeeded and the receipt did not arrive. LND may or may
 		// not have completed the reservation, and the difference decides whether
 		// this channel needs cancelling or abandoning — so ask, rather than guess.
 		cp, pending, lookupErr := isPending(ctx, cli, want)
 		switch {
 		case lookupErr != nil:
-			return lnd.ChannelPoint{}, fmt.Errorf("psbt_finalize for %s succeeded, "+
+			return lnd.ChannelPoint{}, fmt.Errorf("psbt_verify for %s succeeded, "+
 				"its chan_pending did not arrive (%v), and PendingChannels could not "+
 				"be read either (%v). Do not publish: this channel's state is unknown",
 				st.PendingChanID, err, lookupErr)
@@ -683,7 +800,7 @@ func isPending(ctx context.Context, cli Client, cp lnd.ChannelPoint) (
 //
 // This is what makes the chan_pending receipt checkable rather than merely
 // received. It also catches a batch whose transaction does not actually pay one
-// of the streams before that stream is finalized — which internal/plan would
+// of the streams before that stream is verified — which internal/plan would
 // already have refused, so reaching this error means the plan and the
 // transaction disagree about which streams are in the batch.
 func (s *Streams) outpoints(tx *wire.MsgTx, txid string) (

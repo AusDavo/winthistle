@@ -64,6 +64,12 @@ func locks(n int) []bitcoind.Outpoint {
 
 // The whole healthy sequence, in order, with the states the journal is supposed
 // to derive for itself checked at each step.
+//
+// The order is the inversion's: arming through every psbt_verify, armed at n of n
+// chan_pending, signing while the transaction is out with a wallet, then
+// publishing. It used to run arming → signing → armed, because the old sequence
+// signed inside the peers' ten minutes and collected the receipts afterwards.
+// Nothing about the writes changed except which one moves the run and when.
 func TestJournalWalksARunThroughToPublished(t *testing.T) {
 	ctx := context.Background()
 	j := open(t)
@@ -81,21 +87,53 @@ func TestJournalWalksARunThroughToPublished(t *testing.T) {
 		t.Fatalf("RecordLocks: %v", err)
 	}
 
-	// Verifying all but one must NOT move the run on: the state means "every
-	// stream has committed to the outpoint", and two out of three has not.
-	for _, id := range chanIDs[:2] {
+	// The txid is pinned before the first psbt_verify, because that call does not
+	// pause LND's funding flow — it completes it.
+	if err := j.RecordPinnedTxID(ctx, runID, fixtureTxID); err != nil {
+		t.Fatalf("RecordPinnedTxID: %v", err)
+	}
+
+	// Verifying moves no channel's run on any more, at any count. The next thing
+	// that happens to a verified channel is its own chan_pending, arriving over
+	// the unsigned transaction, and until every one of them is in there is no
+	// gate and nothing to say.
+	for _, id := range chanIDs {
 		if err := j.MarkVerified(ctx, runID, id); err != nil {
 			t.Fatalf("MarkVerified: %v", err)
 		}
+		if got := load(t, j, runID).State; got != journal.StateArming {
+			t.Fatalf("run is %s partway through the verifies, want %s",
+				got, journal.StateArming)
+		}
+	}
+
+	// Two of three receipts is exactly the state LND's own "all but the last"
+	// idiom would publish in, and the gate is a count.
+	for i, id := range chanIDs[:2] {
+		cp := lnd.ChannelPoint{TxID: fixtureTxID, Index: uint32(i)}
+		if err := j.MarkPending(ctx, runID, id, cp); err != nil {
+			t.Fatalf("MarkPending: %v", err)
+		}
 	}
 	if got := load(t, j, runID).State; got != journal.StateArming {
-		t.Fatalf("run is %s with one channel unverified, want %s", got, journal.StateArming)
+		t.Fatalf("run is %s with one receipt missing, want %s", got, journal.StateArming)
 	}
-	if err := j.MarkVerified(ctx, runID, chanIDs[2]); err != nil {
-		t.Fatalf("MarkVerified: %v", err)
+	if err := j.MarkPending(ctx, runID, chanIDs[2],
+		lnd.ChannelPoint{TxID: fixtureTxID, Index: 2}); err != nil {
+		t.Fatalf("MarkPending: %v", err)
+	}
+	if got := load(t, j, runID).State; got != journal.StateArmed {
+		t.Fatalf("run is %s with every channel pending, want %s", got, journal.StateArmed)
+	}
+
+	// Only now does anything go out to be signed, and the journal refuses that
+	// write from any state but armed.
+	if err := j.MarkSigning(ctx, runID); err != nil {
+		t.Fatalf("MarkSigning on an armed run: %v", err)
 	}
 	if got := load(t, j, runID).State; got != journal.StateSigning {
-		t.Fatalf("run is %s with every channel verified, want %s", got, journal.StateSigning)
+		t.Fatalf("run is %s after the transaction went out to be signed, want %s",
+			got, journal.StateSigning)
 	}
 
 	for _, s := range []struct {
@@ -111,23 +149,14 @@ func TestJournalWalksARunThroughToPublished(t *testing.T) {
 		}
 	}
 
+	// The bytes exist for the first time here, and they have to hash to the pin.
 	if err := j.RecordFinalizedTx(ctx, runID, fixtureTxID, "0200000000ffffffff"); err != nil {
 		t.Fatalf("RecordFinalizedTx: %v", err)
 	}
 
-	for i, id := range chanIDs {
-		cp := lnd.ChannelPoint{TxID: fixtureTxID, Index: uint32(i)}
-		if err := j.MarkPending(ctx, runID, id, cp); err != nil {
-			t.Fatalf("MarkPending: %v", err)
-		}
-	}
-
 	r := load(t, j, runID)
-	if r.State != journal.StateArmed {
-		t.Fatalf("run is %s with every channel pending, want %s", r.State, journal.StateArmed)
-	}
 	if r.TxID != fixtureTxID || r.RawTx == "" {
-		t.Fatalf("the finalized transaction did not survive: txid=%q raw=%q", r.TxID, r.RawTx)
+		t.Fatalf("the signed transaction did not survive: txid=%q raw=%q", r.TxID, r.RawTx)
 	}
 	if len(r.Channels) != 3 || len(r.Locks) != 2 || len(r.Signers) != 2 {
 		t.Fatalf("run reads back as %d channels, %d locks, %d signers",
@@ -150,7 +179,7 @@ func TestJournalWalksARunThroughToPublished(t *testing.T) {
 	}
 
 	if err := j.MarkPublishing(ctx, runID); err != nil {
-		t.Fatalf("MarkPublishing on an armed run: %v", err)
+		t.Fatalf("MarkPublishing on a signed run: %v", err)
 	}
 	if err := j.MarkPublished(ctx, runID); err != nil {
 		t.Fatalf("MarkPublished: %v", err)

@@ -15,10 +15,14 @@ import (
 
 // Run is one batch as the journal holds it.
 type Run struct {
-	ID        string
-	State     State
-	TxID      string // "" until the transaction is finalized
-	RawTx     string // the finalized transaction, hex; "" until then
+	ID    string
+	State State
+	// TxID is the txid LND pinned, recorded before the first psbt_verify. RawTx
+	// is the signed transaction, hex, and stays "" until the signing round has
+	// happened — which is after the gate, so an armed run with no RawTx is
+	// ordinary rather than broken.
+	TxID      string
+	RawTx     string
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	Channels  []Channel
@@ -163,6 +167,27 @@ func (r *Run) AbortTarget() (abort.Target, error) {
 			t.Channels = append(t.Channels, c.Outpoint)
 
 		case ChanShimRegistered, ChanVerified:
+			// ChanVerified reads differently after the inversion, and the honest
+			// version of the difference is narrow. psbt_verify now carries
+			// skip_finalize, so it does not park the funding flow — it completes
+			// it, and the channel's own chan_pending follows on its own. So a
+			// channel that verified is one whose channel LND has probably
+			// already created.
+			//
+			// Cancelling is still the answer, and this is still right, because
+			// arm.Receipts asks PendingChannels whenever a receipt does not
+			// arrive and journals what it finds. A row left saying verified is
+			// one LND did not list as a pending open when it was asked.
+			//
+			// The exception is a *crashed* process, which died between the
+			// psbt_verify and the receipt and never got to ask. Then the shim
+			// cancel reports AlreadyGone — a success — for a channel that is
+			// actually pending, and the peer keeps its side until clock B runs
+			// out. That window is the same one the pre-inversion sequence had
+			// between psbt_finalize and its receipt, unchanged in kind and in
+			// size, and closing it needs a lookup this function cannot make: it
+			// has no client, and the journal cannot map a pending channel point
+			// back to a pending channel id.
 			t.Shims = append(t.Shims, c.PendingChanID)
 		}
 	}

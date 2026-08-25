@@ -263,6 +263,67 @@ func (e *Env) TryVerify(t *testing.T, s *Stream, psbtB64 string) error {
 	return err
 }
 
+// VerifySkippingFinalize is step 5 as the app now makes it: psbt_verify with
+// skip_finalize, which completes LND's funding flow rather than pausing it.
+//
+// There is no step after it for this stream. LND takes the *unsigned*
+// transaction's outpoint as final, exchanges funding_created and funding_signed
+// with the peer, and emits chan_pending on its own — read it with Receipt. A
+// psbt_finalize afterwards is refused with "invalid state. got finalized expected
+// verified", because the intent is already PsbtFinalized.
+//
+// Verify and Finalize are still here, and still drive the pre-inversion flow.
+// That is deliberate: a fixture whose subject is the abort path only needs a
+// channel at chan_pending, and either route produces one. Use this pair when the
+// ordering itself is what the test is about.
+func (e *Env) VerifySkippingFinalize(t *testing.T, s *Stream, psbtB64 string) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	raw, err := base64.StdEncoding.DecodeString(psbtB64)
+	if err != nil {
+		t.Fatalf("psbt is not base64: %v", err)
+	}
+	if _, err := e.Alice.Lightning.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
+		Trigger: &lnrpc.FundingTransitionMsg_PsbtVerify{
+			PsbtVerify: &lnrpc.FundingPsbtVerify{
+				PendingChanId: s.PendingChanID.Bytes(),
+				FundedPsbt:    raw,
+				SkipFinalize:  true,
+			},
+		},
+	}); err != nil {
+		t.Fatalf("psbt_verify(skip_finalize) for %s: %v", s.PendingChanID, err)
+	}
+}
+
+// Receipt reads one stream's chan_pending, which arrives on its own after a
+// skip_finalize verify.
+//
+// The returned ChannelPoint is the receipt that the channel is recoverable: LND
+// emits chan_pending only after CompleteReservation has stored the peer's
+// commitment signature and WatchNewChannel has handed the outpoint to the
+// ChainArbitrator. Nothing is broadcast, because no_publish cleared
+// ChanType.HasFundingTx() and that is what gates the broadcast block — and
+// because the transaction has no witnesses yet for anyone to broadcast it with.
+func (e *Env) Receipt(t *testing.T, s *Stream) lnd.ChannelPoint {
+	t.Helper()
+	upd, err := s.recv.Recv()
+	if err != nil {
+		t.Fatalf("waiting for chan_pending on %s: %v", s.PendingChanID, err)
+	}
+	pending := upd.GetChanPending()
+	if pending == nil {
+		t.Fatalf("expected chan_pending, got %T", upd.GetUpdate())
+	}
+	cp, err := lnd.ChannelPointFromPending(pending.GetTxid(), pending.GetOutputIndex())
+	if err != nil {
+		t.Fatalf("reading chan_pending outpoint: %v", err)
+	}
+	return cp
+}
+
 // SignAndCombine is step 6, the real one: collect a partial signature from each
 // half of the simulated cold wallet, combine and finalize them in-app, and
 // confirm the mempool would accept the result.

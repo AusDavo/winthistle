@@ -15,9 +15,18 @@ import (
 const fixtureChannelSat = 250_000
 
 // The whole point of the journal, against a real node: a run that stopped in the
-// middle of the window — one channel armed, one stream never finalized, coin
+// middle of the window — one channel armed, one stream never verified, coin
 // locks behind both — is recoverable from its row alone, by a process that has
 // been restarted and holds nothing in memory.
+//
+// The half-armed shape is made differently after the inversion, and the
+// difference is worth reading. It used to be produced by finalizing one stream
+// and not the other: psbt_verify committed an outpoint and stopped, so a verified
+// stream was one that had not started a channel. psbt_verify now carries
+// skip_finalize, which completes LND's funding flow — so verifying a stream *is*
+// starting its channel, and the way to leave one stranded is to not verify it at
+// all. The journal's split does not move: pending is abandoned, everything short
+// of it is cancelled.
 //
 // The journal is closed and reopened before recovery on purpose. Everything the
 // recovery needs has to have been on disk *before* the step it describes, and
@@ -68,35 +77,29 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 		t.Fatalf("RecordLocks: %v", err)
 	}
 
-	// Step 5: both streams commit to the outpoint (I-3).
-	for _, s := range streams {
-		env.Verify(t, s, funded.Base64)
-		if err := j.MarkVerified(ctx, runID, s.PendingChanID); err != nil {
-			t.Fatalf("MarkVerified: %v", err)
-		}
-	}
-	if got := load(t, j, runID).State; got != journal.StateSigning {
-		t.Fatalf("run is %s with both channels verified, want %s", got, journal.StateSigning)
+	// The txid goes on disk before the first psbt_verify, because that call does
+	// not pause LND's funding flow — it completes it, and from there a peer may be
+	// storing a commitment signature against an outpoint of this transaction.
+	txid := funded.TxID
+	if err := j.RecordPinnedTxID(ctx, runID, txid); err != nil {
+		t.Fatalf("RecordPinnedTxID: %v", err)
 	}
 
-	// Step 6, the real one: two halves of the simulated 2-of-2, each returning a
-	// partial signature, combined in-app. SignerPartial is the only success state
-	// there is, and it is named for I-2 — a signer that could return a complete
-	// transaction would be a signer that could publish.
-	for _, label := range regtestenv.ColdSigners() {
-		if err := j.RecordSigner(ctx, runID, label, journal.SignerPartial); err != nil {
-			t.Fatalf("RecordSigner: %v", err)
-		}
+	// Step 5, for one stream only, and then the crash. The other stream never
+	// sees the transaction at all, which is what leaves it cancellable.
+	env.VerifySkippingFinalize(t, armedStream, funded.Base64)
+	if err := j.MarkVerified(ctx, runID, armedStream.PendingChanID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
 	}
-	rawTx, txid := env.SignAndCombine(t, funded)
-	if err := j.RecordFinalizedTx(ctx, runID, txid, rawTx); err != nil {
-		t.Fatalf("RecordFinalizedTx: %v", err)
+	if got := load(t, j, runID).State; got != journal.StateArming {
+		t.Fatalf("run is %s with one channel of two verified, want %s",
+			got, journal.StateArming)
 	}
 
-	// Step 7, and then the crash: one channel reaches chan_pending and the other
-	// never does. The gate stays shut — this is exactly the state that must not
-	// be publishable.
-	cp := env.Finalize(t, armedStream, rawTx)
+	// Step 6 for that stream: its receipt arrives on its own, over a transaction
+	// nobody has signed. The gate stays shut — one of two is exactly the state
+	// that must not be publishable.
+	cp := env.Receipt(t, armedStream)
 	if err := j.MarkPending(ctx, runID, armedStream.PendingChanID, cp); err != nil {
 		t.Fatalf("MarkPending: %v", err)
 	}
@@ -104,7 +107,15 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 		t.Fatalf("funding tx %s reached the mempool — I-1 is broken", txid)
 	}
 	if err := j.MarkPublishing(ctx, runID); err == nil {
-		t.Fatal("the journal allowed a publish with one channel still unfinalized")
+		t.Fatal("the journal allowed a publish with one channel still unverified")
+	}
+	if err := j.MarkSigning(ctx, runID); err == nil {
+		t.Fatal("the journal let a half-armed batch go out to be signed. Nothing " +
+			"is asked of a wallet until every channel is already recoverable")
+	}
+	if r := load(t, j, runID); r.RawTx != "" {
+		t.Fatalf("the journal holds a raw transaction for a run that never signed "+
+			"anything: %q", r.RawTx)
 	}
 	if err := j.Close(); err != nil {
 		t.Fatalf("Close: %v", err)

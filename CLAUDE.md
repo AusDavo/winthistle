@@ -40,8 +40,10 @@ no signing.** That is the whole point of the inversion.
 
 **What is built and exercised against live regtest**, and is the guide to what
 exists: `winthistle setup`, `run`, `bump`, `doctor`, `recover` and `serve` all
-work against the cluster in `regtest/`. `internal/arm` holds the I-1 gate,
-observed at *n* = 3. `internal/combine` has seventeen adversarial tests on
+work against the cluster in `regtest/`. `internal/arm` runs the **inverted**
+sequence — `skip_finalize` at verify, the *n* receipts before anything is signed,
+one publish — and the I-1 gate is observed at *n* = 3 with nothing signed when it
+opens. `internal/combine` has seventeen adversarial tests on
 inbound PSBTs. `internal/plan` has the batch verifier. `winthistle serve` carries
 a loopback bind, a startup token, strict `Origin` and `Host` checks and no CORS,
 and can open a batch, run a setup and a bump, and serve the journal read-only.
@@ -51,20 +53,32 @@ of it should be described as broken.
 **What the replan cuts, and which item deletes it.** Nothing has been deleted
 yet — this is a description of intent, not of the tree:
 
-- **Item 3** changes `internal/arm` to the new sequence: `skip_finalize` at
-  verify, receipts before signing, the journal's reordered states.
+- ~~**Item 3** changes `internal/arm` to the new sequence.~~ **Done, 2026-08-26**
+  — see `docs/replan-2026-08.md`'s "Item 3, as built". `arm.Verify` sends
+  `skip_finalize` on all *n* and pins the txid before the first call;
+  `arm.Receipts` collects the receipts and is the gate; `arm.Finalize` is gone and
+  there is **no `psbt_finalize` call anywhere in this build**; `arm.Publish` takes
+  the signed bytes as a parameter and refuses any whose txid is not the pinned
+  one. The journal runs arming → armed → signing → publishing → published.
 - **Item 4** adds the `--psbt` path to `run` and stops calling `coldwallet`.
   Note `run` today has `--psbt-dir`, which is the file handshake for a signer
   with no command. It is a different flag; do not conflate them.
 
-  **A collision to settle before writing that path.** `internal/combine`
-  survives, and `combine.ErrAlreadyFinalized` (`combine.go:94`) refuses a device
-  that returns a *finalized* input — with I-2 named in the comment and the error
-  text saying "Only partial signatures may leave a signer". Step 7 is "sign in
-  Sparrow", which returns exactly that. **The surviving code refuses the new
-  happy path's own input, citing a dissolved invariant.** Decide it explicitly;
-  do not delete the check silently. The base-packet guard at `combine.go:249` is
-  a different check and should stay.
+  **A collision to settle before writing that path, and item 3 deliberately left
+  it.** `internal/combine` survives, and `combine.ErrAlreadyFinalized`
+  (`combine.go:94`) refuses a device that returns a *finalized* input — with I-2
+  named in the comment and the error text saying "Only partial signatures may
+  leave a signer". Step 7 is "sign in Sparrow", which returns exactly that.
+  **The surviving code refuses the new happy path's own input, citing a dissolved
+  invariant.** Item 3 did not touch it because nothing item 3 built produces a
+  fully signed inbound packet: `arm` never calls `combine.Merge`, and `run`'s
+  signers are still the harness's partial-signature halves. Settling it then
+  would have meant either a check with no caller exercising the new path or
+  deleting one the current happy path relies on. Decide it explicitly here, in
+  the same commit as the `--psbt` path and the package comment; do not delete the
+  check silently. The base-packet guard at `combine.go:249` is a different check
+  and should stay. `journal.SignerPartial`'s doc comment also still names I-2, for
+  the same reason and with the same fix due here.
 - **Item 5** deletes `coldwallet`, `setup` and the `setups` table, `bump`,
   `rehearsal`, `signers`' multi-device round, `server`, `webrun`, `signet/`,
   `doctor`'s Core checks, and `internal/bitcoind` from the application.
@@ -128,7 +142,21 @@ reads that channel with a bare `case nil:` — *"Nil error means the flow contin
 normally now."* `CompileFundingTx` still runs (`lnwallet/wallet.go:1880`) because
 it "sets the actual funding outpoint in stone" (`:1879`), and the unsigned
 transaction suffices: all inputs are segwit, so witnesses do not move the txid.
-LND refuses `skip_finalize` without `no_publish` (`lnwallet/wallet.go:764`).
+LND refuses `skip_finalize` without `no_publish` — `PsbtFundingVerify` checks
+`skipFinalize && ShouldPublishFundingTX()` (`lnwallet/wallet.go:764`) *before* it
+advances the intent, so the refusal is free and the shim still cancels. Confirmed
+on the node, in those words, by
+`TestLNDItselfRefusesSkipFinalizeWithoutNoPublish`. **`arm.Verify` asserts the
+flag on its own side anyway**, because the combination it prevents is a request to
+arm a channel *and* broadcast, and the only other guard for that lives in
+somebody else's codebase.
+
+**There is no `psbt_finalize` call in this build.** A `skip_finalize` verify
+leaves the intent in `PsbtFinalized`, and both of LND's finalize entry points
+require `PsbtVerified`, so the call is refused with "invalid state. got finalized
+expected verified". `arm.Receipts` reads the streams; it does not step the
+machine. `TestEveryVerifyCarriesSkipFinalizeAndNothingIsFinalized` counts the
+calls and requires zero.
 
 **Proved on regtest, 2026-08-25.** `TestSkipFinalizeReachesChanPendingWithNothingSigned`
 in `internal/arm/skip_finalize_regtest_test.go`: *n* = 2 streams reached
@@ -300,9 +328,14 @@ a relaxation of I-4. No code path here builds one, and none may be added.
      parent is in a mempool and every channel reached `chan_pending` before that.
 
   What keeps them apart is the type system. `arm.Publish` takes an `*arm.Armed`
-  and `bump.Publish` takes a `*bump.Signed`; each has its raw transaction in an
-  unexported field that exactly one constructor fills. Neither line can be handed
-  the other's bytes.
+  and `bump.Publish` takes a `*bump.Signed`, and each is filled by exactly one
+  constructor. `bump.Signed` carries its raw transaction in an unexported field.
+  `arm.Armed` no longer can — after the inversion the signed bytes arrive at the
+  publish call from outside, because this program never held them — so what it
+  carries unexported is the *n* `chan_pending` receipts, one per channel, that
+  only `arm.Receipts` fills, and `arm.Publish` re-derives the txid from the bytes
+  it is handed and refuses any that do not hash to the pinned one. Neither line
+  can be handed the other's transaction.
 
   **Item 5 takes this to one.** Change `CallSites`, this bullet and
   `docs/design.html` in the same commit as the deletion, or do not change it.
@@ -357,7 +390,7 @@ From `docs/replan-2026-08.md`, which is the document that describes the future.
 
 1. ~~Prove the inversion on regtest.~~ **Done, 2026-08-25.**
 2. ~~Rewrite the docs to this direction.~~ **Done.**
-3. Change `arm` to the new sequence.
+3. ~~Change `arm` to the new sequence.~~ **Done, 2026-08-26.**
 4. Add the `--psbt` path to `run`, stop calling `coldwallet`.
 5. Delete the cut packages.
 6. Demote the fee and change findings, remove `Replaceable`.

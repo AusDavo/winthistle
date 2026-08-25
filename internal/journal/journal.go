@@ -42,19 +42,38 @@ import (
 type State string
 
 const (
-	// StateArming: funding streams are open, nothing is finalized. Everything
-	// here is cancellable for free.
+	// StateArming: funding streams are open and no channel has reached
+	// chan_pending yet. Everything here is cancellable for free.
+	//
+	// It covers psbt_verify too. Verifying and collecting the receipts are one
+	// contiguous stretch of the sequence with no operator step between them, so a
+	// run found here says "the gate is not open" and the channel rows say how
+	// far each member got.
 	StateArming State = "arming"
-
-	// StateSigning: every stream has verified the unsigned transaction, so LND
-	// has committed to the funding outpoints (I-3) and the PSBT is out with the
-	// signers. Still cancellable for free.
-	StateSigning State = "signing"
 
 	// StateArmed: every channel reached chan_pending. This is the I-1 gate, and
 	// the journal sets it itself rather than taking a caller's word for it —
 	// see MarkPending.
+	//
+	// After the inversion it is reached with *nothing signed*: psbt_verify with
+	// skip_finalize takes every channel to chan_pending over the unsigned
+	// transaction. So an armed run with no raw_tx on disk is the ordinary
+	// mid-run state rather than a contradiction, and MarkPublishing is where the
+	// bytes are insisted on.
 	StateArmed State = "armed"
+
+	// StateSigning: the gate is open and the unsigned transaction is out with
+	// the signing wallet. Still cancellable for free — abort is cheap right
+	// through this state, because nothing has been broadcast.
+	//
+	// It comes *after* StateArmed, and it used to come before. The old sequence
+	// signed inside the peers' ten minutes and reached chan_pending afterwards;
+	// this one reaches chan_pending first and signs with no clock A running. A
+	// run written by a build from before the inversion can hold this state with
+	// its channels still in ChanVerified rather than ChanPending, which is what
+	// tells the two apart on an operator's existing file — the channel rows, not
+	// the run state.
+	StateSigning State = "signing"
 
 	// StatePublishing is written *before* PublishTransaction is called, and
 	// therefore before the transaction can possibly be in anyone's mempool. A
@@ -375,6 +394,15 @@ var (
 	// by which accepting it makes the teardown abandon the wrong channel.
 	ErrOutpointMoved = errors.New("a receipt named a different funding outpoint " +
 		"for a channel already journalled as pending")
+
+	// ErrTxIDMoved means a run's pinned txid was about to be rewritten.
+	//
+	// The pin is recorded before the first psbt_verify and is what I-3 is checked
+	// against. LND commits to the funding outpoints at that call, so a later txid
+	// is not a correction — it is a different transaction, one that funds none of
+	// this run's channels. Recording it would give the run a rebroadcast duty for
+	// bytes nothing depends on and would leave the real commitment unnamed.
+	ErrTxIDMoved = errors.New("the run's pinned txid does not match")
 
 	// ErrNoBump means the journal has no such CPFP child.
 	ErrNoBump = errors.New("no such bump in the journal")

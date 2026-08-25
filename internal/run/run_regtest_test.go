@@ -185,7 +185,7 @@ func TestTheColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T) {
 
 	// The probe says so in the report, because the operator has to be able to
 	// tell "it worked and I stopped it" from "it worked".
-	if !strings.Contains(out.String(), "Step 9 was not made") {
+	if !strings.Contains(out.String(), "Step 8 was not made") {
 		t.Error("the report does not say the publish was withheld")
 	}
 
@@ -203,9 +203,20 @@ func TestTheColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T) {
 	if run.State != journal.StateAborted {
 		t.Errorf("the run ended in %s, not %s", run.State, journal.StateAborted)
 	}
-	if run.TxID != res.Armed.TxID || run.RawTx == "" {
-		t.Error("the journal does not hold the finalized transaction, which is " +
-			"what a rebroadcast after a crash would need")
+	if run.TxID != res.Armed.TxID {
+		t.Errorf("the journal pinned %q and the batch armed at %s. The txid goes in "+
+			"before the first psbt_verify, which is the call that starts a peer "+
+			"storing a commitment signature against it", run.TxID, res.Armed.TxID)
+	}
+	// And no raw transaction, which is the assertion rather than an omission.
+	// The bytes go to disk immediately before the publish RPC and nowhere else,
+	// because that write is what "we may owe a rebroadcast" means. A probe that
+	// withheld the publish owes nothing: nothing was broadcast, and the abort
+	// this run terminated through needs the outpoints rather than the bytes.
+	if run.RawTx != "" {
+		t.Error("the journal holds a raw transaction for a run that never reached " +
+			"the publish call, so raw_tx no longer means what MarkPublishing reads it " +
+			"to mean")
 	}
 }
 

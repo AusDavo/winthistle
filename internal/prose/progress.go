@@ -145,14 +145,22 @@ func heldMeans(r *journal.Run, pending, total int) string {
 		return "This run is being taken apart, or was. Nothing was broadcast."
 	}
 	if pending == total && total > 0 {
+		if r.State == journal.StateSigning {
+			return "Every channel has its receipt, so each one is already " +
+				"recoverable by force-close and the gate is open. The transaction " +
+				"is out to be signed, with no clock running on it. Publishing is " +
+				"the call after that, and it is the only one that cannot be taken " +
+				"back."
+		}
 		return "Every channel has its receipt, so each one is already recoverable " +
-			"by force-close and the gate is open. The transaction is still held " +
-			"here: publishing it is the next call, and it is the only one that " +
-			"cannot be taken back."
+			"by force-close and the gate is open. Nothing is signed yet: the " +
+			"signing round comes next, and then the publish, which is the only " +
+			"call that cannot be taken back."
 	}
-	return fmt.Sprintf("The funding transaction stays here until all %d channels "+
-		"have their receipt. Until then nothing has been broadcast, nothing is at "+
-		"risk, and stopping costs the ceremony rather than any coins.", total)
+	return fmt.Sprintf("Nothing goes out until all %d channels have their receipt, "+
+		"and nothing is signed until then either. Until they do, nothing has been "+
+		"broadcast, nothing is at risk, and stopping costs the ceremony rather than "+
+		"any coins.", total)
 }
 
 // peerWindow is what is left of the peers' ten minutes, and whether to show it

@@ -85,21 +85,60 @@ func (j *Journal) RecordLocks(ctx context.Context, runID string, ops []bitcoind.
 // LND has committed to that channel's funding outpoint and will accept only
 // added signatures (I-3).
 //
-// The run moves to signing once every channel has verified, because that is the
-// point at which the transaction can go to the signers.
+// The run does not move. It used to go to signing here, because psbt_verify was
+// the last thing that happened before the PSBT went out to the signers; after
+// the inversion the next thing is the channel's own chan_pending, arriving over
+// the unsigned transaction, and nothing is asked of a wallet until every one of
+// them is in. So a run between the first verify and the last receipt stays in
+// StateArming — the gate is not open — and the channel rows are what say how far
+// each member got. That is the split abort.Target needs and the only one it
+// reads.
 func (j *Journal) MarkVerified(ctx context.Context, runID string, id lnd.PendingChanID) error {
 	return j.tx(ctx, func(tx *sql.Tx) error {
 		if err := j.setChannelState(ctx, tx, runID, id, ChanVerified); err != nil {
 			return err
 		}
-		unverified, err := j.countChannelsNotIn(ctx, tx, runID, ChanVerified)
-		if err != nil {
-			return err
-		}
-		if unverified == 0 {
-			return j.setState(ctx, tx, runID, StateSigning)
-		}
 		return j.touch(ctx, tx, runID)
+	})
+}
+
+// RecordPinnedTxID stores the txid LND is about to commit to, before the first
+// psbt_verify of the batch.
+//
+// Before, not after, and that is the same discipline MarkPublishing follows for
+// the same reason. A psbt_verify with skip_finalize does not pause the funding
+// flow, it completes it: LND takes the unsigned transaction's outpoints as final
+// and goes on to exchange funding_created and funding_signed with the peer. So
+// from the first of these calls onwards a peer may be storing a commitment
+// signature against an outpoint of this transaction, and a run that lost the
+// txid would have no handle on what it had committed to.
+//
+// It refuses to move a txid that is already recorded. The pin is what I-3 is
+// checked against, and a run whose pin could be rewritten has no pin.
+func (j *Journal) RecordPinnedTxID(ctx context.Context, runID, txid string) error {
+	if txid == "" {
+		return fmt.Errorf("run %s: a pinned txid cannot be empty", runID)
+	}
+	return j.tx(ctx, func(tx *sql.Tx) error {
+		var had sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT txid FROM runs WHERE id = ?`, runID).Scan(&had)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %s: %w", runID, ErrNoRun)
+		}
+		if err != nil {
+			return fmt.Errorf("reading run %s: %w", runID, err)
+		}
+		if had.Valid && had.String != "" && had.String != txid {
+			return fmt.Errorf("run %s is pinned to %s and this is %s: %w",
+				runID, had.String, txid, ErrTxIDMoved)
+		}
+		res, err := tx.ExecContext(ctx,
+			`UPDATE runs SET txid = ?, updated_at = ? WHERE id = ?`, txid, now(), runID)
+		if err != nil {
+			return fmt.Errorf("pinning the txid of run %s: %w", runID, err)
+		}
+		return affectedOne(res, runID)
 	})
 }
 
@@ -126,17 +165,37 @@ func (j *Journal) RecordSigner(ctx context.Context, runID, label string, st Sign
 	})
 }
 
-// RecordFinalizedTx stores the combined, finalized transaction.
+// RecordFinalizedTx stores the signed transaction.
 //
-// This is written *before* the first psbt_finalize, not after the last one. From
-// the moment LND is handed this transaction the peers start storing commitment
-// signatures against its outpoints, and if we then lose the transaction we own a
-// rebroadcast obligation (I-1 leaves rebroadcast to us) that we cannot meet.
+// This is written *before* the publish call, and it is the first moment the bytes
+// exist: after the inversion nothing signs anything until every channel has
+// already reached chan_pending. We own rebroadcast — no_publish sets
+// NoFundingTxBit, which also gates rebroadcastFundingTx — so losing the bytes
+// after they can be in a mempool is a rebroadcast obligation we could not meet.
+//
+// It refuses a transaction whose txid is not the run's pinned one. That is I-3,
+// enforced by the component that holds the pin rather than only at the call site:
+// LND committed to the funding outpoints at psbt_verify, so different bytes fund
+// nothing, and a journal that accepted them would be recording a rebroadcast
+// duty for a transaction no channel in the run depends on.
 func (j *Journal) RecordFinalizedTx(ctx context.Context, runID, txid, rawTxHex string) error {
 	if txid == "" || rawTxHex == "" {
 		return fmt.Errorf("run %s: the finalized transaction needs both a txid and its bytes", runID)
 	}
 	return j.tx(ctx, func(tx *sql.Tx) error {
+		var had sql.NullString
+		err := tx.QueryRowContext(ctx,
+			`SELECT txid FROM runs WHERE id = ?`, runID).Scan(&had)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %s: %w", runID, ErrNoRun)
+		}
+		if err != nil {
+			return fmt.Errorf("reading run %s: %w", runID, err)
+		}
+		if had.Valid && had.String != "" && had.String != txid {
+			return fmt.Errorf("run %s pinned %s at psbt_verify and these bytes are "+
+				"%s: %w", runID, had.String, txid, ErrTxIDMoved)
+		}
 		res, err := tx.ExecContext(ctx,
 			`UPDATE runs SET txid = ?, raw_tx = ?, updated_at = ? WHERE id = ?`,
 			txid, rawTxHex, now(), runID)
@@ -221,14 +280,60 @@ func (j *Journal) MarkPending(ctx context.Context, runID string,
 	})
 }
 
+// MarkSigning records that the unsigned transaction has gone out to be signed.
+//
+// It comes after the gate, and it used to come before. It refuses a run that is
+// not armed, which is what makes the state mean something: a run in StateSigning
+// has every one of its channels at chan_pending, so the abort it needs is n
+// abandons rather than n free shim cancels, and the recovery screen must say so.
+// Nothing derives that from the state — abort.Target reads the channel rows — but
+// the copy does, and a state that could be reached without the receipts would
+// make the copy a lie.
+//
+// Idempotent: a run already in StateSigning stays there.
+func (j *Journal) MarkSigning(ctx context.Context, runID string) error {
+	return j.tx(ctx, func(tx *sql.Tx) error {
+		var state string
+		err := tx.QueryRowContext(ctx,
+			`SELECT state FROM runs WHERE id = ?`, runID).Scan(&state)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("run %s: %w", runID, ErrNoRun)
+		}
+		if err != nil {
+			return fmt.Errorf("reading run %s: %w", runID, err)
+		}
+		if State(state) == StateSigning {
+			return j.touch(ctx, tx, runID)
+		}
+		if State(state) != StateArmed {
+			return fmt.Errorf("run %s is %s, and a batch does not go out to be "+
+				"signed until every channel in it is already recoverable: %w",
+				runID, state, ErrNotArmed)
+		}
+		return j.setState(ctx, tx, runID, StateSigning)
+	})
+}
+
 // MarkPublishing is the write that must land before WalletKit.PublishTransaction
 // is called, and the reason this package exists.
 //
-// It refuses unless the run is armed, so the I-1 gate is enforced by the
-// component that actually knows whether every chan_pending arrived rather than
-// by the loop that happens to be calling. A run found in this state afterwards is
-// a run whose transaction may be public — see Run.AbortTarget, which will not
-// abort one.
+// It refuses unless every channel in the run is at chan_pending, so the I-1 gate
+// is enforced by the component that actually knows whether every receipt arrived
+// rather than by the loop that happens to be calling. A run found in this state
+// afterwards is a run whose transaction may be public — see Run.AbortTarget,
+// which will not abort one.
+//
+// The gate is a count, not a state transition, and that is deliberate. Before the
+// inversion "the run is armed" was itself the proof, because armed was the state
+// immediately before publishing and only MarkPending could write it. Now
+// StateSigning sits in between, so trusting the state would be trusting that
+// nothing else can ever reach it — a property of the whole package rather than of
+// this function. Counting the rows here costs one query and depends on nothing.
+//
+// The state is still checked, for the other thing it settles: a run already in
+// publishing, published, aborting or aborted is refused, which is what stops a
+// second publish of a batch that may already be out and an abort's leftovers from
+// being broadcast.
 func (j *Journal) MarkPublishing(ctx context.Context, runID string) error {
 	return j.tx(ctx, func(tx *sql.Tx) error {
 		var state string
@@ -241,12 +346,22 @@ func (j *Journal) MarkPublishing(ctx context.Context, runID string) error {
 		if err != nil {
 			return fmt.Errorf("reading run %s: %w", runID, err)
 		}
-		if State(state) != StateArmed {
-			return fmt.Errorf("run %s is %s, not %s: %w",
-				runID, state, StateArmed, ErrNotArmed)
+		switch State(state) {
+		case StateArmed, StateSigning:
+		default:
+			return fmt.Errorf("run %s is %s, and a publish is only made from %s or "+
+				"%s: %w", runID, state, StateArmed, StateSigning, ErrNotArmed)
+		}
+		notPending, err := j.countChannelsNotIn(ctx, tx, runID, ChanPending)
+		if err != nil {
+			return err
+		}
+		if notPending != 0 {
+			return fmt.Errorf("run %s has %d channel(s) that never reached "+
+				"chan_pending: %w", runID, notPending, ErrNotArmed)
 		}
 		if !rawTx.Valid || rawTx.String == "" {
-			return fmt.Errorf("run %s is armed but no finalized transaction was "+
+			return fmt.Errorf("run %s is armed but no signed transaction was "+
 				"journalled — there would be nothing to rebroadcast: %w", runID, ErrNotArmed)
 		}
 		return j.setState(ctx, tx, runID, StatePublishing)

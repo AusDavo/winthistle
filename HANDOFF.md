@@ -17,37 +17,57 @@
 
 ## Where the build actually is
 
-**Item 1 is done and item 2 is this rewrite.** The inversion is proved on a
-running node: `TestSkipFinalizeReachesChanPendingWithNothingSigned` in
-`internal/arm/skip_finalize_regtest_test.go` took *n* = 2 channels to
-`chan_pending` at the outpoints of an **unsigned** transaction, mempool clear,
-in under a second. `skip_finalize` does not skip the gate. The rejected-list
-entry that said it did was wrong in the source and wrong on the node, and it is
-gone from `CLAUDE.md`.
+**Items 1, 2 and 3 are done.** The inversion is proved on a running node and the
+armed window is now built around it. `TestSkipFinalizeReachesChanPendingWithNothingSigned`
+took *n* = 2 channels to `chan_pending` at the outpoints of an **unsigned**
+transaction, mempool clear, in under a second; and
+`TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable` now runs
+the whole inverted sequence at *n* = 3 through app code — verify with
+`skip_finalize`, collect the receipts, sign, publish once, confirm.
+`docs/replan-2026-08.md`'s "Item 3, as built" is the account of what moved.
 
-**No code has moved yet.** Everything the replan cuts is still present and still
+**What has moved: `internal/arm`, `internal/journal`, and the copy that described
+their order.** `arm.Finalize` is gone; `arm.Verify` returns a `*Verified` and
+`arm.Receipts` is the gate; `arm.Publish` takes the signed bytes as a parameter
+and refuses any whose txid is not the pinned one; the journal runs
+arming → armed → signing → publishing → published, with `RecordPinnedTxID` before
+the first verify and `MarkSigning` after the gate. **There is no `psbt_finalize`
+call anywhere in the build.**
+
+**What has not moved.** Everything the replan cuts is still present and still
 works: `setup`, `bump`, `serve`, `coldwallet`, `rehearsal`, `server`, `webrun`,
-`signet/`, `internal/bitcoind`. Items 3 to 6 are what move them. Do not read the
-docs' description of the new sequence as a description of the tree.
+`signet/`, `internal/bitcoind`. `run` still builds the transaction with
+`coldwallet` and still signs with the configured devices — item 4 is what changes
+that. Items 4 to 6 are what move the rest.
 
-**Three collisions found while rewriting the docs**, none of them fixed here
-because item 2 changes no code:
+**The three collisions found while rewriting the docs, and where they stand:**
 
-1. **`combine.ErrAlreadyFinalized` refuses the new happy path's own input.**
-   `internal/combine` survives the replan, and `combine.go:94` refuses a device
-   that returns a *finalized* input — with I-2 named in the comment and the
-   error text reading "Only partial signatures may leave a signer". Step 7 is
-   "sign in Sparrow", which returns exactly that. Settle it explicitly in item
-   4; do not delete the check silently. The base-packet guard at
-   `combine.go:249` is a different check and should stay.
+1. **`combine.ErrAlreadyFinalized` refuses the new happy path's own input — still
+   open, and item 3 left it deliberately.** `internal/combine` survives the
+   replan, and `combine.go:94` refuses a device that returns a *finalized* input
+   — with I-2 named in the comment and the error text reading "Only partial
+   signatures may leave a signer". Step 7 is "sign in Sparrow", which returns
+   exactly that. Nothing item 3 built produces such an input: `arm` never calls
+   `combine.Merge`, and `run`'s signers are still the harness's
+   partial-signature halves, so settling it then would have meant either a check
+   with no caller exercising the new path or deleting one the current happy path
+   relies on. **It blocks item 4 and has to be settled in the same commit as the
+   `--psbt` path.** Do not delete the check silently: decide what `combine` is
+   for, say so in the package comment, and keep the base-packet guard at
+   `combine.go:249`, which is a different check. `journal.SignerPartial`'s doc
+   comment names I-2 too, for the same reason and with the same fix due.
 
-2. **The receipt buffer fits the new sequence with zero headroom.**
-   `req.Updates` is `make(chan *lnrpc.OpenStatusUpdate, 2)`
-   (`lnd/server.go:5190`), and the funding manager blocks when it is full. Today
-   `arm.Finalize` reads each receipt as it goes, so it never gets close. The new
-   steps 5→6 verify all *n* and then collect *n* receipts — `psbt_fund` plus
-   `chan_pending` is exactly 2 per stream. It fits, and nothing spare. Worth
-   knowing before item 3.
+2. **The receipt buffer — settled, and it fits.** `req.Updates` is
+   `make(chan *lnrpc.OpenStatusUpdate, 2)` (`lnd/server.go:5190`), and the
+   funding manager blocks when it is full. The new steps 5→6 verify all *n* and
+   then collect *n* receipts, which is exactly what `arm.Receipts` does, and this
+   flow produces exactly two updates per stream before confirmation: `psbt_fund`
+   (read in `Open`) and `chan_pending`. Re-checked against every send site in
+   `funding/manager.go` — `:2217` for `psbt_fund`, `:2873` for `chan_pending`,
+   `:4254` for `chan_open`, and there is no fourth. There is room for the
+   receipt and no room for anything else. **A third update per stream, or a
+   change that stops reading promptly, breaks this and the failure looks like a
+   dead peer.** `arm.Receipts`' doc comment says so where it would be read.
 
 3. **The custody-language change-output copy is still shipping.** `CLAUDE.md`
    explains at length why framing a stuck batch as a custody risk is dangerous,
@@ -75,15 +95,24 @@ move. Everything it needs exists — the steps up to publish are the production
 code path, publish is one call inside one `if` that it does not make, and the
 abort path it terminates through runs on every failure and is tested on both.
 
-Composing it forced **exactly one branch**, an `if` between `arm.Finalize` and
-`arm.Publish`, and that survived: the probe is the real run with the final call
-withheld rather than a second path to the same place.
+Composing it forced **exactly one branch**, an `if` before `arm.Publish`, and
+that survived the inversion: the probe is the real run with the final call
+withheld rather than a second path to the same place. It now sits after the
+signing round rather than after a finalize, which is a change of neighbours and
+not of shape.
 
-Two things the replan changes about it. The probe now terminates by abandoning
-channels that reached `chan_pending` **with nothing signed** — and regtest
-confirmed LND still refuses `pending_funding_shim_only` on those, so it still
-costs an `i_know_what_i_am_doing` confirmation per channel. And the step
-numbering moves: publish is step 8 in the replan's sequence, not step 9.
+Two things the replan changed about it, and item 3 has now made both true of the
+code. The probe terminates by abandoning channels that reached `chan_pending`
+**with nothing signed** — and regtest confirmed LND still refuses
+`pending_funding_shim_only` on those, so it still costs an
+`i_know_what_i_am_doing` confirmation per channel. And publish is step 8, not
+step 9; the withheld-publish screen says "Step 8 was not made".
+
+One thing worth knowing before reading the probe's journal row: **a probe that
+withheld the publish leaves no raw transaction on disk, and that is correct.** The
+signed bytes reach the journal immediately before the publish RPC and nowhere
+else, so `raw_tx` means "we may owe a rebroadcast" — and a probe owes nothing. The
+pinned txid is there.
 
 `--stop-before-publish` exits non-zero if the teardown does not finish. The probe
 proving the sequence and then leaving channels pending is not a success, and a
@@ -92,7 +121,7 @@ probe is usually run from a terminal somebody walks away from.
 ## One live code gap
 
 **Nothing bounds the `chan_pending` wait, and the fallback dies with the context
-that ends it.** `arm.finalizeOne` blocks in `Recv` with no deadline of its own,
+that ends it.** `arm.receiptFor` blocks in `Recv` with no deadline of its own,
 and `winthistle run` builds its context from `signal.NotifyContext` and nothing
 else — so a peer that accepts and never answers parks the armed window until
 `Ctrl-C`, with the rest of the batch already armed behind it. Then, because the
@@ -101,13 +130,28 @@ decides abandon-versus-cancel fails too, and the operator is told "this channel'
 state is unknown" about a channel LND could still have answered for.
 
 Not a safety failure: the batch is unpublishable and abortable throughout, and
-`TestAPeerThatNeverAnswersFinalizeLeavesTheBatchUnarmed` pins both as current
-behaviour rather than as correct behaviour. The `isPending` half is much smaller
-than the deadline half and could be taken on its own — a `context.WithoutCancel`
-plus a short timeout would let the one question that matters still be asked.
+`TestAPeerThatNeverAnswersLeavesTheBatchUnarmed` pins both as current behaviour
+rather than as correct behaviour. The `isPending` half is much smaller than the
+deadline half and could be taken on its own — a `context.WithoutCancel` plus a
+short timeout would let the one question that matters still be asked.
 
-**This matters more after the replan, not less.** Step 6 is now the gate and the
-only thing left under clock A.
+**This matters more after the inversion, not less.** Step 6 is now the gate and
+the only thing left under clock A, and it is the step this gap sits inside.
+
+**Its cousin, which item 3 named rather than closed.** A *crashed* process — one
+that died between a channel's `psbt_verify` and its receipt — leaves a journal row
+saying `verified` for a channel LND has probably already created, because
+`skip_finalize` makes the verify complete the funding flow rather than park it.
+`Run.AbortTarget` then lists it as a shim to cancel, and `abort.CancelShim`
+reports `AlreadyGone` — a *success* — for a channel still pending on the peer's
+side until clock B runs out. Inside a run this cannot happen: `arm.Receipts` asks
+`PendingChannels` whenever a receipt does not arrive and journals what it finds.
+**The pre-inversion sequence had exactly the same gap between `psbt_finalize` and
+its receipt, unchanged in kind and in size**, which is why item 3 did not treat it
+as new. Closing it needs a lookup `AbortTarget` cannot make — it has no client,
+and the journal cannot map a pending channel point back to a pending channel id.
+The comment in `internal/journal/recover.go` says all of this where somebody
+editing that switch would read it.
 
 ## Docker on this machine
 
@@ -469,13 +513,18 @@ over-sign and `internal/combine` survives.
   Nothing can close what it opened — `CloseChannel` is on the never-list — so
   `make harness` is the reset.
 
-- **A stream must be read promptly, or the funding manager waits.**
-  `funderProcessFundingSigned` sends `chan_pending` on `resCtx.updates`, a channel
-  with a buffer of 2 (`server.go`), and blocks on `f.quit` if it is full. One
-  buffered slot is spent on `psbt_fund`, so a batch that finalized every channel
-  before reading any receipt would be relying on that buffer. `arm.Finalize`
-  finalizes one at a time and reads each receipt, so it never gets close — but
-  this is why, and not merely tidiness.
+- **A stream must be read promptly, or the funding manager waits — and the new
+  sequence spends the buffer.** `funderProcessFundingSigned` sends `chan_pending`
+  on `resCtx.updates`, a channel with a buffer of 2 (`server.go:5190`), and blocks
+  on `f.quit` if it is full. One slot is spent on `psbt_fund`, read in
+  `arm.Open`. `arm.Verify` then verifies all *n* streams and `arm.Receipts` reads
+  the *n* receipts afterwards, so at the worst moment every stream is holding one
+  unread `chan_pending` in one free slot. That fits exactly, with nothing spare.
+  It is safe because this flow produces exactly two updates per stream before
+  confirmation and there is no third emitter — `funding/manager.go:2217`,
+  `:2873`, `:4254` are every send site. **Add a third update per stream, or stop
+  reading promptly, and the funding manager blocks; the failure reads as a dead
+  peer.** `arm.Receipts`' doc comment carries this where it would be read.
 
 - **A macaroon refusal has two shapes and they mean opposite things.**
   `codes.InvalidArgument` from `CheckMacaroonPermissions` is the answer about

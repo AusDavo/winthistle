@@ -233,10 +233,12 @@ func assertPendingOpens(ctx context.Context, t *testing.T, env *regtestenv.Env,
 
 // abandonAtCleanup takes apart whatever the test left in LND and in Core.
 //
-// Deliberately not through Journal.Recover. The journal's states are the ones
-// the replan reorders — a channel at chan_pending with nothing signed has no row
-// shape there yet — so the target is built from what this test actually observed
-// rather than from a record that cannot describe it.
+// Deliberately not through Journal.Recover, and it stays that way now that the
+// journal does describe this shape. This test exists to be independent of
+// internal/arm and internal/journal: it drives FundingStateStep directly so that
+// it keeps proving the claim the replan rests on even if both of those packages
+// are wrong. A teardown routed through the journal would put one of them back in
+// the path. arm_regtest_test.go is where the app's own version is exercised.
 func abandonAtCleanup(t *testing.T, env *regtestenv.Env, target *abort.Target) {
 	t.Helper()
 	t.Cleanup(func() {

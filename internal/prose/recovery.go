@@ -433,20 +433,24 @@ func failureLine(err error) string {
 func stateMeans(s journal.State) string {
 	switch s {
 	case journal.StateArming:
-		return "Funding streams were open and nothing had been finalized. " +
-			"Everything about this run is cancellable for free: no peer holds a " +
-			"commitment signature, no transaction exists that anybody could " +
-			"broadcast, and the cost of taking it apart is nothing at all."
-	case journal.StateSigning:
-		return "Every stream had verified the unsigned transaction, so LND has " +
-			"committed to the funding outpoints and the transaction was out with " +
-			"the signers. Still cancellable for free — psbt_verify commits LND to " +
-			"an outpoint, not to a channel, and shim_cancel still works after one."
+		return "Funding streams were open and no channel had reached chan_pending. " +
+			"Whatever is cancellable for free is listed below and most of it will " +
+			"be: a stream that only registered its shim costs nothing to release. " +
+			"Read the channel list rather than this line — psbt_verify starts the " +
+			"funding flow now, so a run can hold both kinds at once."
 	case journal.StateArmed:
 		return "Every channel in this batch reached chan_pending, which means every " +
 			"one of them is already recoverable by force-close — and the publish " +
-			"never happened. This is the gate working: the batch got as far as it " +
-			"is allowed to get without going out, and stopped."
+			"never happened. Nothing was signed yet either, so nothing existed for " +
+			"anybody to broadcast. Taking it apart is n abandons, and LND wants its " +
+			"blunt flag for each one."
+	case journal.StateSigning:
+		return "Every channel in this batch reached chan_pending and the unsigned " +
+			"transaction had gone out to be signed. Nothing was broadcast — the " +
+			"signing wallet may hold a complete transaction, and it front-runs " +
+			"nothing, because each of these channels was already recoverable before " +
+			"it was asked. Taking it apart costs what an armed run costs: each " +
+			"channel has to be abandoned, and LND wants its blunt flag for each one."
 	case journal.StateAborting:
 		return "An abort of this run was started and did not finish. What follows " +
 			"is what is left, not what there was."

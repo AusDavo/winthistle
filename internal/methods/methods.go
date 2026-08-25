@@ -244,17 +244,18 @@ var registry = []Method{
 		Name: "/lnrpc.Lightning/ExportAllChannelBackups",
 		Use:  InApp,
 		Ops:  []Op{{"offchain", "read"}},
-		Why: "arm.Finalize: step 8, taken while every channel is pending and before " +
-			"anything is broadcast. It works on pending channels because " +
-			"chanbackup.FetchStaticChanBackups reads ChannelStateDB.FetchAllChannels, " +
-			"which includes pending opens.",
+		Why: "arm.Receipts: taken while every channel is pending, before anything is " +
+			"signed and before anything is broadcast. It works on pending channels " +
+			"because chanbackup.FetchStaticChanBackups reads " +
+			"ChannelStateDB.FetchAllChannels, which includes pending opens.",
 	},
 	{
 		Name: "/lnrpc.Lightning/FundingStateStep",
 		Use:  InApp,
 		Ops:  []Op{{"onchain", "write"}, {"offchain", "write"}},
-		Why: "abort.CancelShim (shim_cancel); arm.Verify (psbt_verify) and arm.Finalize " +
-			"(psbt_finalize).",
+		Why: "abort.CancelShim (shim_cancel); arm.Verify (psbt_verify with " +
+			"skip_finalize, which completes the funding flow rather than pausing it, " +
+			"so there is no psbt_finalize call anywhere in this build).",
 	},
 	{
 		Name: "/lnrpc.Lightning/GetInfo",
@@ -361,14 +362,17 @@ var registry = []Method{
 		Use:       InApp,
 		Ops:       []Op{{"onchain", "write"}},
 		CallSites: 2,
-		Why: "arm.Publish: step 9, the funding transaction's single publish, gated " +
+		Why: "arm.Publish: step 8, the funding transaction's single publish, gated " +
 			"on n of n chan_pending. And bump.Publish: the CPFP child of a batch " +
 			"that is already public, which has no I-1 gate to sit behind because " +
 			"the parent is already in a mempool and the child cannot strand " +
 			"anybody. Two call sites and no more — CallSites is what enforces that. " +
-			"Each takes a distinct type whose raw transaction is unexported and " +
-			"filled by exactly one constructor, so neither line can be handed the " +
-			"other's bytes. Deliberately not on the never-list — see forbidden.",
+			"Each takes a distinct type that only one constructor fills: " +
+			"bump.Signed carries its raw transaction unexported, and arm.Armed " +
+			"carries the chan_pending receipts unexported and will not publish " +
+			"bytes that do not hash to the txid LND pinned. So neither line can be " +
+			"handed the other's transaction. Deliberately not on the never-list — " +
+			"see forbidden.",
 	},
 	{
 		Name: "/walletrpc.WalletKit/ReleaseOutput",

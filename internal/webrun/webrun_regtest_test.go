@@ -175,7 +175,7 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 
 	for _, want := range []string{
 		"psbt_verify: all 2 channels",
-		"Step 9 was not made",
+		"Step 8 was not made",
 		"Taking the batch apart",
 	} {
 		if !strings.Contains(transcript, want) {
@@ -213,12 +213,22 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 	if jr.State != journal.StateAborted {
 		t.Errorf("the run ended in %s, not %s", jr.State, journal.StateAborted)
 	}
-	if jr.TxID == "" || jr.RawTx == "" {
-		t.Error("the journal does not hold the finalized transaction")
+	if jr.TxID == "" {
+		t.Error("the journal holds no pinned txid, and it goes in before the first " +
+			"psbt_verify — the call that starts a peer storing a commitment " +
+			"signature against it")
+	}
+	// No raw transaction, which is the assertion rather than an omission: the
+	// bytes reach disk immediately before the publish RPC and nowhere else, so
+	// raw_tx means "we may owe a rebroadcast". A probe that withheld the publish
+	// owes nothing.
+	if jr.RawTx != "" {
+		t.Error("the journal holds a raw transaction for a run that never reached " +
+			"the publish call")
 	}
 	if env.InMempool(t, jr.TxID) {
 		t.Fatalf("%s reached the mempool. The whole claim of this mode is that "+
-			"step 9 is the one call it does not make", jr.TxID)
+			"step 8 is the one call it does not make", jr.TxID)
 	}
 
 	// And every device's partial is recorded, which is what a recovery screen
