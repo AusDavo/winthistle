@@ -43,22 +43,18 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"time"
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/policy"
-	"github.com/AusDavo/winthistle/internal/rehearsal"
 )
 
 // DefaultPath is where the tool looks when it is not told.
 const DefaultPath = "winthistle.toml"
 
-// Defaults for the keys that have one. The abort gate's default is
-// rehearsal.DefaultAbortAfterSigning rather than a number written twice.
+// Defaults for the keys that have one.
 const (
 	DefaultJournal      = "~/.winthistle/runs.db"
-	DefaultAbortAfter   = rehearsal.DefaultAbortAfterSigning
 	DefaultTargetBlocks = 6
 )
 
@@ -86,11 +82,14 @@ type Server struct {
 }
 
 // Limits is the [limits] block.
+//
+// One key left in it. abort_after_signing_seconds was docs/design.html's 5:00
+// gate: the dress rehearsal measured a signing round and refused to arm a batch
+// whose round would not fit inside the peers' ten minutes. The inversion moved
+// signing to step 7, after the gate opens, so the window it bounded no longer
+// contains a signing round and nothing was left to enforce it. It is retired by
+// name rather than kept as a number nothing reads.
 type Limits struct {
-	// AbortAfterSigning is docs/design.html's 5:00 gate, measured by the dress
-	// rehearsal and enforced by rehearsal.Gate before anything is armed.
-	AbortAfterSigning time.Duration
-
 	// RequireConfirmedInputs becomes the batch's confirmation floor: one
 	// confirmation, or none. I-4 is why it defaults to true — an unconfirmed
 	// parent can be replaced, which moves our input, which moves our txid, which
@@ -191,15 +190,9 @@ func Load(path string) (*Config, error) {
 			"preference. "+
 			"Delete the line.", where(path, lim.lineOf("allow_rbf"))))
 	}
-	secs, err := lim.integer(path, "abort_after_signing_seconds",
-		int64(DefaultAbortAfter/time.Second))
-	fail(err)
 	confirmed, err := lim.boolean(path, "require_confirmed_inputs", true)
 	fail(err)
-	c.Limits = Limits{
-		AbortAfterSigning:      time.Duration(secs) * time.Second,
-		RequireConfirmedInputs: confirmed,
-	}
+	c.Limits = Limits{RequireConfirmedInputs: confirmed}
 
 	f := doc.section("fees")
 	floor, err := f.number(path, "floor_sat_per_vb", 0)
@@ -254,19 +247,6 @@ func (c *Config) validate(path string, doc *document) []string {
 	need(c.Server.Journal != "", "[server] journal is required: where to keep the "+
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
-
-	need(c.Limits.AbortAfterSigning > 0, fmt.Sprintf(
-		"[limits] abort_after_signing_seconds is %d. The gate has to be a positive "+
-			"number of seconds — it is what a measured signing round is compared "+
-			"against before the batch may be armed",
-		int64(c.Limits.AbortAfterSigning/time.Second)))
-	if c.Limits.AbortAfterSigning >= rehearsal.PeerWindow {
-		out = append(out, fmt.Sprintf("[limits] abort_after_signing_seconds is %s, "+
-			"which is the whole of the peers' %s window or more. The gate exists to "+
-			"leave room for the build, n psbt_verify calls, the merge, n "+
-			"psbt_finalize calls and the backup export after the signing round ends",
-			c.Limits.AbortAfterSigning, rehearsal.PeerWindow))
-	}
 
 	need(c.Fees.FloorSatPerVB >= 0, "[fees] floor_sat_per_vb cannot be negative")
 	need(c.Fees.TargetBlocks > 0, "[fees] target_blocks must be at least 1")
@@ -331,8 +311,7 @@ wallet  = "winthistle-cold"
 journal = "~/.winthistle/runs.db"
 
 [limits]
-abort_after_signing_seconds = 300     # the 5:00 gate
-require_confirmed_inputs    = true
+require_confirmed_inputs = true
 
 [fees]
 floor_sat_per_vb = 2.0                # no default: see winthistle doctor

@@ -393,8 +393,7 @@ wallet  = %q
 journal = %q
 
 [limits]
-abort_after_signing_seconds = 300
-require_confirmed_inputs    = true
+require_confirmed_inputs = true
 
 [fees]
 floor_sat_per_vb = 1.0

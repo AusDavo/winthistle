@@ -269,6 +269,10 @@ var retiredSections = map[string]string{
 }
 
 var retiredKeys = map[string]string{
+	"limits.abort_after_signing_seconds": "is gone: it was the 5:00 gate, and " +
+		"the window it bounded no longer contains a signing round. The batch is " +
+		"signed at step 7, after every channel has reached chan_pending, so a slow " +
+		"round costs time and cannot cost the batch. Delete the line.",
 	"server.bind": "is gone: the local web UI went with it, and there is no " +
 		"socket left for this to name. `winthistle run` is the front door. Delete " +
 		"the line; [server] journal stays.",

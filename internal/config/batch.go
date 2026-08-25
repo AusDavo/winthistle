@@ -221,16 +221,6 @@ func (b *Batch) TotalSat() int64 {
 	return n
 }
 
-// AmountsSat are the channel capacities in order, which is what the dress
-// rehearsal mirrors so a decoy costs the devices what the batch will.
-func (b *Batch) AmountsSat() []int64 {
-	out := make([]int64, 0, len(b.Channels))
-	for _, ch := range b.Channels {
-		out = append(out, ch.AmountSat)
-	}
-	return out
-}
-
 func short(pubkey string) string {
 	if len(pubkey) <= 12 {
 		return pubkey

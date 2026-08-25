@@ -204,43 +204,22 @@ func (j *Journal) Close() error { return j.db.Close() }
 // journal is read by humans during a recovery and a reversed txid there is the
 // worst place to discover the convention.
 //
-// # Three tables this build no longer writes
+// # Four tables this build no longer writes
 //
-// `bumps`, `bump_signers` and `bump_locks` went with `winthistle bump`, and the
-// reasoning that put them there is worth keeping because it is the rule for the
-// next table: Open runs a single CREATE TABLE IF NOT EXISTS block and there is
-// no version table and no migration machinery, so an ALTER would silently not
-// reach a journal written by an earlier build. Grow this schema with new
-// tables, never with new columns.
+// `bumps`, `bump_signers` and `bump_locks` went with `winthistle bump`, and
+// `setups` went with `winthistle setup`. The reasoning that put them here is
+// worth keeping, because it is the rule for the next table: Open runs a single
+// CREATE TABLE IF NOT EXISTS block and there is no version table and no
+// migration machinery, so an ALTER would silently not reach a journal written by
+// an earlier build. Grow this schema with new tables, never with new columns.
 //
-// That same absence is why deleting the three from this block does not drop
-// them from a journal already on disk. They stay there, unread, and that is the
-// intended outcome: nothing in this build can be confused by them, and an
-// operator's record of a child they really did broadcast is not something to
-// destroy on their behalf. `locks` is in the same position — nothing writes it
-// since the app stopped selecting coins — but it is still read, so it stays
-// here.
-//
-// # And why the setup answer is in here at all
-//
-// `setups` is not a run either, and it is not a transaction. It is one row
-// saying that a human looked at a list of addresses and said whether they
-// matched — which is the only check that can tell a correct cold-storage
-// descriptor from a plausible wrong one, and therefore the only fact about a
-// setup worth keeping.
-//
-// It is here rather than in a file of its own because this file is already the
-// tool's whole durable state: it is opened by every command, it is the one thing
-// the design tells an operator to back up, its columns are STRICT so a typo
-// cannot land as an integer, and it already holds the other record that must
-// never be rewritten. A second store would be a second
-// format, a second set of permissions and a second way to be half-written, in
-// exchange for nothing.
-//
-// It has no foreign key to runs, and that is the point rather than an omission:
-// a setup is not on the I-1 state machine, so Unfinished never lists one,
-// Run.AbortTarget never builds one, and Recover never runs abort.Run over one.
-// The only thing that reads it is winthistle doctor.
+// That same absence is why deleting them from this block does not drop them from
+// a journal already on disk. They stay there, unread, and that is the intended
+// outcome rather than an oversight: nothing in this build can be confused by
+// them, and an operator's record of a child they really did broadcast, or of a
+// wallet they really did compare addresses against, is not something to destroy
+// on their behalf. `locks` is in the same position — nothing has written it
+// since the app stopped selecting coins — but it is still read, so it stays.
 const schema = `
 CREATE TABLE IF NOT EXISTS runs (
     id         TEXT PRIMARY KEY,
@@ -278,19 +257,6 @@ CREATE TABLE IF NOT EXISTS locks (
     PRIMARY KEY (run_id, txid, vout)
 ) STRICT;
 
-CREATE TABLE IF NOT EXISTS setups (
-    wallet         TEXT    NOT NULL,
-    seq            INTEGER NOT NULL,
-    outcome        TEXT    NOT NULL,
-    receive_desc   TEXT    NOT NULL,
-    change_desc    TEXT    NOT NULL,
-    sample_size    INTEGER NOT NULL,
-    first_receive  TEXT    NOT NULL,
-    first_change   TEXT    NOT NULL,
-    rescanned_from INTEGER NOT NULL,
-    answered_at    TEXT    NOT NULL,
-    PRIMARY KEY (wallet, seq)
-) STRICT;
 `
 
 var (

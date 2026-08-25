@@ -33,21 +33,20 @@
 // This comment listed five, and two of them were about machinery the app has
 // given up rather than about the batch:
 //
-//   - setup.Check, first, read back a human's verdict on the cold wallet's
-//     descriptor pair. The app no longer selects coins, derives addresses or asks
-//     Core for change, so it never touches those descriptors — and a refusal
-//     about a wallet nothing in the run reads is a refusal with no subject. The
-//     gate still exists, in `winthistle doctor`, where it is about a wallet
-//     somebody is setting up.
-//   - rehearsal.Gate refused to arm a batch whose signing round would be slower
-//     than limits.abort_after_signing_seconds. It measured a window that no
-//     longer contains signing: the gate opens at step 6, before anything is
-//     signed, so a slow round costs time against clock B and cannot cost the
-//     batch. It also needed Core to build a mirror transaction and m devices to
-//     sign it, and this package has neither now.
+//   - a check on the cold wallet's descriptor pair, which read back a human's
+//     verdict that its addresses matched the wallet software holding the keys.
+//     The app no longer selects coins, derives addresses or asks Core for change,
+//     so it never touches those descriptors — and a refusal about a wallet
+//     nothing in the run reads is a refusal with no subject.
+//   - an abort gate, which refused to arm a batch whose signing round a dress
+//     rehearsal had measured as slower than limits.abort_after_signing_seconds.
+//     It measured a window that no longer contains signing: the gate opens at
+//     step 6, before anything is signed, so a slow round costs time against
+//     clock B and cannot cost the batch. It also needed Core to build a mirror
+//     transaction and m devices to sign it, and this package has neither now.
 //
-// Both packages still compile and still have their own tests; item 5 of
-// docs/replan-2026-08.md is what deletes them.
+// Both are deleted, along with the packages that held them and the config key
+// the second one read.
 //
 // # --stop-before-publish is not a second code path
 //
@@ -590,11 +589,12 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 // them. What a slow step 7 spends is clock B — 2016 blocks from broadcast, and
 // the transaction has not been broadcast yet, so in practice nothing at all.
 //
-// There is no gate here and there deliberately is not one. limits.abort_after_signing_seconds
-// used to be checked before arming, by rehearsal.Gate, against a measurement of
-// this round; the round it measured no longer exists and neither does the gate.
-// Stopping in the middle of this step costs an abort of n pending channels, which
-// is the same thing it costs before it.
+// There is no gate here and there deliberately is not one.
+// limits.abort_after_signing_seconds used to be checked before arming, against a
+// dress rehearsal's measurement of this round; the round it measured no longer
+// exists, and neither the gate nor the key does either. Stopping in the middle
+// of this step costs an abort of n pending channels, which is the same thing it
+// costs before it.
 func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, error) {
 	section(d.Out, "Step 7 — sign it")
 	fmt.Fprint(d.Out, prose.Para("Take as long as this needs. Every channel in the "+

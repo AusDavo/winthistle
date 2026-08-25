@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/AusDavo/winthistle/internal/policy"
 )
@@ -35,8 +34,7 @@ wallet  = "winthistle-cold"   # trailing comment
 journal = "/state/runs.db"
 
 [limits]
-abort_after_signing_seconds = 240
-require_confirmed_inputs    = true
+require_confirmed_inputs = true
 
 [fees]
 floor_sat_per_vb = 2.5
@@ -56,9 +54,6 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	if cfg.Bitcoind.Wallet != "winthistle-cold" {
 		t.Errorf("a trailing comment leaked into the wallet name: %q", cfg.Bitcoind.Wallet)
 	}
-	if cfg.Limits.AbortAfterSigning != 4*time.Minute {
-		t.Errorf("the abort gate is %s", cfg.Limits.AbortAfterSigning)
-	}
 	if cfg.Limits.MinConfirmations() != 1 {
 		t.Error("require_confirmed_inputs did not become a confirmation floor")
 	}
@@ -69,10 +64,11 @@ func TestATypicalFileReadsBack(t *testing.T) {
 
 // TestTheDefaultsAreTheOnesTheCodeAlreadyHas.
 //
-// The abort gate in particular: docs/design.html puts 300 in the config block
-// and rehearsal.DefaultAbortAfterSigning is the constant the gate compares
-// against. Two numbers that must agree are one number, and this is where a
-// second one would show up.
+// Two numbers that must agree are one number, and this is where a second one
+// would show up. It used to guard the abort gate, whose default was written both
+// in docs/design.html's config block and in the constant the gate compared
+// against; that key is retired, and what is left to guard is the confirmation
+// floor and the journal's path.
 func TestTheDefaultsAreTheOnesTheCodeAlreadyHas(t *testing.T) {
 	cfg, err := Load(write(t, "winthistle.toml", `
 [lnd]
@@ -90,10 +86,6 @@ journal = "/state/runs.db"
 `))
 	if err != nil {
 		t.Fatalf("reading a minimal file: %v", err)
-	}
-	if cfg.Limits.AbortAfterSigning != DefaultAbortAfter {
-		t.Errorf("the abort gate defaulted to %s, not %s",
-			cfg.Limits.AbortAfterSigning, DefaultAbortAfter)
 	}
 	if !cfg.Limits.RequireConfirmedInputs {
 		t.Error("require_confirmed_inputs defaulted to false. An unconfirmed " +
@@ -146,15 +138,23 @@ allow_rbf = `+value+`
 }
 
 // TestAMisspelledKeyIsAnErrorRatherThanADefault is the reason this reader
-// exists at all. The gate is read once, before a cold wallet comes out, and a
-// file that silently defaults it has told the operator nothing.
+// exists at all. The file is read once, at the start of a run, and a file that
+// silently defaults a key has told the operator nothing.
+//
+// The specimen used to be abort_after_signing_seconds, which was the gate and is
+// now retired. require_confirmed_inputs is the right replacement rather than an
+// arbitrary one: it is the key whose silent default would be worst. Misspell it
+// and the floor stays at one confirmation, which is the safe direction — but a
+// batch built on unconfirmed inputs is a batch whose parent can be replaced,
+// which moves an input, which moves the txid, which destroys every channel in
+// it. A key that can only fail safe today is one nobody checks tomorrow.
 func TestAMisspelledKeyIsAnErrorRatherThanADefault(t *testing.T) {
 	_, err := Load(write(t, "winthistle.toml", strings.Replace(good,
-		"abort_after_signing_seconds", "abort_after_signing_second", 1)))
+		"require_confirmed_inputs", "require_confirmed_input", 1)))
 	if err == nil {
-		t.Fatal("a misspelled key was accepted, and the gate silently defaulted")
+		t.Fatal("a misspelled key was accepted, and the floor silently defaulted")
 	}
-	if !strings.Contains(err.Error(), "abort_after_signing_second") {
+	if !strings.Contains(err.Error(), "require_confirmed_input") {
 		t.Errorf("the refusal does not name the key: %v", err)
 	}
 }
@@ -178,10 +178,10 @@ func TestWhatElseIsRefused(t *testing.T) {
 			body: strings.Replace(good, `cookie  = "/core/.cookie"`, "", 1),
 			want: "cookie, or user and pass",
 		},
-		"a gate longer than the peers' window": {
-			body: strings.Replace(good, "abort_after_signing_seconds = 240",
-				"abort_after_signing_seconds = 900", 1),
-			want: "the whole of the peers'",
+		"a second key that was retired": {
+			body: strings.Replace(good, "[limits]",
+				"[limits]\nabort_after_signing_seconds = 300", 1),
+			want: "no longer contains a signing round",
 		},
 		"a mode Core does not have": {
 			body: strings.Replace(good, `"ECONOMICAL"`, `"CHEAPEST"`, 1),
@@ -302,9 +302,6 @@ func TestABatchInheritsThePolicyAndOverridesIt(t *testing.T) {
 	}
 	if b.TotalSat() != 5_250_000 {
 		t.Errorf("total is %d", b.TotalSat())
-	}
-	if got := b.AmountsSat(); len(got) != 2 || got[0] != 5_000_000 {
-		t.Errorf("amounts are %v", got)
 	}
 }
 
