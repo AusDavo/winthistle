@@ -152,7 +152,7 @@ func Publish(ctx context.Context, pub Publisher, j *journal.Journal, a *Armed,
 			"re-broadcast", ErrPublishRefused, a.TxID, err)
 	}
 
-	// PublishResponse carries a publish_error string as well. At v0.19.3-beta
+	// PublishResponse carries a publish_error string as well. At v0.21.2-beta
 	// WalletKit.PublishTransaction never sets it — it returns the wallet's error
 	// as a gRPC error and an empty response otherwise — but the field is in the
 	// proto and a caller that only looked at err would report a success it did

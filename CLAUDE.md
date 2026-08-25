@@ -38,6 +38,16 @@ no signing.** That is the whole point of the inversion.
 
 ## Status
 
+**The whole build runs on LND v0.21.2-beta**, in `go.mod` and in the harness,
+and every source citation below is against that version. It was pinned at
+v0.19.3-beta from the scaffold commit onward with no rationale recorded anywhere
+— a tag that was already a year old the day the repository started — while the
+node it is meant to arm was two minor releases ahead. Nothing in the safety model
+turned out to be wrong at v0.21.2-beta; roughly thirty line numbers were, which
+is the same way `handleFundingSigned` happened. **On the next bump, re-cite
+before assuming**: `go.mod`, `regtest/.env` and the citations are three separate
+pins and only the first moves by itself.
+
 **What is built and exercised against live regtest**, and is the guide to what
 exists: `winthistle run`, `doctor` and `recover` work against the cluster in
 `regtest/`, and those three plus `print-macaroon-command` and the two
@@ -135,32 +145,37 @@ Verify all *n*, wait for all *n* `chan_pending`, then publish exactly once via
 `WalletKit.PublishTransaction`.
 
 Why it holds, in source: in `funding/manager.go`, **`funderProcessFundingSigned`**
-(`:2694`) calls `CompleteReservation(nil, commitSig)` at `:2789` — storing the
-peer's commitment signature — *before* the broadcast block at `:2805`, which is
+(`:2718`) calls `CompleteReservation(nil, commitSig)` at `:2813` — storing the
+peer's commitment signature — *before* the broadcast block at `:2829`, which is
 guarded by `completeChan.ChanType.HasFundingTx()`, and emits `chan_pending` at
-`:2884`, after it. So each `chan_pending` is a receipt that the channel is
+`:2897`, after it. So each `chan_pending` is a receipt that the channel is
 recoverable by force-close. `no_publish` sets `NoFundingTxBit`
-(`lnwallet/reservation.go:402`), which clears `HasFundingTx()`.
+(`lnwallet/reservation.go:415`), which clears `HasFundingTx()`.
 
 **The function is `funderProcessFundingSigned`.** This file used to cite
-`handleFundingSigned`, which does not exist at v0.19.3-beta and never did. The
+`handleFundingSigned`, which does not exist at any version and never did. The
 ordering was right and the name was ungreppable, which is how a citation stops
 being checkable.
 
 `NoFundingTxBit` does not skip *only* the broadcast. It gates four things: the
-broadcast (`:2805`), the startup rebroadcast (`:753`, `:760`), the funding-input
-witness verification inside `CompleteReservation`
-(`lnwallet/wallet.go:2274`, which has no witnesses to check), and the
-transaction label (`:3243`). `CompleteReservation`, `WatchNewChannel` and the
-`chan_pending` emission are untouched, which is what I-1 needs.
+broadcast (`:2829`, publishing at `:2851`), the startup rebroadcast (`:766`,
+`:772`, calling at `:769` and `:779`), the funding-input witness verification
+inside `CompleteReservation` (`lnwallet/wallet.go:2275`, which has no witnesses to
+check), and the transaction label (`:3371`). `CompleteReservation`,
+`WatchNewChannel` and the `chan_pending` emission are untouched, which is what
+I-1 needs.
 
 Why `skip_finalize` is safe, in source: `PsbtIntent.Verify` ends
-(`lnwallet/chanfunding/psbt_assembler.go:290-304`) with, when
+(`lnwallet/chanfunding/psbt_assembler.go:293-300`) with, when
 `!i.shouldPublish && skipFinalize`, `i.FinalTX = packet.UnsignedTx`,
-`i.State = PsbtFinalized`, and `close(i.PsbtReady)`. `funding/manager.go:2308`
+`i.State = PsbtFinalized`, and a close of `i.PsbtReady` — guarded by the
+`signalPsbtReady` `sync.Once` (`:149`) rather than being a bare `close`, which
+changes nothing here because the channel still closes exactly once, on the first
+`skip_finalize` verify. `funding/manager.go:2314`
 reads that channel with a bare `case nil:` — *"Nil error means the flow continues
-normally now."* `CompileFundingTx` still runs (`lnwallet/wallet.go:1880`) because
-it "sets the actual funding outpoint in stone" (`:1879`), and the unsigned
+normally now."* (`:2331`). `CompileFundingTx` still runs
+(`lnwallet/wallet.go:1881`) because it "sets the actual funding outpoint in
+stone" (`:1880`), and the unsigned
 transaction suffices: all inputs are segwit, so witnesses do not move the txid.
 LND refuses `skip_finalize` without `no_publish` — `PsbtFundingVerify` checks
 `skipFinalize && ShouldPublishFundingTX()` (`lnwallet/wallet.go:764`) *before* it
@@ -190,7 +205,7 @@ way to broadcast afterwards — a CLI limitation, not a protocol constraint. LND
 *ordering*, not authorship.
 
 Consequence to preserve: `NoFundingTxBit` also gates `rebroadcastFundingTx`
-(`funding/manager.go:757`), so we own rebroadcast. Publish through WalletKit (its
+(`funding/manager.go:769`), so we own rebroadcast. Publish through WalletKit (its
 wallet re-broadcasts on startup until the tx confirms), and keep the raw tx in
 the journal.
 
@@ -243,14 +258,14 @@ offending device.
 on what comes back from the signing wallet.
 
 And it is not a duplicate of LND's own check, which is narrower than it sounds.
-`PsbtIntent.FinalizeRawTX` (`psbt_assembler.go:342`) compares the outputs and the
+`PsbtIntent.FinalizeRawTX` (`psbt_assembler.go:356`) compares the outputs and the
 inputs' *previous outpoints* and stops — its own comment says "the fields in the
 PSBT part are allowed to change" — so sequence numbers, version and locktime are
 unchecked, and each moves the txid. `verifyInputsSigned` only asserts that each
 input has *something* attached. Our hash-at-verify is what enforces I-3.
 
 This is also why all inputs must be segwit — see `verifyAllInputsSegWit`
-(`psbt_assembler.go:611`), called at `:281` with "risk of malleability".
+(`psbt_assembler.go:611`), called at `:283` with "risk of malleability".
 
 ### I-4 · No RBF on the funding transaction, ever
 
@@ -366,8 +381,13 @@ spendable, waiting on the mempool.
 close the *n* channels normally if you no longer want them.
 
 **And it cannot rescue an evicted parent.** A child of an absent parent is an
-orphan. Covering that case would need Core's `submitpackage` for 1p1c relay,
-which would be another path to the network.
+orphan. Covering that case would need package relay — Core's `submitpackage`,
+or, since v0.21.2-beta, LND's own `WalletKit.SubmitPackage` — which would be
+another path to the network either way. **The reason has not changed now that LND
+has one of its own**: `SubmitPackage` is not registered in `internal/methods`, so
+the guard refuses it and the baked credential never carries it, and adding a call
+site would be a decision about I-4 and the CPFP child rather than a registry
+edit. `internal/methods`' never-list says the same where somebody would look.
 
 **The old reason was wrong, and the wrong reason was the dangerous part.** The
 gate used to be justified in custody language — as though a stuck batch put coins
@@ -449,7 +469,7 @@ a relaxation of I-4. No code path here builds one, and none may be added.
   `pending_funding_shim_only` first, and fall back to the blunt flag only on its
   specific rejection, and only with explicit confirmation. **Note that under the
   new sequence the fallback is the normal path, not the exception**: LND infers
-  "shim funded" from `ThawHeight > 0` (see the `TODO` at `rpcserver.go:3236`) and
+  "shim funded" from `ThawHeight > 0` (see the `TODO` at `rpcserver.go:3344`) and
   a plain PSBT open sets none, so it refused every channel in the regtest proof
   with *"is not externally funded or not pending"*. The confirmation still gets
   asked; it just always gets asked.
@@ -507,11 +527,21 @@ abort path*.
 
 - **regtest, in `regtest/`** — the inner loop. A hand-written
   `docker-compose.yml`: one bitcoind, one "our" node (alice) and three peers, so
-  batch sizes up to *n* = 3 are testable. It **borrows Polar's images** and says
-  so in `regtest/.env`, and deliberately diverges from Polar's defaults —
+  batch sizes up to *n* = 3 are testable. bitcoind is **Polar's image**; LND is
+  **Lightning Labs' own**, because Polar publishes no LND tag past `0.20.0-beta`
+  and the harness has to run the version an operator actually runs. `regtest/.env`
+  says so, and the harness deliberately diverges from Polar's defaults anyway —
   `maxpendingchannels=200`, "not the 10 Polar would give you". This file used to
   call the harness "regtest, via Polar (Docker)", which read as though the GUI
   were the inner loop. It is not, and `make harness` is what builds it.
+
+  **Lightning Labs' image differs from Polar's in three ways the compose file
+  absorbs**: its entrypoint is `lnd` itself, so `command` carries flags and not
+  the binary name; it runs as root with its data in `/root/.lnd` rather than as
+  `lnd` in `/home/lnd/.lnd`, which `regtest/Makefile`'s `creds` target and
+  `regtest/bin/lncli` both name; and it has no `USERID`/`GROUPID` entrypoint
+  shim, which costs nothing because the state lives in named volumes and
+  `docker cp` still lands the credentials owned by you.
 
   Confirmation depth, stuck transactions, CPFP and LND's ~2016-block forget
   horizon are all testable in seconds — the horizon is about ten seconds of
@@ -605,4 +635,4 @@ their state, and a funding transaction that confirms afterwards leaves coins in 
 give up at block 887,412, about 13 days" rather than saying there is time.
 `waitForTimeout` counts `lncfg.DefaultMaxWaitNumBlocksFundingConf` (2016) from
 the channel's broadcast height, and `fundingTimeout` is "only returned for the
-responder" (`funding/manager.go:2914`).
+responder" (`funding/manager.go:2940`).

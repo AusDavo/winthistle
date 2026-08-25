@@ -51,9 +51,10 @@ func (m macaroonCreds) GetRequestMetadata(context.Context, ...string) (map[strin
 
 func (m macaroonCreds) RequireTransportSecurity() bool { return true }
 
-// Dial connects to LND and blocks until the connection is ready, so a bad
-// address or an unreadable credential surfaces here rather than at the first
-// call inside a timed window.
+// Dial connects to LND and does not return until a GetInfo has round-tripped, so
+// a bad address or an unreadable credential surfaces here rather than at the
+// first call inside a timed window. The gRPC connection itself is lazy; the
+// probe is what makes this blocking.
 func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	certBytes, err := os.ReadFile(cfg.TLSCert)
 	if err != nil {
@@ -73,18 +74,25 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 	// default floor has moved before and this is not a place to inherit one.
 	tlsCfg := &tls.Config{RootCAs: pool, MinVersion: tls.VersionTLS12}
 
-	// DialContext rather than NewClient: we deliberately hold lnd's own grpc
-	// pin (v1.59) rather than bumping past the version LND is tested against,
-	// and NewClient does not exist there. The generated stubs are what we use,
-	// and they are stable across that range.
-	dialCtx, cancelDial := context.WithTimeout(ctx, 15*time.Second)
-	defer cancelDial()
+	// NewClient rather than DialContext. This used to be DialContext because we
+	// held lnd's own grpc pin at v1.59, where NewClient does not exist; lnd
+	// v0.21.2-beta pins v1.79, where DialContext is deprecated. Nothing is lost
+	// in the swap: DialContext without WithBlock never dialled either, so the
+	// 15-second context it was given bounded nothing. The GetInfo probe below is
+	// the only thing here that has ever proved the connection works, and it is
+	// still the thing that fails on a wrong address.
+	//
+	// One real difference: NewClient resolves through the dns resolver where
+	// DialContext defaulted to passthrough. [lnd] address is a host:port, which
+	// both handle, and a literal IP short-circuits dns — so this changes nothing
+	// for any address config.Load accepts.
+	//
 	// The guards refuse any call to a method internal/methods does not list, on
 	// both the unary and the streaming path. They are not a substitute for the
 	// baked macaroon — LND enforces that, and it does so whether or not this
 	// process agrees — but they turn a call site that outran the registry into a
 	// loud, local failure instead of one that works here and fails in production.
-	conn, err := grpc.DialContext(dialCtx, cfg.Address,
+	conn, err := grpc.NewClient(cfg.Address,
 		grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)),
 		grpc.WithPerRPCCredentials(macaroonCreds{hex.EncodeToString(macBytes)}),
 		grpc.WithChainUnaryInterceptor(methods.UnaryGuard()),

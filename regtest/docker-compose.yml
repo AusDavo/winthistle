@@ -7,19 +7,23 @@
 # with `make creds` instead.
 name: winthistle-regtest
 
+# Lightning Labs' own image, not Polar's: Polar publishes no tag past
+# 0.20.0-beta, and the harness has to run the LND an operator actually runs. It
+# differs from Polar's in three ways that this file has to absorb — its
+# entrypoint is `lnd` itself, so `command` carries flags and not the binary name;
+# it runs as root with its data in /root/.lnd rather than as `lnd` in
+# /home/lnd/.lnd; and it has no USERID/GROUPID entrypoint shim, which costs
+# nothing here because the state lives in named volumes.
 x-lnd: &lnd
-  image: polarlightning/lnd:${LND_VERSION}
+  image: lightninglabs/lnd:${LND_VERSION}
   restart: unless-stopped
-  environment:
-    USERID: ${USERID}
-    GROUPID: ${GROUPID}
   depends_on:
     bitcoind:
       condition: service_healthy
     chain-init:
       condition: service_completed_successfully
   healthcheck:
-    test: ["CMD-SHELL", "lncli --network=regtest --lnddir=/home/lnd/.lnd getinfo >/dev/null 2>&1"]
+    test: ["CMD-SHELL", "lncli --network=regtest --lnddir=/root/.lnd getinfo >/dev/null 2>&1"]
     interval: 5s
     timeout: 5s
     retries: 40
@@ -90,39 +94,39 @@ services:
   alice:
     <<: *lnd
     container_name: wt-alice
-    command: lnd --alias=alice --tlsextradomain=alice --externalip=alice ${LND_FLAGS}
+    command: --alias=alice --tlsextradomain=alice --externalip=alice ${LND_FLAGS}
     ports:
       - "10009:10009"
       - "8080:8080"
     volumes:
-      - alice:/home/lnd/.lnd
+      - alice:/root/.lnd
 
   bob:
     <<: *lnd
     container_name: wt-bob
-    command: lnd --alias=bob --tlsextradomain=bob --externalip=bob ${LND_FLAGS}
+    command: --alias=bob --tlsextradomain=bob --externalip=bob ${LND_FLAGS}
     ports:
       - "10010:10009"
     volumes:
-      - bob:/home/lnd/.lnd
+      - bob:/root/.lnd
 
   carol:
     <<: *lnd
     container_name: wt-carol
-    command: lnd --alias=carol --tlsextradomain=carol --externalip=carol ${LND_FLAGS}
+    command: --alias=carol --tlsextradomain=carol --externalip=carol ${LND_FLAGS}
     ports:
       - "10011:10009"
     volumes:
-      - carol:/home/lnd/.lnd
+      - carol:/root/.lnd
 
   dave:
     <<: *lnd
     container_name: wt-dave
-    command: lnd --alias=dave --tlsextradomain=dave --externalip=dave ${LND_FLAGS}
+    command: --alias=dave --tlsextradomain=dave --externalip=dave ${LND_FLAGS}
     ports:
       - "10012:10009"
     volumes:
-      - dave:/home/lnd/.lnd
+      - dave:/root/.lnd
 
 volumes:
   bitcoind:

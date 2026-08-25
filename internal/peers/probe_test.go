@@ -7,7 +7,7 @@ import (
 	"time"
 )
 
-// The strings below are assembled the way LND assembles them at v0.19.3-beta,
+// The strings below are assembled the way LND assembles them at v0.21.2-beta,
 // and that assembly is the thing under test.
 //
 // The peer's own words go out through failFundingFlow, which forwards the real
@@ -192,7 +192,8 @@ func TestReadyToArmWaitsOnlyForAcceptedProbes(t *testing.T) {
 
 func TestHoldUpperBoundMatchesLNDsOwnConstants(t *testing.T) {
 	// chanfunding.DefaultReservationTimeout plus lncfg.DefaultZombieSweeperInterval.
-	// TestWhoOwnsTheTenMinuteClock measured 10m41s against bob, which is inside
+	// TestWhoOwnsTheTenMinuteClock measured 10m41s at v0.19.3-beta and 10m14s at
+	// v0.21.2-beta, both inside
 	// this bound and outside the ten minutes alone.
 	if HoldUpperBound != 11*time.Minute {
 		t.Fatalf("HoldUpperBound = %s, want 11m", HoldUpperBound)

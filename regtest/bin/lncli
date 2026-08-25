@@ -3,5 +3,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 node=${1:?usage: lncli <alice|bob|carol|dave> <args...>}; shift
-# exec runs as root, whose ~ is /root — LND's data lives under the lnd user.
-exec docker compose exec -T "$node" lncli --network=regtest --lnddir=/home/lnd/.lnd "$@"
+# --lnddir is stated rather than inherited: it is /root/.lnd only because
+# Lightning Labs' image runs LND as root, and Polar's — which this harness used
+# until the 0.21.2 bump — put it under /home/lnd instead.
+exec docker compose exec -T "$node" lncli --network=regtest --lnddir=/root/.lnd "$@"

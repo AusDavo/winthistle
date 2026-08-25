@@ -13,7 +13,8 @@ import (
 
 // How long after our OpenChannel call a peer's reservation is certainly gone.
 //
-// TestWhoOwnsTheTenMinuteClock measured 10m41s against bob: ten minutes of
+// TestWhoOwnsTheTenMinuteClock measured 10m41s at v0.19.3-beta and 10m14s at
+// v0.21.2-beta: ten minutes of
 // DefaultReservationTimeout plus up to a minute of DefaultZombieSweeperInterval
 // granularity. Neither is adjustable in a release build.
 const peerWindowCertainlyOver = 11*time.Minute + 30*time.Second

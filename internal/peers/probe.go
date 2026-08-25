@@ -337,9 +337,12 @@ func Unwrap(err error) Rejection {
 // notConnected recognises the refusals that come from our own node because the
 // peer is not reachable.
 //
-// "peer <pubkey> is not online" is rpcserver.go's wording when OpenChannel is
-// asked about a peer with no live connection, and it arrives with the pubkey
-// spliced into the middle — so the match is on the tail, not on a fixed phrase.
+// "peer <pubkey> is not online" is server.go's wording — fmt.Errorf("peer %x is
+// not online", pubKeyBytes), at v0.21.2-beta server.go:5320 — raised when
+// OpenChannel is asked about a peer with no live connection. It arrives with the
+// pubkey spliced into the middle, so the match is on the tail, not on a fixed
+// phrase. This comment used to name rpcserver.go, where the string has never
+// been at any version; a citation nobody can grep is a citation nobody checks.
 func notConnected(raw string) bool {
 	for _, phrase := range []string{
 		"is not online",

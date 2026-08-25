@@ -100,7 +100,7 @@ func TestUpdateChannelPolicyRefusesAPendingChannelInsideASuccessOK(t *testing.T)
 	})
 	if err != nil {
 		t.Fatalf("UpdateChannelPolicy on a pending channel returned an error, which "+
-			"is not what v0.19.3-beta does — the finding may have changed: %v", err)
+			"is not what v0.21.2-beta does — the finding may have changed: %v", err)
 	}
 	if len(resp.GetFailedUpdates()) == 0 {
 		t.Fatal("LND reported no failure for a pending channel. If that is now " +

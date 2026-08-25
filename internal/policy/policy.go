@@ -19,7 +19,7 @@
 // about that is visible in the amounts, so a plan that showed only the amounts
 // would have the operator approve half of the decision.
 //
-// All source citations are against lnd v0.19.3-beta.
+// All source citations are against lnd v0.21.2-beta.
 package policy
 
 import "fmt"

@@ -201,7 +201,7 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		says string
 	}{{
 		// The general case: whatever the node said, said back. The two cases
-		// below are the specific shapes v0.19.3-beta actually produces, and this
+		// below are the specific shapes v0.21.2-beta actually produces, and this
 		// one is here because our wrapping must not swallow a message it does not
 		// recognise either.
 		name: "an error the node returned and this build has never seen",
@@ -209,7 +209,7 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		says: "insufficient fee",
 	}, {
 		// The UpdateChannelPolicy shape: a refusal arriving inside a successful
-		// response. WalletKit does not use it at v0.19.3-beta, but the field is
+		// response. WalletKit does not use it at v0.21.2-beta, but the field is
 		// in the proto, and a caller that looked only at err would journal a
 		// publish that never happened and then report success to the operator.
 		name: "publish_error inside a successful response",
@@ -224,7 +224,7 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		// ErrTxAlreadyKnown and ErrTxAlreadyConfirmed all collapse into a bare
 		// lnwallet.ErrDoubleSpend — Core's reject string is *dropped*, so
 		// "txn-mempool-conflict" above is what the proto could carry and not what
-		// v0.19.3-beta says. Which is why the assertion here is that our message
+		// v0.21.2-beta says. Which is why the assertion here is that our message
 		// keeps what we were told, however little that is: an operator with n
 		// peers holding reservations gets "output already spent" and no reason
 		// code, and must not also lose it to our own wrapping.

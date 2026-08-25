@@ -21,7 +21,7 @@ import (
 //
 // CLAUDE.md's rejected list said skip_finalize "skips the step that produces the
 // chan_pending gate I-1 depends on", and marked it non-negotiable. The source
-// says otherwise. In lnwallet/chanfunding/psbt_assembler.go at v0.19.3-beta,
+// says otherwise. In lnwallet/chanfunding/psbt_assembler.go at v0.21.2-beta,
 // PsbtIntent.Verify ends:
 //
 //	if !i.shouldPublish && skipFinalize {

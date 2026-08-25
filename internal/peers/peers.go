@@ -24,7 +24,7 @@
 // still works — but it is not free of the peer's patience, and that turns out to
 // matter more.
 //
-// Reading handleFundingOpen at v0.19.3-beta: before the peer creates anything it
+// Reading handleFundingOpen at v0.21.2-beta: before the peer creates anything it
 // counts its live reservations for us plus its pending channels with no thaw
 // height, and refuses with ErrMaxPendingChannels if that count is already at
 // --maxpendingchannels. LND's default for that flag is 1. Then, if it accepts,
@@ -63,7 +63,7 @@
 //   - A refused probe is free, so re-probing downwards to find a peer's minimum
 //     costs nothing at all. It is only the accepted one that has to be the last.
 //
-// All source citations are against lnd v0.19.3-beta.
+// All source citations are against lnd v0.21.2-beta.
 package peers
 
 import (
@@ -87,7 +87,9 @@ import (
 // unchanged; lncfg.DefaultZombieSweeperInterval is how often the sweeper looks.
 // Neither is adjustable in a release build — lncfg/dev.go returns the constant
 // and only a dev-tagged build reads the flags — so the hold is bounded by their
-// sum, and TestWhoOwnsTheTenMinuteClock measured 10m41s against bob.
+// sum, and TestWhoOwnsTheTenMinuteClock has measured it twice: 10m41s against
+// bob at lnd v0.19.3-beta, and 10m14s against carol at v0.21.2-beta. The spread
+// is the sweeper's one-minute granularity, not a change in the timeout.
 //
 // Stated here rather than imported because they describe the *peer's* build, not
 // ours, and a peer that is not LND is bound by neither.

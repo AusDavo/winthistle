@@ -18,7 +18,7 @@ const slowEnv = "WINTHISTLE_SLOW"
 // "Exactly when does each peer's ten-minute clock start — at OpenChannel, or at
 // the peer's accept_channel?"
 //
-// The answer from LND's source at v0.19.3-beta, which this test then measures:
+// The answer from LND's source at v0.21.2-beta, which this test then measures:
 //
 //   - Our own node never starts a clock at all. pruneZombieReservations skips
 //     PSBT reservations outright — "We don't want to expire PSBT funding
@@ -73,7 +73,8 @@ func TestWhoOwnsTheTenMinuteClock(t *testing.T) {
 			"— both would change what the countdown should say",
 			elapsed.Round(time.Second), 10*time.Minute)
 	}
-	// Measured 10m41s against bob on 2026-08-23: ten minutes of
+	// Measured 10m41s against bob on 2026-08-23 at lnd v0.19.3-beta, and 10m14s
+	// against carol on 2026-08-26 at v0.21.2-beta: ten minutes of
 	// DefaultReservationTimeout plus the sweeper's up-to-a-minute granularity.
 	// LND's own wording for it is worth knowing, because it is what an operator
 	// will see — "remote canceled funding, possibly timed out", which is

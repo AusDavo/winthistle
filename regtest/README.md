@@ -68,10 +68,15 @@ Two of these cost real debugging time; both fail in ways that look like your cod
   one** — it sits at `Waiting for chain backend to finish sync` forever, so no
   healthcheck can ever pass. The one-shot `chain-init` service matures the chain
   to 101 blocks (past coinbase depth) before any LND node is allowed to start.
-- **`docker compose exec` and healthchecks run as root**, whose `~` is `/root`,
-  while LND runs as the `lnd` user with its data in `/home/lnd/.lnd`. So every
-  `lncli` invocation needs `--lnddir=/home/lnd/.lnd` or it fails with a missing
-  `tls.cert` — which reads like a TLS problem and is not one.
+- **The LND data directory is an image detail, and it moved.** Polar's image ran
+  LND as the `lnd` user with its data in `/home/lnd/.lnd`, while `docker compose
+  exec` and healthchecks run as root, whose `~` is `/root` — so every `lncli`
+  invocation needed `--lnddir=/home/lnd/.lnd` or it failed with a missing
+  `tls.cert`, which reads like a TLS problem and is not one. Lightning Labs'
+  image, which this harness uses from `v0.21.2-beta`, runs LND as root with its
+  data in `/root/.lnd`, so the flag now happens to name `lncli`'s own default.
+  It is still stated explicitly, in the compose healthcheck, in `bin/lncli` and
+  in the `creds` target, because it is the image's choice and not ours.
 - **Core does not auto-load non-default wallets.** After `make down && make up`,
   or any bitcoind restart, `miner` and the three cold wallets are still on disk
   but closed, and every wallet-scoped call fails with "Requested wallet does not
@@ -93,6 +98,14 @@ Two of these cost real debugging time; both fail in ways that look like your cod
   that, and its own comment says "not the 10 Polar would give you" — so the two
   files disagreed about which number was the harness's and which was Polar's.
   `.env` is authoritative: it is the file the containers actually read.
+- **LND is Lightning Labs' image; bitcoind is Polar's.** Polar publishes no LND
+  tag past `0.20.0-beta`, and the harness has to run the version an operator
+  actually runs. Three differences the compose file absorbs: the entrypoint is
+  `lnd` itself, so `command` carries flags and not the binary name; the data
+  directory is `/root/.lnd`, above; and there is no `USERID`/`GROUPID` entrypoint
+  shim, which costs nothing because the state lives in named volumes and
+  `docker cp` still lands `creds/` owned by you. Note the tags differ in shape
+  too — Polar's LND tags had no `v`, Lightning Labs' do.
 - **Named volumes, not bind mounts.** Avoids the uid-mismatch trap, and keeps
   this usable against a remote daemon — `docker context create stacker --docker
   host=ssh://stacker@host` then `docker --context stacker compose up -d`.

@@ -59,7 +59,7 @@ func TestTheReportStaysInThePane(t *testing.T) {
 	r := &Report{}
 
 	ok := r.add(Check{Name: "LND"})
-	ok.say("bitcoin regtest, lnd 0.19.3-beta, " +
+	ok.say("bitcoin regtest, lnd 0.21.2-beta, " +
 		"02c6047f9441ed7d6d3045406e95c07cd85c778e4b8cef3ca7abac09b95c709ee5")
 
 	bad := r.add(Check{Name: "the macaroon"})

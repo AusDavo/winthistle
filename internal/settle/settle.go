@@ -17,7 +17,7 @@
 //
 // docs/design.html leaves open whether UpdateChannelPolicy accepts a channel
 // point that is pending but not yet active, and answers it by not asking: poll,
-// and the question stops mattering. Reading v0.19.3-beta, the answer turns out to
+// and the question stops mattering. Reading v0.21.2-beta, the answer turns out to
 // be worse than either option the question offered, and the design's instinct was
 // right for a reason it did not know.
 //
@@ -68,7 +68,7 @@
 // number this package watches, and CPFP out of the change output is the only
 // remedy — never a replacement, which is I-4.
 //
-// All source citations are against lnd v0.19.3-beta.
+// All source citations are against lnd v0.21.2-beta.
 package settle
 
 import (

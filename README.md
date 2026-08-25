@@ -144,7 +144,8 @@ expires a PSBT reservation; the peer's does.
 `chanfunding.DefaultReservationTimeout` is 10 minutes and
 `lncfg.DefaultZombieSweeperInterval` is 1 minute, neither adjustable in a release
 build, so a peer holds one for at most 11 minutes. Measured against the harness:
-10m41s. Ten minutes is LND's default — a CLN or Eclair peer has its own, and any
+10m41s at lnd v0.19.3-beta, and 10m14s again at v0.21.2-beta. Ten minutes is
+LND's default — a CLN or Eclair peer has its own, and any
 peer can reconfigure, so design against it as a convention rather than a
 guarantee.
 

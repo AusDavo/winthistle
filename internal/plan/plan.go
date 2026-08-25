@@ -12,7 +12,7 @@
 //
 // It is tempting to think LND's psbt_verify already does this. It does not, and
 // the gap is not an oversight — it is what makes the batch possible.
-// PsbtIntent.Verify, in lnwallet/chanfunding/psbt_assembler.go at v0.19.3-beta:
+// PsbtIntent.Verify, in lnwallet/chanfunding/psbt_assembler.go at v0.21.2-beta:
 //
 //	outputFound := false
 //	outputSum := int64(0)

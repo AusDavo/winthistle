@@ -179,7 +179,8 @@ so at the moment it happens.
    defect and fails on it.
 7. **Separately, deliberately let one stream lapse without verifying**, to
    observe a real peer's timeout rather than trusting the ten-minute figure.
-   Regtest measured 10m41s against a stock LND; a CLN or Eclair peer has its own.
+   Regtest measured 10m41s against a stock LND at v0.19.3-beta and 10m14s at
+   v0.21.2-beta; a CLN or Eclair peer has its own.
 
 ### Reading the probe's journal row afterwards
 
@@ -228,15 +229,16 @@ inline in a test or a doc example.
    cited as live anywhere.
 
 2. **The receipt buffer — settled, and it fits.** `req.Updates` is
-   `make(chan *lnrpc.OpenStatusUpdate, 2)` (`lnd/server.go:5190`), and the
+   `make(chan *lnrpc.OpenStatusUpdate, 2)` (`lnd/server.go:5309`), and the
    funding manager blocks when it is full. Steps 5→6 verify all *n* and then
    collect *n* receipts, which is what `arm.Receipts` does, and this flow produces
    exactly two updates per stream before confirmation: `psbt_fund` (read in
-   `Open`) and `chan_pending`. Re-verified against LND v0.19.3-beta on
+   `Open`) and `chan_pending`. Re-verified against LND v0.21.2-beta on
    2026-08-26: every send into an update channel in `funding/manager.go` is at
-   `:2217` (`psbt_fund`), `:2884` (`chan_pending`) and `:4265` (`ChanOpen`, which
-   is after confirmation), and there is no fourth. This file used to cite `:2873`
-   and `:4254`, which are the `upd :=` construction and the `if updateChan != nil`
+   `:2241` (`psbt_fund`), `:2908` (`chan_pending`) and `:4483` (`ChanOpen`, which
+   is after confirmation), and there is no fourth. At v0.19.3-beta the same three
+   sends were `:2217`, `:2884` and `:4265`; before that this file cited `:2873`
+   and `:4254`, which were the `upd :=` construction and the `if updateChan != nil`
    guard — a few lines short of the sends, and the kind of citation that stops
    being checkable.
    There is room for the receipt and no room for anything else. **A third update
@@ -257,8 +259,8 @@ inline in a test or a doc example.
    is stale for a second reason.
 
 **Four claims that were wrong**, found by auditing rather than by working:
-`handleFundingSigned` does not exist in LND v0.19.3-beta (it is
-`funderProcessFundingSigned`, `funding/manager.go:2694`) and was cited in three
+`handleFundingSigned` does not exist in LND at any version (it is
+`funderProcessFundingSigned`, `funding/manager.go:2718` at v0.21.2-beta) and was cited in three
 documents; there is no CI in this repository, though `CLAUDE.md` and `README.md`
 both said there was; the harness is a hand-written compose file that borrows
 Polar's images rather than Polar itself; and `docs/design.html`'s macaroon block
@@ -481,12 +483,20 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
   txid a human or Core sees. `lnd.ChannelPointFromPending` handles it; hex-encoding
   those bytes directly yields a plausible txid that matches nothing.
 - **`lnd@latest` resolves to `v0.0.2`**, a retracted tag — lnd's real versions are
-  pre-releases. Pin `v0.19.3-beta`, matching `regtest/.env`.
-- **lnd needs a forked protobuf.** `lnrpc` uses `protojson`'s `UseHexForBytes`,
-  which only exists in Lightning Labs' fork. A dependency's `replace` does not
-  apply transitively, so `go.mod` restates it. Do not remove it.
-- **grpc is held at lnd's own pin (v1.59)**, which has no `grpc.NewClient`;
-  `DialContext` is deliberate, not legacy.
+  pre-releases. Pin the exact tag, matching `regtest/.env`; it is `v0.21.2-beta`.
+- **lnd needs a forked protobuf, and the restatement does not follow the bump.**
+  `lnrpc` uses `protojson`'s `UseHexForBytes`, which only exists in Lightning
+  Labs' fork. A dependency's `replace` does not apply transitively, so `go.mod`
+  restates it — and because it is a restatement, `go get` on lnd leaves it where
+  it was. It sat at `v1.30.0-hex-display` against an lnd that replaces at
+  `v1.33.0-hex-display`. **Read lnd's own `go.mod` on every version bump** and
+  match the line. Do not remove it.
+- **grpc rides lnd's pin, and it moved.** It was v1.59, which has no
+  `grpc.NewClient`, so `internal/lnd.Dial` used `DialContext` on purpose. lnd
+  v0.21.2-beta pins v1.79, where `DialContext` is deprecated and `NewClient` is
+  the call — `Dial` uses it now. Nothing was lost: `DialContext` without
+  `WithBlock` never dialled either, so its 15-second context bounded nothing, and
+  the `GetInfo` probe was always the thing that proved the connection.
 - **`journal/` was an unanchored .gitignore pattern**, so `internal/journal/`
   matched it and the whole package was silently un-committable. Now `/journal/`
   and `/runs/`, anchored to the repo root where they were meant to be. Worth
@@ -569,14 +579,14 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
 
 - **A stream must be read promptly, or the funding manager waits — and the new
   sequence spends the buffer.** `funderProcessFundingSigned` sends `chan_pending`
-  on `resCtx.updates`, a channel with a buffer of 2 (`server.go:5190`), and blocks
+  on `resCtx.updates`, a channel with a buffer of 2 (`server.go:5309`), and blocks
   on `f.quit` if it is full. One slot is spent on `psbt_fund`, read in
   `arm.Open`. `arm.Verify` then verifies all *n* streams and `arm.Receipts` reads
   the *n* receipts afterwards, so at the worst moment every stream is holding one
   unread `chan_pending` in one free slot. That fits exactly, with nothing spare.
   It is safe because this flow produces exactly two updates per stream before
-  confirmation and there is no third emitter — `funding/manager.go:2217`,
-  `:2873`, `:4254` are every send site. **Add a third update per stream, or stop
+  confirmation and there is no third emitter — `funding/manager.go:2241`,
+  `:2908`, `:4483` are every send site, at v0.21.2-beta. **Add a third update per stream, or stop
   reading promptly, and the funding manager blocks; the failure reads as a dead
   peer.** `arm.Receipts`' doc comment carries this where it would be read.
 
@@ -646,7 +656,8 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
 - **LND calls itself unsynced when regtest's tip is more than two hours old, and
   a long test can cross that line mid-run.** btcwallet's `IsSynced`: "if the
   timestamp on the best header is more than 2 hours in the past, then we're not
-  yet synced" — exactly two hours, at v0.19.3-beta. `OpenChannel` then refuses
+  yet synced" — exactly two hours; `isCurrentDelta` in btcwallet's
+  `chain/interface.go`, still `2 * time.Hour` under lnd v0.21.2-beta. `OpenChannel` then refuses
   with `channels cannot be created before the wallet is fully synced`, which
   reads like a node problem and is a *clock* problem: nothing has been mined.
   It bit the funding-timeout test on its first run, where the stream opened at

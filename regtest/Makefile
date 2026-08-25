@@ -33,8 +33,8 @@ cold:  ## build the simulated 2-of-2 multisig cold wallet
 creds:  ## copy each node's tls.cert and admin.macaroon into ./creds
 > @for n in $(NODES); do \
 >   mkdir -p creds/$$n; \
->   docker cp wt-$$n:/home/lnd/.lnd/tls.cert creds/$$n/tls.cert; \
->   docker cp wt-$$n:/home/lnd/.lnd/data/chain/bitcoin/regtest/admin.macaroon \
+>   docker cp wt-$$n:/root/.lnd/tls.cert creds/$$n/tls.cert; \
+>   docker cp wt-$$n:/root/.lnd/data/chain/bitcoin/regtest/admin.macaroon \
 >     creds/$$n/admin.macaroon; \
 >   echo "creds/$$n/"; \
 > done

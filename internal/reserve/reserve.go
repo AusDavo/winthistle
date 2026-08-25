@@ -46,7 +46,7 @@
 // public channel opens, and there is less on hand to fee-bump a force-close than
 // LND has decided there should be.
 //
-// All source citations are against lnd v0.19.3-beta.
+// All source citations are against lnd v0.21.2-beta.
 package reserve
 
 import (

@@ -19,12 +19,17 @@
 //	8  publish once, if the txid did not move
 //
 // What makes it possible is one line of LND. PsbtIntent.Verify ends
-// (chanfunding/psbt_assembler.go:290-304) with, when !shouldPublish &&
-// skipFinalize, i.FinalTX = packet.UnsignedTx, i.State = PsbtFinalized and
-// close(i.PsbtReady) — so the funding flow continues from the *unsigned*
-// transaction, CompileFundingTx sets the outpoint in stone from it, and
-// chan_pending arrives with nothing signed. Proved on regtest at n = 2:
-// TestSkipFinalizeReachesChanPendingWithNothingSigned.
+// (chanfunding/psbt_assembler.go:293-300, at v0.21.2-beta) with, when
+// !shouldPublish && skipFinalize, i.FinalTX = packet.UnsignedTx,
+// i.State = PsbtFinalized and a close of i.PsbtReady — so the funding flow
+// continues from the *unsigned* transaction, CompileFundingTx sets the outpoint
+// in stone from it, and chan_pending arrives with nothing signed. Proved on
+// regtest at n = 2: TestSkipFinalizeReachesChanPendingWithNothingSigned.
+//
+// The close is wrapped in i.signalPsbtReady, a sync.Once, rather than being a
+// bare close(i.PsbtReady). That is a guard against a double close inside LND and
+// changes nothing here: the channel still closes exactly once, on the first
+// skip_finalize verify, which is the edge Receipts waits on.
 //
 // A consequence, not a detail: after a skip_finalize verify there is no
 // psbt_finalize to make. Both of LND's finalize entry points require

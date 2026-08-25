@@ -82,7 +82,7 @@ type Method struct {
 	// call also covers calls we must never be able to make.
 	//
 	// Read out of rpcserver.go's MainRPCServerPermissions and
-	// walletkit_server.go's macPermissions at v0.19.3-beta. Not load-bearing:
+	// walletkit_server.go's macPermissions at v0.21.2-beta. Not load-bearing:
 	// nothing decides anything on these, they only explain the choice.
 	Ops []Op
 
@@ -138,7 +138,7 @@ type Capability struct {
 
 	// Ops is what LND's own permission map demands for this method, read out of
 	// MainRPCServerPermissions and walletkit_server.go's macPermissions at
-	// v0.19.3-beta.
+	// v0.21.2-beta.
 	//
 	// Unlike Method.Ops these are load-bearing: `winthistle doctor` asks LND
 	// whether the configured credential holds them, through
@@ -160,7 +160,7 @@ type Capability struct {
 // exists that choice is load-bearing rather than pending. The promise the
 // never-list makes is about spending and signing, and broadcasting is neither.
 // WalletKit.PublishTransaction deserializes the bytes it is given, hands them to
-// the wallet, and returns — walletkit_server.go, v0.19.3-beta; there is no
+// the wallet, and returns — walletkit_server.go, v0.21.2-beta; there is no
 // signing step in it. So a credential holding it can relay a transaction that is
 // already fully signed and nothing else, and producing a fully signed transaction
 // needs a signature this credential cannot obtain: SendCoins, SendMany,
@@ -169,14 +169,25 @@ type Capability struct {
 // I-1 is the reason it has to be here at all. no_publish leaves the single
 // publish to the app, and WalletKit is the route that also puts the transaction
 // in LND's wallet-level rebroadcaster.
+//
+// WalletKit.SubmitPackage, new at v0.21.2-beta, is absent for the same reason
+// PublishTransaction is: it broadcasts, and broadcasting is not what this list
+// promises about. It is also not registered, so the guard refuses it and the
+// baked credential never carries it — which is the only reason it needs no entry
+// of its own. If a call site is ever added for it, that is a decision about I-4
+// and the CPFP child, not a registry edit.
 var forbidden = []Capability{
 	{"/lnrpc.Lightning/SendCoins", "send coins on-chain",
 		[]Op{{"onchain", "write"}}},
 	{"/lnrpc.Lightning/SendMany", "send coins on-chain",
 		[]Op{{"onchain", "write"}}},
-	{"/lnrpc.Lightning/SendPaymentSync", "send a payment",
+	// These two were /lnrpc.Lightning/SendPaymentSync and SendToRouteSync until
+	// the v0.21.2-beta bump, which removed both from lightning.proto. A
+	// never-list entry naming a method LND no longer serves promises nothing, so
+	// they are restated at the RPCs that actually carry a payment now.
+	{"/routerrpc.Router/SendPaymentV2", "send a payment",
 		[]Op{{"offchain", "write"}}},
-	{"/lnrpc.Lightning/SendToRouteSync", "send a payment",
+	{"/routerrpc.Router/SendToRouteV2", "send a payment",
 		[]Op{{"offchain", "write"}}},
 	{"/lnrpc.Lightning/CloseChannel", "close a channel",
 		[]Op{{"onchain", "write"}, {"offchain", "write"}}},
