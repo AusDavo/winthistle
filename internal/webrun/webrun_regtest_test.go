@@ -30,12 +30,14 @@ const fixtureChannelSat = 250_000
 // four seams answered through the HTTP handler instead of through a Go func. It
 // is the test that says the seams work rather than that they compile:
 //
-//   - two full signing rounds go out as base64 in a Question and come back as
-//     base64 in a form post, through internal/combine and internal/arm's
-//     verifier untouched. Six devices' worth of transport code is not being
-//     exercised here — one field out, one field back, which is the browser
-//     transport at its minimum — but the packets are real, the cold wallet is
-//     the harness's real 2-of-2, and each half returns only its own partial.
+//   - the wallet's two questions — step 4's unsigned transaction and step 7's
+//     signed one — go out and come back through a form post, and the packets
+//     travel through internal/plan's verifier, internal/arm and
+//     internal/combine untouched. One field out, one field back, which is the
+//     browser transport at its minimum. The transaction is built and signed by
+//     the harness's real 2-of-2, and it is *combined outside the app*, so what
+//     arrives at step 7 is one packet with a complete witness — the input
+//     combine.Accept exists for.
 //   - the run is started by a POST, which is this repository's first unsafe
 //     method, behind the guard that already refused one that could not say where
 //     it came from.
@@ -87,7 +89,8 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 
 	// Drive it. Every answer goes through the handler, so what is being tested is
 	// the route rather than the adapter.
-	signed, confirmed, answered := 0, 0, map[string]bool{}
+	built, signed, confirmed, answered := 0, 0, 0, map[string]bool{}
+	var funded regtestenv.FundedPSBT
 	deadline := time.Now().Add(6 * time.Minute)
 
 	for time.Now().Before(deadline) {
@@ -122,18 +125,33 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 			// the round is over, and the first question is the first device of
 			// that round. What has to be on the screen is the question, inside
 			// the <pre> decision 3's oracle covers.
-			if got := preOf(t, body); !strings.Contains(got, "The dress rehearsal") {
+			if got := preOf(t, body); !strings.Contains(got, "Enter the recipients above") {
 				t.Errorf("the question is not on the screen:\n%s", got)
 			}
 		}
 
 		values := url.Values{"question": {q.ID}}
 		switch {
+		case offers(q, webrun.ChoiceBuilt):
+			// Step 4: the harness reads the table off the transcript, exactly as an
+			// operator reads it off the page, and builds the transaction.
+			transcript, _, _ := run.State()
+			funded = env.BuildPSBTPaying(t, env.Cold,
+				regtestenv.RecipientsIn(t, transcript), cfg.Fees.FloorSatPerVB)
+			values.Set("choice", webrun.ChoiceBuilt)
+			values.Set("reply", base64.StdEncoding.EncodeToString(funded.Raw))
+			built++
 		case offers(q, webrun.ChoiceSigned):
-			label := device(t, q.Prompt)
-			part := env.SignPartial(t, label, q.Payload)
+			// Step 7: both halves sign and the combining happens here, outside the
+			// app. A fixture that returned partials would leave combine.Accept
+			// untested no matter how green it went.
+			if funded.Raw == nil {
+				t.Fatal("the run asked for a signature before it asked for a " +
+					"transaction, so step 7 came before step 4")
+			}
 			values.Set("choice", webrun.ChoiceSigned)
-			values.Set("reply", base64.StdEncoding.EncodeToString(part.PSBT))
+			values.Set("reply", base64.StdEncoding.EncodeToString(
+				env.SignLikeSparrow(t, funded.Raw)))
 			signed++
 		case offers(q, webrun.ChoiceYes):
 			// The blunt abandon. LND's safe flag infers "shim funded" from
@@ -154,19 +172,19 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 	transcript, finished, runErr := run.State()
 	t.Logf("\n%s", transcript)
 	if !finished {
-		t.Fatalf("the run was still going after 6 minutes; %d signatures and %d "+
-			"confirmations went in", signed, confirmed)
+		t.Fatalf("the run was still going after 6 minutes; %d transactions, %d "+
+			"signatures and %d confirmations went in", built, signed, confirmed)
 	}
 	if runErr != nil {
 		t.Fatalf("the browser-driven cold probe: %v", runErr)
 	}
 
-	// Two rounds of two devices: the dress rehearsal and the batch. If the
-	// rehearsal had been skipped this would be two, and the gate would be
-	// measuring nothing.
-	if signed != 4 {
-		t.Errorf("%d packets were signed through the page, expected 4 — two rounds "+
-			"of two devices", signed)
+	// One wallet, asked twice: once for the transaction and once for the
+	// signatures. It used to be four — two rounds of two devices, the dress
+	// rehearsal and the batch — and both the rounds and the rehearsal are gone.
+	if built != 1 || signed != 1 {
+		t.Errorf("the page was asked for %d transactions and %d signatures, "+
+			"expected one of each", built, signed)
 	}
 	if confirmed == 0 {
 		t.Error("the teardown never asked for a blunt abandon, so the per-channel " +
@@ -186,8 +204,10 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 	// Every question that was answered left a record, so a reload after the
 	// ceremony shows what the operator agreed to rather than nothing at all.
 	for _, want := range []string{
-		"> The dress rehearsal", "> The signing round", "> Abandon this channel?",
-		"This is the signed packet", "i_know_what_i_am_doing",
+		"> Step 4 — build the transaction in your wallet", "> Step 7 — sign it",
+		"> Abandon this channel?",
+		"This is the transaction I built", "This is the signed transaction",
+		"i_know_what_i_am_doing",
 	} {
 		if !strings.Contains(transcript, want) {
 			t.Errorf("the transcript keeps no record of %q", want)
@@ -231,15 +251,17 @@ func TestABrowserDrivenColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T
 			"step 8 is the one call it does not make", jr.TxID)
 	}
 
-	// And every device's partial is recorded, which is what a recovery screen
-	// reads to say how far the signing round got.
+	// And the wallet is recorded as having signed, which is what a recovery screen
+	// reads to say how far step 7 got. One row, because one wallet was asked.
 	for _, sg := range jr.Signers {
-		if sg.State != journal.SignerPartial {
-			t.Errorf("signer %s is journalled as %s", sg.Label, sg.State)
+		if sg.State != journal.SignerSigned {
+			t.Errorf("signer %s is journalled as %s, want %s", sg.Label, sg.State,
+				journal.SignerSigned)
 		}
 	}
-	if len(jr.Signers) != 2 {
-		t.Errorf("the journal recorded %d signers for the batch round", len(jr.Signers))
+	if len(jr.Signers) != 1 {
+		t.Errorf("the journal recorded %d signers for a batch signed by one wallet",
+			len(jr.Signers))
 	}
 
 	// The run is over, so the registry offers the control again — and the abort
@@ -284,8 +306,8 @@ func TestTheSecondRunIsRefusedWhileTheFirstIsGoing(t *testing.T) {
 	id := strings.TrimPrefix(first.Header().Get("Location"), "/runs/")
 	run := s.Runs.Get(id)
 
-	// Wait until the run is genuinely under way — the first question is a
-	// rehearsal signature, which means Core has already been asked for coins.
+	// Wait until the run is genuinely under way — the first question is step 4,
+	// which means the streams are open and a peer is holding a reservation.
 	waitForQuestion(t, run)
 
 	second := do(t, s, form(t, s, "/runs", url.Values{}))
@@ -293,7 +315,10 @@ func TestTheSecondRunIsRefusedWhileTheFirstIsGoing(t *testing.T) {
 		t.Fatalf("the second concurrent run got %d, want 409:\n%s",
 			second.Code, second.Body.String())
 	}
-	if got := preOf(t, second.Body.String()); !strings.Contains(got, "dress rehearsal") {
+	if got := preOf(t, second.Body.String()); !strings.Contains(
+		strings.Join(strings.Fields(got), " "),
+		"spends the outputs the first one is about to") {
+
 		t.Errorf("the refusal does not say why the rule is what it is:\n%s", got)
 	}
 
@@ -329,19 +354,6 @@ func offers(q *server.Question, value string) bool {
 		}
 	}
 	return false
-}
-
-// device is which half of the simulated cold wallet a question is about. The
-// prompt names it, because a refusal that does not name the device is a hunt.
-func device(t *testing.T, prompt string) string {
-	t.Helper()
-	for _, label := range regtestenv.ColdSigners() {
-		if strings.Contains(prompt, label) {
-			return label
-		}
-	}
-	t.Fatalf("no signing device is named in:\n%s", prompt)
-	return ""
 }
 
 func waitForQuestion(t *testing.T, r *server.Run) *server.Question {

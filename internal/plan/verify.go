@@ -585,6 +585,70 @@ func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
 // it proves the keys are the cold wallet's, not that the amount or the index is
 // the one intended. Every fingerprint has to be one of the wallet's, all of them
 // have to be present, and the derivation has to be on the change branch.
+// DefaultChangeBranch is the derivation branch a change address comes from. It
+// is 1 in every ordinary wallet, single-sig or multisig, BIP-44 through BIP-48.
+const DefaultChangeBranch uint32 = 1
+
+// RecogniseChangeIn reads a Recognition out of the transaction's own inputs.
+//
+// This exists because the app no longer builds the transaction and therefore no
+// longer knows the change address. The recipients are ours — LND issued them —
+// but the change output is one the operator's wallet chose after we had finished
+// talking, and an output nobody names is an UnnamedOutput refusal. Without a way
+// to recognise change, the verifier would refuse every transaction Sparrow
+// builds, which is the whole happy path.
+//
+// The evidence is the key origins the wallet wrote into the packet: the master
+// fingerprints on the inputs are the wallet that is about to sign, and an output
+// carrying those same fingerprints on the change branch is that wallet paying
+// itself. It is the same evidence a hardware signer uses to decide an output is
+// its own change rather than a payment, and Recognition already existed for it.
+//
+// # It is weaker than naming the script, and it is meant to be read that way
+//
+// The packet gets to nominate its own change output, which is circular, and the
+// circle is deliberately small. The funding outputs are checked by script and to
+// the satoshi against addresses LND issued, so nothing here can move a channel's
+// money. What a lying packet could do is put the *change* somewhere that is not
+// the operator's — and a wallet that lies about its own change address has
+// already taken the coins it is about to sign for, whatever this verifier says.
+// The report marks a recognised output as "recognised by key origin rather than
+// by address" for exactly this reason, and --change names the script instead when
+// an operator wants the stronger check.
+//
+// It returns nil, and no error, when the packet says nothing usable: a wallet
+// that writes no output derivations cannot be recognised, and the caller's answer
+// to that is the UnnamedOutput refusal plus the copy that says to use --change.
+func RecogniseChangeIn(raw []byte) (*Recognition, error) {
+	packet, err := psbt.NewFromRawBytes(bytes.NewReader(raw), false)
+	if err != nil {
+		return nil, fmt.Errorf("that is not a PSBT: %w", err)
+	}
+
+	seen := map[uint32]bool{}
+	var fingerprints []uint32
+	note := func(fp uint32) {
+		if seen[fp] {
+			return
+		}
+		seen[fp] = true
+		fingerprints = append(fingerprints, fp)
+	}
+	for _, in := range packet.Inputs {
+		for _, d := range in.Bip32Derivation {
+			note(d.MasterKeyFingerprint)
+		}
+		for _, d := range in.TaprootBip32Derivation {
+			note(d.MasterKeyFingerprint)
+		}
+	}
+	if len(fingerprints) == 0 {
+		return nil, nil
+	}
+	sort.Slice(fingerprints, func(i, j int) bool { return fingerprints[i] < fingerprints[j] })
+	return &Recognition{Fingerprints: fingerprints, Branch: DefaultChangeBranch}, nil
+}
+
 func (r *Recognition) matches(out psbt.POutput) bool {
 	want := make(map[uint32]bool, len(r.Fingerprints))
 	for _, fp := range r.Fingerprints {

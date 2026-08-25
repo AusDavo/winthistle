@@ -446,13 +446,18 @@ func TestAnIdenticalRepeatIsNotAConflict(t *testing.T) {
 	}
 }
 
-// TestADeviceThatReturnsAFinalizedInputIsRefused is I-2 as a rail.
+// TestADeviceInAMultiDeviceRoundMayNotFinalize.
 //
-// A finalized input carries a complete witness, so the device that produced it
-// held a transaction it could have broadcast. Accepting it quietly would mean the
-// app was no longer the only party able to publish, which is the whole thing this
-// package protects.
-func TestADeviceThatReturnsAFinalizedInputIsRefused(t *testing.T) {
+// This used to be I-2 as a rail: a finalized input carries a complete witness, so
+// the device that produced it held a broadcastable transaction, and the app had
+// to be the only party ever in that position. I-2 is dissolved — see Accept and
+// the package comment — and the refusal survives it for a mechanical reason.
+// Finalization discards the partial signatures, so a device that finalizes on its
+// own has ended a round the other devices were still in, and there is nothing
+// left for theirs to be unioned with.
+//
+// The same packet through Accept is the happy path, and the test below it is that.
+func TestADeviceInAMultiDeviceRoundMayNotFinalize(t *testing.T) {
 	w := newWallet(t, 2, 2)
 	b := newBatch(t, w)
 
@@ -826,5 +831,123 @@ func TestParseSaysWhatWasActuallyThere(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "neither base64 nor a PSBT") {
 		t.Errorf("valid base64 of a non-PSBT is reported as not being base64: %v", err)
+	}
+}
+
+// TestOneWalletsFullySignedPacketIsAcceptedAndTheSameOneIsRefusedByTheMerge is
+// the collision the inversion left behind, settled.
+//
+// Step 7 is "sign in Sparrow", and what Sparrow hands back is a finalized PSBT —
+// the exact input Merge refuses. The two entry points want opposite answers about
+// the same bytes and both are right for their own caller, so the assertion is
+// that one file goes both ways: accepted by Accept, refused by Merge, with the
+// refusal still naming the reason.
+func TestOneWalletsFullySignedPacketIsAcceptedAndTheSameOneIsRefusedByTheMerge(t *testing.T) {
+	w := newWallet(t, 2, 2)
+	b := newBatch(t, w)
+
+	// The harness playing Sparrow: both halves sign and the combining happens
+	// *outside* the app, which is what makes this a complete witness rather than
+	// two partials. Nothing in the production path does this any more.
+	merged, err := combine.Merge(b.base, []combine.Part{b.sign(t, 0), b.sign(t, 1)})
+	if err != nil {
+		t.Fatalf("the fixture's own merge: %v", err)
+	}
+	if err := psbt.MaybeFinalizeAll(merged.Packet); err != nil {
+		t.Fatalf("finalizing the fixture: %v", err)
+	}
+	signed := serialize(t, merged.Packet)
+
+	final, v, err := combine.Accept(b.plan, b.base, signed)
+	if err != nil {
+		t.Fatalf("Accept refused the input step 7 actually produces: %v", err)
+	}
+	if !v.OK() {
+		t.Fatalf("the plan re-check failed: %v", v.Problems)
+	}
+	if final.TxID != merged.TxID {
+		t.Errorf("Accept extracted %s, and the base's unsigned txid is %s. Adding "+
+			"witnesses cannot move a txid, so these must be equal", final.TxID, merged.TxID)
+	}
+	if len(final.RawTx) == 0 {
+		t.Error("Accept produced no network serialization, which is the artifact")
+	}
+	// The witnesses were executed rather than counted: that is what Finalize does
+	// with an already-final input, and it is the only check left on it.
+	if len(final.Signers) != 1 || final.Signers[0] != combine.SigningWalletLabel {
+		t.Errorf("Accept credited %v, want just %q", final.Signers,
+			combine.SigningWalletLabel)
+	}
+
+	// And the same bytes through the multi-device path are still refused.
+	if _, err := combine.Merge(b.base, []combine.Part{
+		{Label: "cold1", PSBT: signed},
+	}); !errors.Is(err, combine.ErrAlreadyFinalized) {
+		t.Fatalf("Merge accepted a finalized packet, or refused it for another "+
+			"reason: %v", err)
+	}
+}
+
+// TestAcceptTakesACompleteSetOfPartialsToo.
+//
+// A wallet that holds every key but does not finalize — Core's walletprocesspsbt
+// with finalize=false, and some hardware wallets' default — hands back partial
+// signatures rather than witnesses. That is still one packet from one wallet, so
+// Accept finalizes it here. Without this, "sign in Sparrow" would work and "sign
+// in the thing that behaves slightly differently" would not.
+func TestAcceptTakesACompleteSetOfPartialsToo(t *testing.T) {
+	w := newWallet(t, 2, 2)
+	b := newBatch(t, w)
+
+	both := parse(t, b.sign(t, 0).PSBT)
+	other := parse(t, b.sign(t, 1).PSBT)
+	both.Inputs[0].PartialSigs = append(both.Inputs[0].PartialSigs,
+		other.Inputs[0].PartialSigs...)
+
+	final, v, err := combine.Accept(b.plan, b.base, serialize(t, both))
+	if err != nil {
+		t.Fatalf("Accept: %v", err)
+	}
+	if !v.OK() {
+		t.Fatalf("the plan re-check failed: %v", v.Problems)
+	}
+	if len(final.RawTx) == 0 {
+		t.Error("no network serialization")
+	}
+}
+
+// TestAcceptStillRefusesAMovedTXID is I-3, which now carries the weight I-2 used
+// to: it is the only load-bearing check on what comes back from step 7.
+func TestAcceptStillRefusesAMovedTXID(t *testing.T) {
+	w := newWallet(t, 2, 2)
+	b := newBatch(t, w)
+
+	// A wallet that re-selected coins, re-derived change, or simply flipped a
+	// sequence number. Any of the three moves the txid, and LND has already
+	// committed to the old one at psbt_verify.
+	moved := parse(t, b.base)
+	moved.UnsignedTx.TxIn[0].Sequence = 0xfffffffd
+	moved.Inputs[0].PartialSigs = nil
+
+	_, _, err := combine.Accept(b.plan, b.base, serialize(t, moved))
+	if !errors.Is(err, combine.ErrDifferentTransaction) {
+		t.Fatalf("a returned packet with a different unsigned transaction was "+
+			"accepted, or refused for another reason: %v", err)
+	}
+}
+
+// TestAcceptRefusesAWalletThatSignedNothing.
+//
+// The likeliest step-7 mistake is handing back the unsigned file — the operator
+// saved to the wrong path, or Sparrow was never asked to sign. That has to read as
+// "nothing was signed" rather than as a batch that cannot be finalized.
+func TestAcceptRefusesAWalletThatSignedNothing(t *testing.T) {
+	w := newWallet(t, 2, 2)
+	b := newBatch(t, w)
+
+	_, _, err := combine.Accept(b.plan, b.base, b.base)
+	if !errors.Is(err, combine.ErrNoSignatures) {
+		t.Fatalf("the unsigned packet handed back as the signed one was not "+
+			"reported as unsigned: %v", err)
 	}
 }

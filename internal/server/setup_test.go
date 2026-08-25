@@ -245,7 +245,7 @@ func TestTheOverviewDoesNotDescribeASetupAsATwoBatchCollision(t *testing.T) {
 	s.Runs.addKind("a-setup", KindSetup, "winthistle-cold")
 
 	body := serveIt(s, get(t, s, "/")).Body.String()
-	if says(body, "dress rehearsal") {
+	if says(body, "a second batch built from that wallet") {
 		t.Errorf("the overview explains a two-batch collision over a setup:\n%s",
 			body)
 	}
@@ -259,7 +259,9 @@ func TestTheOverviewDoesNotDescribeASetupAsATwoBatchCollision(t *testing.T) {
 	// And a batch keeps the sentence that is true about it.
 	s2, _ := setupServer(t)
 	s2.Runs.add("20260824-1930")
-	if body := serveIt(s2, get(t, s2, "/")).Body.String(); !says(body, "dress rehearsal") {
+	if body := serveIt(s2, get(t, s2, "/")).Body.String(); !says(body,
+		"a second batch built from that wallet") {
+
 		t.Errorf("a live batch stopped explaining the collision it does have:\n%s",
 			body)
 	}
@@ -347,12 +349,31 @@ func TestTheSetupsClockIsNotCalledAGate(t *testing.T) {
 	}
 	mustSay(t, got, "Letting it pass records nothing at all")
 
+	// A batch has three question shapes now and none of them is a signing gate,
+	// which is the inversion arriving in the copy. Step 4 is inside the peers' ten
+	// minutes and letting it pass costs a restart; step 7 is after the gate opened
+	// and letting it pass costs an abort; the blunt abandon is a decision. The
+	// sentence that used to cover all three called them all a signing gate, and
+	// the gate it named was rehearsal.Gate, which is gone.
 	batch := &Run{ID: "20260824-1930"}
-	signing := &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute),
-		Reply: "paste what cold1 gave back, base64"}
-	if got := waitingOn(batch, signing); !says(got, "signing gate") {
-		t.Errorf("a batch's signing round stopped being the signing gate:\n%s", got)
+	build := &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute),
+		Reply: "paste the unsigned PSBT, base64"}
+	got = waitingOn(batch, build)
+	if says(got, "signing gate") {
+		t.Errorf("step 4 is called a signing gate, and nothing is signed there:\n%s", got)
 	}
+	mustSay(t, got, "That clock is the peers'")
+	mustSay(t, got, "costs a restart")
+
+	signing := &Question{Asked: asked, Deadline: asked.Add(5 * time.Minute),
+		Reply: "paste the signed PSBT, base64", Payload: "cHNidP8..."}
+	got = waitingOn(batch, signing)
+	if says(got, "signing gate") {
+		t.Errorf("step 7 is called a signing gate, and there is no gate on it — the "+
+			"batch was armed before it started:\n%s", got)
+	}
+	mustSay(t, got, "already recoverable by force-close")
+	mustSay(t, got, "2016 blocks")
 
 	// And a batch's *other* question is not a signing round either. The
 	// blunt-abandon confirmation is asked during a teardown: nothing is being

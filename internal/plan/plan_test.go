@@ -119,6 +119,7 @@ type txBuilder struct {
 	sequences []uint32
 	prevouts  []*wire.TxOut
 	witScript [][]byte
+	inMeta    []psbt.PInput
 	outs      []*wire.TxOut
 	outMeta   []psbt.POutput
 }
@@ -136,6 +137,7 @@ func (b *txBuilder) inSeq(seed byte, vout uint32, value int64, script []byte,
 	b.sequences = append(b.sequences, seq)
 	b.prevouts = append(b.prevouts, wire.NewTxOut(value, script))
 	b.witScript = append(b.witScript, nil)
+	b.inMeta = append(b.inMeta, psbt.PInput{})
 	return b
 }
 
@@ -167,6 +169,11 @@ func (b *txBuilder) packet() *psbt.Packet {
 	for i := range p.Inputs {
 		p.Inputs[i].WitnessUtxo = b.prevouts[i]
 		p.Inputs[i].WitnessScript = b.witScript[i]
+		// Key origins only. The UTXO and the witness script are the builder's, and
+		// a fixture that could overwrite them would be a fixture that could hide the
+		// checks those two fields exist for.
+		p.Inputs[i].Bip32Derivation = b.inMeta[i].Bip32Derivation
+		p.Inputs[i].TaprootBip32Derivation = b.inMeta[i].TaprootBip32Derivation
 	}
 	copy(p.Outputs, b.outMeta)
 	return p
@@ -1061,5 +1068,83 @@ func TestTheEstimatedSizeNoteFitsWhateverTheSizeIs(t *testing.T) {
 					vsize, i+1, n, prose.PaneWidth, line)
 			}
 		}
+	}
+}
+
+// TestChangeIsRecognisedFromTheTransactionsOwnInputs.
+//
+// The app no longer builds the transaction, so it no longer knows the change
+// address, so the plan cannot name it. RecogniseChangeIn is what keeps that from
+// making every transaction Sparrow builds an UnnamedOutput refusal: the master
+// fingerprints on the inputs are the wallet about to sign, and an output carrying
+// those same fingerprints on branch 1 is that wallet paying itself.
+//
+// The assertion is end to end rather than on the returned struct, because the
+// struct is only interesting if it makes a real transaction verify.
+func TestChangeIsRecognisedFromTheTransactionsOwnInputs(t *testing.T) {
+	const one, two uint32 = 0x1b51e4f1, 0x4cf33624
+	// Distinct seeds, so the two derivations are not two records for one key —
+	// which mergeDerivations would collapse and matches() would see as one.
+	const seedOne, seedTwo byte = 0xf1, 0x24
+
+	f := newFixture(t)
+	b := f.good(t)
+	// The cold wallet's own key origins, on the input, which is what a wallet
+	// writes when it hands over a packet it can sign.
+	b.inMeta[0] = psbt.PInput{Bip32Derivation: []*psbt.Bip32Derivation{
+		{PubKey: pubkey(seedOne), MasterKeyFingerprint: one,
+			Bip32Path: []uint32{84 + 0x80000000, 1 + 0x80000000, 0x80000000, 0, 3}},
+		{PubKey: pubkey(seedTwo), MasterKeyFingerprint: two,
+			Bip32Path: []uint32{84 + 0x80000000, 1 + 0x80000000, 0x80000000, 0, 3}},
+	}}
+	b.outMeta[3] = mergeDerivations(
+		changeDerivation(one, 1, 7),
+		changeDerivation(two, 1, 7),
+	)
+
+	raw := b.bytes()
+	rec, err := RecogniseChangeIn(raw)
+	if err != nil {
+		t.Fatalf("reading the recognition out of the packet: %v", err)
+	}
+	if rec == nil {
+		t.Fatal("no recognition was read from a packet whose inputs carry key origins")
+	}
+	if len(rec.Fingerprints) != 2 {
+		t.Fatalf("read %d fingerprints from the inputs, want the wallet's 2: %v",
+			len(rec.Fingerprints), rec.Fingerprints)
+	}
+
+	// The plan names no change address at all, which is the new shape.
+	f.plan.Change = Change{Recognise: rec}
+	v, err := f.plan.Verify(raw)
+	if err != nil {
+		t.Fatalf("verify: %v", err)
+	}
+	if !v.OK() {
+		t.Fatalf("a transaction whose change output carries the spending wallet's "+
+			"own key origins was refused:\n%s", v.Report())
+	}
+	if !strings.Contains(v.Report(), "recognised by key origin") {
+		t.Errorf("the report does not say this change claim is the weaker one:\n%s",
+			v.Report())
+	}
+}
+
+// TestAPacketWithNoInputKeyOriginsCannotRecogniseChange.
+//
+// A wallet that writes no key origins cannot be recognised, and the honest answer
+// is nil rather than a Recognition that matches nothing — because a Recognition
+// with no fingerprints is refused by Outputs, which would report the plan as
+// broken instead of the packet as unreadable. The caller's answer is the
+// UnnamedOutput refusal and the copy that says to name the address.
+func TestAPacketWithNoInputKeyOriginsCannotRecogniseChange(t *testing.T) {
+	f := newFixture(t)
+	rec, err := RecogniseChangeIn(f.good(t).bytes())
+	if err != nil {
+		t.Fatalf("reading the recognition: %v", err)
+	}
+	if rec != nil {
+		t.Fatalf("a packet with no input key origins produced %+v", rec)
 	}
 }

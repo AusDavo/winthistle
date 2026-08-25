@@ -5,6 +5,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -149,6 +151,28 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 	streams []*Stream, feeRate float64) FundedPSBT {
 
 	t.Helper()
+	outputs := make([]coldwallet.Output, 0, len(streams))
+	for _, s := range streams {
+		outputs = append(outputs, coldwallet.Output{
+			Address: s.FundingAddress, AmountSat: s.FundingAmount,
+		})
+	}
+	return e.BuildPSBTPaying(t, wallet, outputs, feeRate)
+}
+
+// BuildPSBTPaying is BuildFundingPSBT for a caller that has the addresses but not
+// the streams.
+//
+// That caller is the harness playing Sparrow: after the inversion the app prints
+// the recipients and something else builds the transaction, so a fixture standing
+// in for that something else is handed a list of outputs exactly the way an
+// operator is handed a table to paste in. It is the same builder underneath —
+// coldwallet.Build, with the app's own non-negotiable options — because a fixture
+// with its own builder is a fixture that can drift from the thing it is testing.
+func (e *Env) BuildPSBTPaying(t *testing.T, wallet *bitcoind.Client,
+	outputs []coldwallet.Output, feeRate float64) FundedPSBT {
+
+	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -168,13 +192,6 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 	change, err := coldwallet.ChangeAddress(ctx, wallet)
 	if err != nil {
 		t.Fatalf("asking the funding wallet for a change address: %v", err)
-	}
-
-	outputs := make([]coldwallet.Output, 0, len(streams))
-	for _, s := range streams {
-		outputs = append(outputs, coldwallet.Output{
-			Address: s.FundingAddress, AmountSat: s.FundingAmount,
-		})
 	}
 
 	built, err := coldwallet.Build(ctx, wallet, coldwallet.BuildRequest{
@@ -524,4 +541,59 @@ func (e *Env) AwaitStreamFailure(t *testing.T, s *Stream, timeout time.Duration)
 	case <-time.After(timeout):
 		return time.Since(started), nil
 	}
+}
+
+// RecipientsIn scrapes the step-4 table out of a run's transcript, the way an
+// operator's eye does.
+//
+// It exists because after the inversion the app prints a table and something else
+// builds the transaction — so a fixture standing in for that something else has to
+// read the table, and reading it is a property worth asserting. The table *is* the
+// interface at step 4: the addresses are copy-pasted out of a terminal, which is
+// why they are printed in full on a line of their own, and a table that could not
+// be read back would be a broken product however green the seam's own tests were.
+//
+// Anchored on the section heading rather than scanning the whole transcript,
+// because everything above it is full of amounts too — the anchor reserve's
+// figures, the fee report's — and a scraper that started at the top would pair the
+// last of those with the first funding address.
+//
+// One implementation, in the harness, because two test packages want it and two
+// scrapers could disagree about one table.
+func RecipientsIn(t *testing.T, transcript string) []coldwallet.Output {
+	t.Helper()
+
+	const heading = "Step 4 — build the transaction in your wallet"
+	i := strings.Index(transcript, heading)
+	if i < 0 {
+		t.Fatalf("the transcript has no step-4 table in it:\n%s", transcript)
+	}
+
+	var got []coldwallet.Output
+	var pending int64
+	for _, line := range strings.Split(transcript[i+len(heading):], "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		last := fields[len(fields)-1]
+		switch {
+		case last == "sat" && len(fields) >= 2:
+			n, err := strconv.ParseInt(
+				strings.ReplaceAll(fields[len(fields)-2], ",", ""), 10, 64)
+			if err == nil {
+				pending = n
+			}
+		case strings.HasPrefix(last, "bcrt1") && len(fields) == 1:
+			if pending <= 0 {
+				t.Fatalf("%s is printed with no amount above it:\n%s", last, transcript)
+			}
+			got = append(got, coldwallet.Output{Address: last, AmountSat: pending})
+			pending = 0
+		}
+	}
+	if len(got) == 0 {
+		t.Fatalf("no recipients could be read off the step-4 table:\n%s", transcript)
+	}
+	return got
 }

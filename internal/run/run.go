@@ -8,20 +8,14 @@
 //
 // # Where the gates are
 //
-// Five of them, and they are not decorations:
+// Four of them, and they are not decorations:
 //
-//   - setup.Check, first, before LND is asked anything. The cold wallet's
-//     descriptors are the one thing no check can validate — Core parses a wrong
-//     pair, the import succeeds, the read-back is self-consistent and the
-//     balance is a plausible partial one — so the only verdict that exists is a
-//     comparison a human made, and this is where it is read back. It refuses on
-//     an exact descriptor-pair match against a recorded rejection and on nothing
-//     else; every other state is a line on the screen. First, because a refusal
-//     here has cost nothing at all.
-//   - rehearsal.Gate, before arm.Open. A signing round slower than
-//     limits.abort_after_signing_seconds means the batch is not armed at all.
-//     The clock the gate protects has not started yet when it is checked, which
-//     is the whole point.
+//   - plan.Verify, before LND is shown anything. This is the one the tool exists
+//     for. psbt_verify finds its own funding output and stops — it never asserts
+//     that its output is the only one, which is what lets n channels share a
+//     transaction — so an output nobody named passes all n of LND's checks. Ours
+//     runs first, which is why a mis-paste at step 4 costs a redo inside clock A
+//     rather than a channel.
 //   - peers.ReadyToArm, before arm.Open. An accepted shim probe costs one of
 //     that peer's pending-channel slots for about eleven minutes, and
 //     shim_cancel does not give it back, so a run that probed and then armed
@@ -33,6 +27,27 @@
 //     but an *arm.Armed, and journal.MarkPublishing refuses a run whose channels
 //     are not all at chan_pending — it counts them itself. Neither is this
 //     package's to grant.
+//
+// # Two gates this used to have, and why neither survived the inversion
+//
+// This comment listed five, and two of them were about machinery the app has
+// given up rather than about the batch:
+//
+//   - setup.Check, first, read back a human's verdict on the cold wallet's
+//     descriptor pair. The app no longer selects coins, derives addresses or asks
+//     Core for change, so it never touches those descriptors — and a refusal
+//     about a wallet nothing in the run reads is a refusal with no subject. The
+//     gate still exists, in `winthistle doctor`, where it is about a wallet
+//     somebody is setting up.
+//   - rehearsal.Gate refused to arm a batch whose signing round would be slower
+//     than limits.abort_after_signing_seconds. It measured a window that no
+//     longer contains signing: the gate opens at step 6, before anything is
+//     signed, so a slow round costs time against clock B and cannot cost the
+//     batch. It also needed Core to build a mirror transaction and m devices to
+//     sign it, and this package has neither now.
+//
+// Both packages still compile and still have their own tests; item 5 of
+// docs/replan-2026-08.md is what deletes them.
 //
 // # --stop-before-publish is not a second code path
 //
@@ -73,7 +88,6 @@ import (
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/arm"
 	"github.com/AusDavo/winthistle/internal/bitcoind"
-	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/fees"
@@ -85,7 +99,6 @@ import (
 	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/AusDavo/winthistle/internal/settle"
-	"github.com/AusDavo/winthistle/internal/setup"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
 
@@ -100,16 +113,27 @@ type Deps struct {
 
 	// Node is Core with no wallet scope, for the fee estimate and
 	// testmempoolaccept. Wallet is the watch-only cold wallet.
+	//
+	// Neither is on the batch's path any more. Node still answers the fee estimate
+	// the verifier judges against and the one pre-flight there is, and Wallet is
+	// only reached by journal.Recover, which releases coin locks a run of an
+	// earlier build may have taken. Both are here because Connect fills them and
+	// `winthistle bump` is built out of the same struct; item 5 of
+	// docs/replan-2026-08.md is what removes Core, and it has to decide what
+	// replaces those two things rather than dropping them quietly.
 	Node   *bitcoind.Client
 	Wallet *bitcoind.Client
 
 	Journal *journal.Journal
 
-	// Signers hands out the devices for one round. An interface rather than
-	// *signers.Set because the transport is not this package's business — it is
-	// the same seam rehearsal.Signer draws, and it is what lets the regtest
-	// tests drive the whole composition with the simulated cold wallet's two
-	// halves rather than with a subprocess.
+	// Signing is the wallet at steps 4 and 7: the thing that builds the
+	// transaction and then signs it. Required.
+	Signing SigningWallet
+
+	// Signers hands out the devices for one round, and the batch no longer has
+	// one. It is kept because `winthistle bump` is composed out of this struct and
+	// the CPFP child *is* still a multi-device round — see SigningWallet for why
+	// the batch could not have been built on this seam. Nil is fine for a run.
 	Signers Signers
 
 	// Out is where the operator-facing reports go.
@@ -124,11 +148,17 @@ type Deps struct {
 	Confirm abort.Confirmation
 }
 
-// Signers is where the batch's partial signatures come from.
+// Signers is where a multi-device round's partial signatures come from.
 //
-// Round takes a name because the dress rehearsal and the real batch are two
-// rounds minutes apart, and a transport that writes files has to keep them
-// apart: a signature over the decoy, picked up as the batch's, is refused by
+// The batch does not have one any more — see SigningWallet — and this survives
+// for the CPFP child, which does. It stays in this package rather than moving to
+// internal/bump because `winthistle bump` is composed out of the same Deps the
+// run is, so the two front doors keep dialling one set of connections rather than
+// two. Item 5 is what removes it.
+//
+// Round takes a name because a device's transport must not be recomputed between
+// rounds, and because a transport that writes files has to keep two rounds apart:
+// a signature over one round's packet, picked up as the other's, is refused by
 // internal/combine as a moved txid — at the worst moment, blaming the device.
 type Signers interface {
 	Round(name string) []rehearsal.Device
@@ -155,6 +185,14 @@ type Options struct {
 
 	// SettleFor bounds Phase 2. Zero means DefaultSettleFor.
 	SettleFor time.Duration
+
+	// Change names the wallet's change address, when the operator knows it and
+	// wants the stronger check. Empty is the ordinary case: the app does not build
+	// the transaction, so it does not know where the change goes, and
+	// plan.RecogniseChangeIn reads it out of the packet's own key origins instead.
+	// Naming it here is strictly stronger — a script rather than a claim — and it
+	// is the answer for a wallet that writes no key origins at all.
+	Change string
 }
 
 // DefaultSettleFor is how long Phase 2 watches before handing back.
@@ -186,7 +224,8 @@ type Result struct {
 	RunID string
 
 	// Armed is the receipt that every channel is recoverable. Non-nil from the
-	// moment arm.Finalize returns, including on a run that then stopped.
+	// moment arm.Receipts returns, including on a run that then stopped — which
+	// is now before anything was signed rather than after.
 	Armed *arm.Armed
 
 	Published  bool
@@ -202,22 +241,15 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return nil, errors.New("a run needs an id: it is the journal's key, and " +
 			"the journal is what makes a crash recoverable rather than mysterious")
 	}
-	if d.Signers == nil {
-		return nil, errors.New("no signers: there is nothing to sign the batch " +
-			"with. Add a [[signer]] block per cold-storage device, and exactly as " +
-			"many as the descriptor requires — btcd's finalizer wants exactly m " +
-			"signatures, so a 2-of-3 carrying three partials does not finalize")
+	if d.Signing == nil {
+		return nil, errors.New("no signing wallet: there is nothing to build the " +
+			"batch transaction or sign it. On the command line that is --psbt FILE, " +
+			"which is where the transaction you build in Sparrow gets saved and where " +
+			"this run reads it back from")
 	}
 	res := &Result{RunID: o.RunID}
 
 	p, err := prepare(ctx, d, o)
-	if p != nil && len(p.fenced) > 0 {
-		// The fence is this package's to release: it is not in the journal,
-		// because it is not a lock taken for the batch — it is the coins the
-		// batch may not touch, held so Core's own coin selection cannot reach
-		// them.
-		defer releaseFence(ctx, d, p.fenced)
-	}
 	if err != nil {
 		return res, err
 	}
@@ -279,9 +311,6 @@ type prepared struct {
 	chain   string
 	chans   []arm.Channel
 	rate    fees.Rate
-	coins   coldwallet.Coins
-	fenced  []bitcoind.Outpoint
-	change  string
 	finding reserve.Finding
 	topUp   *plan.TopUp
 	probes  []peers.Probe
@@ -293,22 +322,6 @@ type prepared struct {
 
 func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	p := &prepared{chans: o.Batch.ArmChannels()}
-
-	// 0. The cold wallet, before anything else. This is the only pre-flight that
-	// needs neither LND nor the network, and the only one whose evidence is a
-	// person: setup.Check reads the descriptor pair the wallet actually holds and
-	// refuses if a human has already compared those exact descriptors against
-	// their own wallet software and said they are not the cold wallet's. It fires
-	// on an exact pair match and nothing else, so it cannot stop a wallet that
-	// was fixed, re-imported, or never seen by this build — those are a line on
-	// the screen. It runs first because a refusal here has cost nothing: no
-	// stream, no reservation, no coin lock, no peer told anything.
-	section(d.Out, "Phase 0 — the cold wallet's setup")
-	standing, err := setup.Check(ctx, d.Wallet, d.Journal, o.Config.Bitcoind.Wallet)
-	fmt.Fprint(d.Out, standing.Note())
-	if err != nil {
-		return p, err
-	}
 
 	info, err := d.LND.Lightning.GetInfo(ctx, &lnrpc.GetInfoRequest{})
 	if err != nil {
@@ -361,7 +374,11 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 		}
 	}
 
-	// 3. The fee rate, from Core and nowhere else.
+	// 3. The fee rate, from Core and nowhere else. The app does not choose the
+	//    fee any more — Sparrow does, at step 4 — but the verifier still needs a
+	//    number to call one too low or too high, and the no-third-party rule
+	//    forbids the obvious substitute. Item 5 removes Core and does not yet say
+	//    what replaces this.
 	section(d.Out, "Phase 0 — the fee rate")
 	p.rate, err = fees.Estimate(ctx, d.Node, fees.Request{
 		TargetBlocks:  o.Config.Fees.TargetBlocks,
@@ -373,25 +390,7 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	}
 	fmt.Fprint(d.Out, p.rate.Report())
 
-	// 4. The coins, and the fence around the ones the batch may not spend.
-	section(d.Out, "Phase 0 — the cold wallet's coins")
-	minConf := o.Config.Limits.MinConfirmations()
-	p.coins, err = coldwallet.SelectCoins(ctx, d.Wallet, minConf)
-	if err != nil {
-		return p, fmt.Errorf("selecting the cold wallet's coins: %w", err)
-	}
-	fmt.Fprint(d.Out, p.coins.Report())
-	p.fenced, err = coldwallet.FenceOff(ctx, d.Wallet, p.coins)
-	if err != nil {
-		return p, fmt.Errorf("fencing off the coins the batch may not spend: %w", err)
-	}
-
-	p.change, err = coldwallet.ChangeAddress(ctx, d.Wallet)
-	if err != nil {
-		return p, fmt.Errorf("asking the cold wallet for a change address: %w", err)
-	}
-
-	// 5. The anchor reserve, which is about this node's own hot wallet and is
+	// 4. The anchor reserve, which is about this node's own hot wallet and is
 	//    the one thing that can refuse step 5 for a reason unrelated to the
 	//    batch. A shortfall is not fatal here: the plan pays it as an output.
 	section(d.Out, "Phase 0 — the anchor reserve")
@@ -406,30 +405,6 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 		return p, fmt.Errorf("building the reserve top-up: %w", err)
 	}
 
-	// 6. The dress rehearsal, and the gate.
-	section(d.Out, "Phase 0 — the dress rehearsal")
-	mirror := o.Batch.AmountsSat()
-	if p.topUp != nil {
-		mirror = append(mirror, p.topUp.AmountSat)
-	}
-	m, err := rehearsal.Run(ctx, rehearsal.Request{
-		Wallet:           d.Wallet,
-		Node:             d.Node,
-		MirrorSat:        mirror,
-		FeeRateSatPerVB:  p.rate.SatPerVB,
-		MinConfirmations: minConf,
-		Devices:          d.Signers.Round("rehearsal"),
-		Limit:            o.Config.Limits.AbortAfterSigning,
-	})
-	if m != nil {
-		fmt.Fprint(d.Out, m.Report())
-	}
-	if err != nil {
-		return p, fmt.Errorf("the dress rehearsal: %w", err)
-	}
-	if err := rehearsal.Gate(m); err != nil {
-		return p, fmt.Errorf("the batch will not be armed: %w", err)
-	}
 	return p, nil
 }
 
@@ -473,6 +448,16 @@ func waitForPeers(ctx context.Context, d Deps, probes []peers.Probe) error {
 // inversion those are two separate things produced at two separate times: the
 // batch is armed in step 6 over an unsigned transaction, and the bytes to
 // broadcast arrive in step 7 from something that is not this program.
+//
+// # Where clock A actually goes now
+//
+// Steps 2 to 6 are the only part under the peers' ten minutes, and the only step
+// inside them that takes any time at all is step 4 — the operator in Sparrow,
+// pasting n addresses in and choosing coins. Everything else is local: the
+// verifier is arithmetic, psbt_verify is one RPC per stream, and the receipts
+// arrived in 0.55 s at n = 2 on the harness. So a batch that blows clock A blows
+// it in a wallet's Send tab, before LND has been shown anything, and the cost is
+// n shim cancels.
 func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result) (
 	*arm.Armed, *combine.Finalized, error) {
 
@@ -504,17 +489,43 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		return nil, nil, err
 	}
 
+	// Step 3 and step 4: the recipients, and then the operator in their wallet.
+	// The addresses are printed in full because they are copy-pasted from the
+	// terminal, never typed, and a mis-paste is what plan.Verify is for.
+	section(d.Out, "Step 4 — build the transaction in your wallet")
+	pay := recipientsOf(streams, p)
+	fmt.Fprint(d.Out, recipientTable(pay))
+	fmt.Fprint(d.Out, prose.Para("Enter these as recipients, choose your coins and "+
+		"the fee, and save the PSBT. Do not sign it yet: nothing is recoverable "+
+		"until step 6, so a transaction signed and broadcast before then would "+
+		"confirm one 2-of-2 output per channel with no channel behind any of them."))
+
+	unsigned, err := d.Signing.Built(ctx, pay)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	// The plan is assembled now rather than at step 3, because until the packet
+	// exists there is nothing to say about the change output. The app does not
+	// build the transaction, so it does not choose where the change goes; what it
+	// can do is recognise the wallet's own key origins on it, or be told the
+	// address. See plan.RecogniseChangeIn for how weak that claim is and why it is
+	// the right shape anyway.
+	change, err := changeIn(o, unsigned)
+	if err != nil {
+		return nil, nil, err
+	}
 	batchPlan, err := streams.Plan(arm.Blueprint{
 		Chain:   p.chain,
 		Fee:     p.rate.Fee(),
 		TopUp:   p.topUp,
 		Aliases: aliases(p.facts),
-		Change:  plan.Change{Address: p.change},
-		Inputs: plan.Inputs{
-			MinConfirmations: o.Config.Limits.MinConfirmations(),
-			Allowed:          allowed(p.coins),
-			Excluded:         excluded(p.coins),
-		},
+		Change:  change,
+		// No Allowed and no Excluded: Sparrow picks the coins, so there is no set
+		// this app could hold the transaction to. MinConfirmations is stated rather
+		// than enforced and the verifier reports it as unchecked, which is the
+		// honest version of a constraint nobody can check from a PSBT.
+		Inputs: plan.Inputs{MinConfirmations: o.Config.Limits.MinConfirmations()},
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("assembling the plan: %w", err)
@@ -522,38 +533,23 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	section(d.Out, "The batch plan")
 	fmt.Fprint(d.Out, batchPlan.Document())
 
-	outputs := streams.FundingOutputs()
-	if p.topUp != nil {
-		outputs = append(outputs, coldwallet.Output{
-			Address: p.topUp.Address, AmountSat: p.topUp.AmountSat,
-		})
-	}
-	built, err := coldwallet.Build(ctx, d.Wallet, coldwallet.BuildRequest{
-		Outputs:          outputs,
-		ChangeAddress:    p.change,
-		FeeRateSatPerVB:  p.rate.SatPerVB,
-		MinConfirmations: o.Config.Limits.MinConfirmations(),
-	})
-	if err != nil {
-		return nil, nil, fmt.Errorf("building the batch transaction: %w", err)
-	}
-	if err := d.Journal.RecordLocks(ctx, o.RunID, built.Inputs); err != nil {
-		return nil, nil, fmt.Errorf("journalling Core's coin locks: %w", err)
-	}
-
 	// Ours first. LND's psbt_verify finds its own funding output and stops, so
-	// an output nobody named passes all n of its checks.
-	v, err := batchPlan.Verify(built.Raw)
+	// an output nobody named passes all n of its checks — and it pins the funding
+	// outpoint while it is at it, so a mis-paste caught here costs a redo and one
+	// caught there costs a channel.
+	section(d.Out, "Step 5 — does it match the plan?")
+	v, err := batchPlan.Verify(unsigned)
 	if err != nil {
-		return nil, nil, fmt.Errorf("verifying the transaction Core built: %w", err)
+		return nil, nil, fmt.Errorf("verifying the transaction your wallet built: %w", err)
 	}
 	fmt.Fprint(d.Out, v.Report())
 	if !v.OK() {
-		return nil, nil, errors.New("the transaction does not match the plan")
+		return nil, nil, errors.New("the transaction does not match the plan. " +
+			"Nothing has been pinned and nothing has been signed: build it again")
 	}
 
 	// Then LND's, for every stream, with skip_finalize. Nothing is signed.
-	verified, err := arm.Verify(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, built.Raw)
+	verified, err := arm.Verify(ctx, d.LND.Lightning, d.Journal, o.RunID, streams, unsigned)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -579,14 +575,14 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		return nil, nil, fmt.Errorf("journalling the start of the signing round: %w", err)
 	}
 
-	parts, err := sign(ctx, d, o, built)
+	signed, err := sign(ctx, d, o, unsigned)
 	if err != nil {
 		return nil, nil, err
 	}
 
-	final, recheck, err := combine.Complete(batchPlan, built.Raw, parts)
+	final, recheck, err := combine.Accept(batchPlan, unsigned, signed)
 	if err != nil {
-		return nil, nil, fmt.Errorf("combining and finalizing in-app: %w", err)
+		return nil, nil, fmt.Errorf("checking what the signing wallet returned: %w", err)
 	}
 	if !recheck.OK() {
 		fmt.Fprint(d.Out, recheck.Report())
@@ -612,58 +608,77 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	return armed, final, nil
 }
 
-// sign is the signing round: the one part of the armed window whose duration
-// belongs to the operator and the devices, and the one the rehearsal measured.
+// sign is step 7: the operator signs, with the gate already open.
 //
-// After the inversion it runs with the gate already open. Every channel reached
-// chan_pending before this function is called, so a slow round no longer risks
-// the batch — clock A has stopped and there is nothing left inside it. What a
-// slow round costs now is time against clock B, which is 2016 blocks rather than
-// ten minutes.
-func sign(ctx context.Context, d Deps, o Options, built coldwallet.Built) ([]combine.Part, error) {
-	section(d.Out, "The signing round")
-	devices := d.Signers.Round("batch")
+// The one part of the sequence whose duration belongs to the operator and the
+// devices, and after the inversion it is outside every window that used to make
+// that dangerous. Every channel reached chan_pending before this function is
+// called, so the peers' ten minutes have stopped and there is nothing left inside
+// them. What a slow step 7 spends is clock B — 2016 blocks from broadcast, and
+// the transaction has not been broadcast yet, so in practice nothing at all.
+//
+// There is no gate here and there deliberately is not one. limits.abort_after_signing_seconds
+// used to be checked before arming, by rehearsal.Gate, against a measurement of
+// this round; the round it measured no longer exists and neither does the gate.
+// Stopping in the middle of this step costs an abort of n pending channels, which
+// is the same thing it costs before it.
+func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, error) {
+	section(d.Out, "Step 7 — sign it")
+	fmt.Fprint(d.Out, prose.Para("Take as long as this needs. Every channel in the "+
+		"batch is already recoverable by force-close and nothing is in any mempool, "+
+		"so there is no clock on this step that costs a restart — what it spends is "+
+		"the 2016 blocks the peers give the funding transaction to confirm, counted "+
+		"from a broadcast that has not happened yet."))
 
-	for _, dev := range devices {
-		if err := d.Journal.RecordSigner(ctx, o.RunID, dev.Label,
-			journal.SignerAwaiting); err != nil {
-			return nil, fmt.Errorf("journalling signer %s: %w", dev.Label, err)
-		}
+	label := combine.SigningWalletLabel
+	if err := d.Journal.RecordSigner(ctx, o.RunID, label,
+		journal.SignerAwaiting); err != nil {
+		return nil, fmt.Errorf("journalling the signing step: %w", err)
 	}
 
 	started := time.Now()
-	parts := make([]combine.Part, 0, len(devices))
-	for _, dev := range devices {
-		part, err := dev.Sign(ctx, built.PSBT)
-		if err != nil {
-			if jerr := d.Journal.RecordSigner(ctx, o.RunID, dev.Label,
-				journal.SignerDeclined); jerr != nil {
-				return nil, fmt.Errorf("%s did not sign (%v), and journalling that "+
-					"failed too: %w", dev.Label, err, jerr)
-			}
-			return nil, fmt.Errorf("%s did not sign: %w", dev.Label, err)
+	signed, err := d.Signing.Signed(ctx, unsigned)
+	if err != nil {
+		if jerr := d.Journal.RecordSigner(ctx, o.RunID, label,
+			journal.SignerDeclined); jerr != nil {
+			return nil, fmt.Errorf("the batch was not signed (%v), and journalling "+
+				"that failed too: %w", err, jerr)
 		}
-		if err := d.Journal.RecordSigner(ctx, o.RunID, dev.Label,
-			journal.SignerPartial); err != nil {
-			return nil, fmt.Errorf("journalling signer %s: %w", dev.Label, err)
-		}
-		parts = append(parts, part)
-		fmt.Fprintf(d.Out, "%s signed (%s elapsed)\n", dev.Label,
-			time.Since(started).Round(time.Second))
+		return nil, fmt.Errorf("the batch was not signed: %w", err)
 	}
+	if err := d.Journal.RecordSigner(ctx, o.RunID, label,
+		journal.SignerSigned); err != nil {
+		return nil, fmt.Errorf("journalling the signing step: %w", err)
+	}
+	fmt.Fprintf(d.Out, "signed (%s elapsed)\n", time.Since(started).Round(time.Second))
+	return signed, nil
+}
 
-	// Said rather than enforced. The gate that stops a slow round is
-	// rehearsal.Gate, before anything is armed; by here the peers' clocks are
-	// running and stopping would cost the same as continuing.
-	elapsed := time.Since(started)
-	if elapsed > o.Config.Limits.AbortAfterSigning {
-		fmt.Fprint(d.Out, prose.Para(fmt.Sprintf("That round took %s, past the %s "+
-			"gate the rehearsal was measured against. The batch was already armed "+
-			"before this round started, so nothing lapsed and nothing is at risk — "+
-			"the gate is now a measurement rather than a deadline.",
-			elapsed.Round(time.Second), o.Config.Limits.AbortAfterSigning)))
+// changeIn decides how the plan will identify the change output.
+//
+// Named beats recognised and both beat nothing. The address, when the operator
+// gave one, is a script the verifier can compare; the recognition is the wallet's
+// own claim about its own output, read out of the packet's key origins. A wallet
+// that writes neither leaves an output nobody can account for, and the refusal
+// says which of the two to supply rather than reporting the plan as broken.
+func changeIn(o Options, unsigned []byte) (plan.Change, error) {
+	if o.Change != "" {
+		return plan.Change{Address: o.Change}, nil
 	}
-	return parts, nil
+	rec, err := plan.RecogniseChangeIn(unsigned)
+	if err != nil {
+		return plan.Change{}, fmt.Errorf("reading the wallet's key origins out of "+
+			"the transaction: %w", err)
+	}
+	if rec == nil {
+		return plan.Change{}, errors.New("this transaction's inputs carry no key " +
+			"origin information, so there is no way to tell which output is your " +
+			"change and which is an address nobody named — and the difference is the " +
+			"whole check this tool exists for. Pass --change ADDRESS with the change " +
+			"address your wallet used, which is a stronger check than the one it " +
+			"replaces. Nothing has been pinned: this costs a redo")
+	}
+	return plan.Change{Recognise: rec}, nil
 }
 
 // settlePhase is Phase 2: from the single publish to active-and-policied.
@@ -757,26 +772,6 @@ func recoverRun(ctx context.Context, d Deps, o Options, res *Result) error {
 	return err
 }
 
-func releaseFence(ctx context.Context, d Deps, fenced []bitcoind.Outpoint) {
-	// A fresh context: the fence has to come off even when the run was
-	// cancelled, and a cancelled context cannot make the RPC.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
-	defer cancel()
-
-	freed, err := d.Wallet.ReleaseLocks(ctx, fenced)
-	if err != nil {
-		fmt.Fprintf(d.Out, "\ncould not release the %d coin lock%s fencing off the "+
-			"coins this batch was not allowed to spend: %v\nThey are memory-only, "+
-			"so restarting Core clears them; `winthistle doctor` lists them.\n",
-			len(fenced), prose.Plural(len(fenced)), err)
-		return
-	}
-	if len(freed) > 0 {
-		fmt.Fprintf(d.Out, "released %d fenced coin lock%s\n", len(freed),
-			prose.Plural(len(freed)))
-	}
-}
-
 // aliases indexes Phase 0's peer facts by key, for the plan's labels.
 //
 // Phase 0 asked the graph once; this is that answer carried forward rather than
@@ -788,22 +783,6 @@ func aliases(facts []peers.Facts) map[string]string {
 		if f.Alias != "" {
 			out[strings.ToLower(f.Want.Pubkey)] = f.Alias
 		}
-	}
-	return out
-}
-
-func allowed(c coldwallet.Coins) []plan.Outpoint {
-	out := make([]plan.Outpoint, 0, len(c.Eligible))
-	for _, u := range c.Eligible {
-		out = append(out, plan.Outpoint{TxID: u.TxID, Vout: u.Vout})
-	}
-	return out
-}
-
-func excluded(c coldwallet.Coins) []string {
-	out := make([]string, 0, len(c.Excluded))
-	for _, e := range c.Excluded {
-		out = append(out, fmt.Sprintf("%s — %s: %s", e.Coin.Outpoint(), e.Why, e.Detail))
 	}
 	return out
 }

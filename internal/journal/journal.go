@@ -113,16 +113,31 @@ const (
 	ChanCancelled ChannelState = "cancelled"
 )
 
-// SignerState is how far one cold-storage signer has got with the batch PSBT.
+// SignerState is how far one signer has got with a PSBT.
 //
-// SignerPartial is the only success state, and it is named for I-2: signers
-// return partial signatures. A signer that could return a complete transaction
-// would be a signer that could publish, which is the thing the whole design
-// exists to prevent.
+// There are two success states because there are two rounds with different
+// shapes, and neither name is a euphemism for the other:
+//
+//   - SignerSigned is the batch. One wallet builds the transaction at step 4 and
+//     signs it at step 7, and what it hands back is one file with complete
+//     witnesses on it. This used to be recorded as SignerPartial, which was named
+//     for I-2 — signers returned partial signatures because a signer that could
+//     return a complete transaction would be a signer that could publish. I-2 is
+//     dissolved: the gate closed at step 6, before anything was signed, so a
+//     wallet holding a signed batch front-runs nothing.
+//   - SignerPartial is the CPFP child, which still goes out to m devices and
+//     comes back in m pieces. It also appears in journals earlier builds wrote,
+//     where it meant one device of m in a batch round.
+//
+// Anything reading these back must handle both, and prose.signerNote is the only
+// thing that does. There is no CHECK constraint and no migration table, so an
+// unrecognised value round-trips silently — which is why that function has a
+// default branch and says so.
 type SignerState string
 
 const (
 	SignerAwaiting SignerState = "awaiting"
+	SignerSigned   SignerState = "signed"
 	SignerPartial  SignerState = "partial"
 	SignerDeclined SignerState = "declined"
 )

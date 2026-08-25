@@ -79,12 +79,34 @@ Winthistle is not a wallet and does not want to be one. Signing stays where it i
 Step 4 looks like this:
 
 ```
-channel 1  bitrefill    bcrt1q...9f4a   250,000 sat
-channel 2  acinq        bcrt1q...c17b   250,000 sat
+Step 4 — build the transaction in your wallet
 
-Enter these as recipients in Sparrow, choose your coins
-and fee, then Save PSBT — do not sign yet.
+  channel 1  bitrefill         250,000 sat
+      bcrt1q0y0m2xwq6xh3d3h6d6dqzmgyzc0gdz7zxr6c6c4h3fjqz9f4amqk8s2ea
+
+  channel 2  acinq             250,000 sat
+      bcrt1qhtl7hc8ckygznefeyjd37je92vspksmqg9dg7rrnsa0ls003c17bqhea9y
+
+Enter these as recipients, choose your coins and the fee,
+and save the PSBT. Do not sign it yet.
+
+  - Save it here, unsigned. Binary or base64, either is read:
+      /home/you/batch.psbt
 ```
+
+Addresses get a line of their own. A P2WSH funding address is 62 characters, and
+a wrapped one is a string you would have to reassemble by hand at the step where
+a wrong character costs a channel.
+
+**"Do not sign it yet" is enforced, not advised.** Step 4 is the one moment left
+where the gate can be defeated from outside: you would be holding a broadcastable
+funding transaction with nothing yet recoverable, and your wallet's Broadcast
+button is two clicks from its Sign button. A packet with any signature on it is
+refused here, and the cost is building it again inside clock A.
+
+The two paths are `--psbt FILE`, which is where you save that transaction, and
+`FILE-signed.psbt` beside it, which is where the signed one goes at step 7. The
+second name is derived rather than asked for, so the two cannot be the same file.
 
 ## The load-bearing property
 
@@ -234,6 +256,15 @@ tools.
 
 One case nothing covers: a child of a parent that has been evicted everywhere is
 an orphan.
+
+**How it knows which output is your change.** It does not build the transaction,
+so it cannot be told: it reads the master key fingerprints off the transaction's
+own inputs and accepts an output carrying those same fingerprints on the change
+branch. That is the evidence a hardware wallet uses to decide an output is its own
+change rather than a payment, and the report marks such an output "recognised by
+key origin rather than by address" because the claim is weaker than a script.
+`--change ADDRESS` names the script instead, which is stronger, and is what a
+wallet that writes no key origins needs.
 
 *Today the verifier refuses a batch with no change output, or with change too
 small. That is being changed to a report — your fee and change arrangements are

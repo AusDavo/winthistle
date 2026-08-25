@@ -563,25 +563,72 @@ func split(r *journal.Run) (pending, shims []journal.Channel) {
 	return pending, shims
 }
 
+// signerNote is the only place a journal.SignerState is rendered, which is why
+// the counts have to add up to len(r.Signers) and why there is a default branch.
+//
+// The switch used to have three arms and no default, so a state it did not know
+// about was counted in nothing: two signers at an unrecognised value rendered as
+// "0 returned a partial, 0 still awaited, 0 declined" — a run that reads as
+// though nobody had been asked anything, on the highest-stakes screen in the
+// product. The journal has no CHECK constraint and no migration table, so a value
+// this function has not heard of is a thing that can happen: an older build's
+// journal, or a newer one's.
 func signerNote(r *journal.Run) string {
 	if len(r.Signers) == 0 {
 		return Para("No signer had been asked for anything when this stopped.")
 	}
-	var awaiting, partial, declined int
+	var awaiting, signed, partial, declined, unknown int
 	for _, s := range r.Signers {
 		switch s.State {
 		case journal.SignerAwaiting:
 			awaiting++
+		case journal.SignerSigned:
+			signed++
 		case journal.SignerPartial:
 			partial++
 		case journal.SignerDeclined:
 			declined++
+		default:
+			unknown++
 		}
 	}
+
+	var counts []string
+	if signed > 0 {
+		counts = append(counts, fmt.Sprintf("%d signed", signed))
+	}
+	if partial > 0 {
+		// Only a journal an earlier build wrote, or a CPFP child's round, puts a
+		// batch signer here. Said in its own words rather than folded into "signed",
+		// because a partial signature is not a transaction.
+		counts = append(counts, fmt.Sprintf("%d returned a partial signature", partial))
+	}
+	if awaiting > 0 {
+		counts = append(counts, fmt.Sprintf("%d still awaited", awaiting))
+	}
+	if declined > 0 {
+		counts = append(counts, fmt.Sprintf("%d declined", declined))
+	}
+	if unknown > 0 {
+		counts = append(counts, fmt.Sprintf("%d in a state this build does not "+
+			"recognise", unknown))
+	}
+
 	return Para(fmt.Sprintf(
-		"Signers: %d returned a partial, %d still awaited, %d declined. No key "+
-			"material, PSBT or descriptor is stored in the journal — a signer here "+
-			"is a label and a state.", partial, awaiting, declined))
+		"Signers: %s. No key material, PSBT or descriptor is stored in the journal "+
+			"— a signer here is a label and a state.", andList(counts)))
+}
+
+// andList renders a list the way a sentence wants it.
+func andList(items []string) string {
+	switch len(items) {
+	case 0:
+		return "none"
+	case 1:
+		return items[0]
+	default:
+		return strings.Join(items[:len(items)-1], ", ") + " and " + items[len(items)-1]
+	}
 }
 
 func mayBePublic(r *journal.Run) bool {

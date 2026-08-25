@@ -166,31 +166,20 @@ func (l *Launcher) Start(ctx context.Context, r *server.Run, req server.StartReq
 		return errors.New("there is no batch to open: this server was started " +
 			"without one")
 	}
-	if len(l.cfg.Signers) == 0 {
-		return errors.New("no signers are configured. Add a [[signer]] block per " +
-			"cold-storage device to winthistle.toml — and exactly as many as the " +
-			"descriptor requires, because btcd's finalizer wants exactly m " +
-			"signatures and a 2-of-3 carrying three partials does not finalize. " +
-			"A browser-driven run needs the labels and the count; it does not need " +
-			"a command, because the packet goes out through the page for any device " +
-			"that has no command. A device that has one uses it, and is never asked " +
-			"here")
-	}
-
+	// No [[signer]] check here any more, and its absence is the point. A batch
+	// needs one wallet that builds a transaction and signs it, and that wallet is
+	// the page: it is asked twice, at step 4 and at step 7, and it needs no
+	// configuration at all. The refusal that used to be here belonged to the
+	// m-device round and moved with it — StartBump still makes it.
 	d, closeAll, err := run.Connect(ctx, l.cfg)
 	if err != nil {
 		return err
 	}
 	defer closeAll()
 
-	sigs, err := newSigners(r, l.cfg, l.gate())
-	if err != nil {
-		return err
-	}
-
 	d.Out = r
 	d.Confirm = Confirmation(r, l.gate())
-	d.Signers = sigs
+	d.Signing = newPageWallet(r, l.buildWindow(), SigningWindow)
 
 	_, err = run.Do(ctx, d, run.Options{
 		Config:            l.cfg,
@@ -680,6 +669,9 @@ type SignRequest struct {
 }
 
 // Signer is the rehearsal.Signer seam over the browser.
+//
+// For a multi-device round — the CPFP child, now that the batch's wallet is asked
+// through pageWallet instead.
 //
 // An unanswered question is an error rather than an empty signature, and that is
 // the only safe reading: combine.Complete wants exactly m partials, so a device

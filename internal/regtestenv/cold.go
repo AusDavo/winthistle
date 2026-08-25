@@ -1,12 +1,15 @@
 package regtestenv
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"testing"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/combine"
+	"github.com/btcsuite/btcd/btcutil/psbt"
 )
 
 // The two key-holding halves of regtest/cold-wallet.py's simulated 2-of-2. Each
@@ -131,4 +134,41 @@ func (e *Env) ReleaseLocksAtCleanup(t *testing.T, wallet *bitcoind.Client,
 			t.Errorf("releasing %d coin lock(s): %v", len(ops), err)
 		}
 	})
+}
+
+// SignLikeSparrow returns the batch transaction fully signed, the way the wallet
+// at step 7 hands it back.
+//
+// This is the harness doing what Sparrow does, and the difference from
+// SignWithColdWallet is where the combining happens. SignWithColdWallet returns m
+// partials for the app to union; this collects both halves and unions and
+// finalizes them *outside* the app, so what comes back is one packet with a
+// complete witness on every input. That is the input combine.Accept exists for,
+// and a fixture that returned partials instead would leave the production path
+// untested no matter how green it went.
+//
+// Getting a complete signature out of a simulated 2-of-2 means using both halves,
+// which is why this is not simply SignPartial twice: neither half can finish the
+// transaction alone, and after the inversion that fact is no longer an invariant —
+// it is just what this particular fixture wallet is.
+func (e *Env) SignLikeSparrow(t *testing.T, unsigned []byte) []byte {
+	t.Helper()
+
+	parts := e.SignWithColdWallet(t, base64.StdEncoding.EncodeToString(unsigned))
+	merged, err := combine.Merge(unsigned, parts)
+	if err != nil {
+		t.Fatalf("the harness combining its own halves: %v", err)
+	}
+	if err := psbt.MaybeFinalizeAll(merged.Packet); err != nil {
+		t.Fatalf("the harness finalizing outside the app: %v", err)
+	}
+	if !merged.Packet.IsComplete() {
+		t.Fatal("the harness produced a packet that is not fully signed, so the " +
+			"production path would never see the input it is written for")
+	}
+	var buf bytes.Buffer
+	if err := merged.Packet.Serialize(&buf); err != nil {
+		t.Fatalf("serialising the signed packet: %v", err)
+	}
+	return buf.Bytes()
 }

@@ -17,57 +17,137 @@
 
 ## Where the build actually is
 
-**Items 1, 2 and 3 are done.** The inversion is proved on a running node and the
-armed window is now built around it. `TestSkipFinalizeReachesChanPendingWithNothingSigned`
-took *n* = 2 channels to `chan_pending` at the outpoints of an **unsigned**
-transaction, mempool clear, in under a second; and
-`TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable` now runs
-the whole inverted sequence at *n* = 3 through app code — verify with
-`skip_finalize`, collect the receipts, sign, publish once, confirm.
-`docs/replan-2026-08.md`'s "Item 3, as built" is the account of what moved.
+**Items 1 to 4 are done.** The inversion is proved on a running node, the armed
+window is built around it, and `run` no longer builds the transaction or signs it.
+`TestSkipFinalizeReachesChanPendingWithNothingSigned` took *n* = 2 channels to
+`chan_pending` at the outpoints of an **unsigned** transaction, mempool clear, in
+under a second. `TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable`
+runs the whole inverted sequence at *n* = 3 through app code.
+`TestTheFilePathDrivesTheWholeSequence` drives `run --psbt` end to end through the
+real file transport, with the harness reading the recipients off the printed table
+the way an operator reads them off a terminal.
+`docs/replan-2026-08.md`'s "Item 3, as built" and "Item 4, as built" are the
+account of what moved.
 
-**What has moved: `internal/arm`, `internal/journal`, and the copy that described
-their order.** `arm.Finalize` is gone; `arm.Verify` returns a `*Verified` and
-`arm.Receipts` is the gate; `arm.Publish` takes the signed bytes as a parameter
-and refuses any whose txid is not the pinned one; the journal runs
-arming → armed → signing → publishing → published, with `RecordPinnedTxID` before
-the first verify and `MarkSigning` after the gate. **There is no `psbt_finalize`
-call anywhere in the build.**
+**What has moved: `internal/arm`, `internal/journal`, `internal/run`,
+`internal/combine`, `internal/plan`'s change recognition, and the copy that
+described any of it.** In one line each:
 
-**What has not moved.** Everything the replan cuts is still present and still
-works: `setup`, `bump`, `serve`, `coldwallet`, `rehearsal`, `server`, `webrun`,
-`signet/`, `internal/bitcoind`. `run` still builds the transaction with
-`coldwallet` and still signs with the configured devices — item 4 is what changes
-that. Items 4 to 6 are what move the rest.
+- `arm.Finalize` is gone, `arm.Verify` returns a `*Verified`, `arm.Receipts` is
+  the gate, `arm.Publish` takes the signed bytes and refuses a txid that is not
+  the pinned one. **There is no `psbt_finalize` call anywhere in the build.**
+- `run.SigningWallet` is the new seam — `Built(ctx, []Recipient)` at step 4,
+  `Signed(ctx, unsigned)` at step 7 — with `run.FileWallet` behind `--psbt FILE`
+  and a two-question page wallet in `internal/webrun`. `internal/run` does not
+  import `internal/coldwallet`.
+- `combine` is *the acceptance check on an inbound PSBT*. `combine.Accept` is the
+  batch's path and takes complete witnesses; `combine.Merge` still refuses them,
+  for the CPFP child, and the reason is mechanical rather than I-2's.
+- `combine.Unsigned` refuses a **signed** packet at step 4. That is I-1 at the
+  last place it can still be defeated from outside.
+- `plan.RecogniseChangeIn` reads the wallet's own key origins off the
+  transaction's inputs, because the app no longer knows the change address and an
+  unnamed output is a refusal. `run --change ADDRESS` is the stronger override.
+- `journal.SignerSigned` joins `SignerPartial`; `prose.signerNote` grew a default
+  branch, because its switch had none and an unrecognised state rendered as
+  "0 returned a partial, 0 still awaited, 0 declined".
 
-**The three collisions found while rewriting the docs, and where they stand:**
+**Two gates `run` no longer holds, and neither was about the batch.**
+`setup.Check` read back a human's verdict on cold-wallet descriptors the app never
+touches now; `rehearsal.Gate` measured a signing round that is no longer inside
+any window. Both packages still compile and still pass their own tests.
+`TestARejectedWalletStopsTheRunBeforeAnythingIsAsked` was deleted with the
+placement it was about, and a comment in `internal/run/run_regtest_test.go` says
+where the gate went.
 
-1. **`combine.ErrAlreadyFinalized` refuses the new happy path's own input — still
-   open, and item 3 left it deliberately.** `internal/combine` survives the
-   replan, and `combine.go:94` refuses a device that returns a *finalized* input
-   — with I-2 named in the comment and the error text reading "Only partial
-   signatures may leave a signer". Step 7 is "sign in Sparrow", which returns
-   exactly that. Nothing item 3 built produces such an input: `arm` never calls
-   `combine.Merge`, and `run`'s signers are still the harness's
-   partial-signature halves, so settling it then would have meant either a check
-   with no caller exercising the new path or deleting one the current happy path
-   relies on. **It blocks item 4 and has to be settled in the same commit as the
-   `--psbt` path.** Do not delete the check silently: decide what `combine` is
-   for, say so in the package comment, and keep the base-packet guard at
-   `combine.go:249`, which is a different check. `journal.SignerPartial`'s doc
-   comment names I-2 too, for the same reason and with the same fix due.
+**What has not moved.** Everything item 5 cuts is still present and still works:
+`setup`, `bump`, `serve`, `coldwallet`, `rehearsal`, `server`, `webrun`, `signet/`,
+`internal/bitcoind`. Core is still dialled — `fees.Estimate` for the number the
+verifier judges against, and `testmempoolaccept` for the one pre-flight there is.
+`Method.CallSites` still pins `PublishTransaction` at 2. The fee and change
+findings still refuse and `Replaceable` is still in the verifier.
+
+---
+
+## The next slice: item 5, delete the cut packages
+
+Delete `coldwallet`, `setup` and the `setups` table, `bump`, `rehearsal`,
+`signers`' multi-device round, `server`, `webrun`, `signet/`, `doctor`'s Core
+checks, and `internal/bitcoind` **from the application**. `internal/bitcoind` and
+the simulated multisig cold wallet survive **inside `internal/regtestenv`** as the
+stand-in for Sparrow — every regtest fixture that builds or signs a batch goes on
+using them, and `Env.SignLikeSparrow`, `Env.BuildPSBTPaying` and
+`Env.RecipientsIn` are what those fixtures now go through.
+
+Nothing in the application depends on any of them for the batch any more, which is
+what item 4 was for. What is left is genuinely deletion plus three decisions.
+
+**Decision 1 — what replaces `fees.Estimate`, and it must not be a third party.**
+`plan.Fee.TargetSatPerVB` needs a number to call a fee too low or too high, and
+`estimatesmartfee` is Core's. `internal/fees` is on neither of the replan's lists.
+`docs/design.html` states the options and says none has been chosen: ask the
+operator, derive it from LND's own relay floor, or drop the fee finding entirely.
+Note that dropping it is *nearly* free after item 6, which demotes `FeeTooLow` and
+`FeeTooHigh` to reports anyway — so the real question is whether a report with no
+number is worth printing. **A fee floor that quietly becomes zero is exactly the
+default this project should not ship**, and `internal/fees`' regtest tests already
+prove the floor is what carries a regtest run.
+
+**Decision 2 — after item 5 there is no pre-flight at all.** `testmempoolaccept`
+is Core's and it is the only thing that has ever validated the batch without
+relaying it. Its production caller today is `armWindow`, immediately after
+`combine.Accept`. What survives the deletion is narrower and is not nothing:
+`combine.Finalize` executes every input's witness against its own script, which
+answers "will each input validate" more directly than a mempool test does and
+needs no chain data. What is genuinely lost is node policy — min relay fee,
+standardness, ancestor limits — and `plan.Verify` already lists exactly that in
+`Verification.Unchecked`, naming `testmempoolaccept` as the thing that would answer
+it. Decide whether that sentence is enough, and if it is, say so where somebody
+will read it rather than letting the call site disappear quietly.
+
+**Decision 3 — `Method.CallSites` goes from 2 to 1.** `bump.Publish` is the second
+call site and it goes with `internal/bump`. Change `CallSites`, `CLAUDE.md`'s
+rejected-list bullet and `docs/design.html` in the same commit as the deletion, or
+do not change it. `TestEveryLNDCallSiteIsRegistered` fails either way round, which
+is the point of it.
+
+**Two things that will not simply delete.**
+
+1. **`run.Deps` carries `Node`, `Wallet` and `Signers` for `bump`, not for the
+   batch.** `cmd/winthistle`'s `connect()` returns a `run.Deps` and `bumpCmd`
+   builds `bump.Deps` out of it (`main.go:452-457`); `internal/webrun`'s
+   `StartBump` does the same. Deleting `bump` is what frees those three fields,
+   `run.ConfiguredSigners`, `run.DefaultPSBTDir`, `run.Signers`, the `--psbt-dir`
+   flag and `internal/signers`' whole multi-device round — so do `bump` first and
+   the rest falls out. `run.Connect` is the only place Core is dialled.
+2. **`internal/settle` uses Core.** `settle.Options.Chain` is a `*bitcoind.Client`
+   and `settle` is on the survive list. Check what it asks Core for before
+   assuming the field goes; `internal/settle`'s regtest test is the slowest in the
+   repository (~60 s) and it is the one that will notice.
+
+**Do not** demote the fee and change findings or remove `Replaceable` — item 6.
+**Do not** re-open `arm` or `combine`; both are done and both are proved on the
+cluster. **Do not** delete `internal/regtestenv`'s Core client or cold wallet.
+
+## The three collisions found while rewriting the docs, and where they stand
+
+1. **`combine.ErrAlreadyFinalized` — settled in item 4.** `combine` is the
+   acceptance check now, `combine.Accept` takes the complete witness Sparrow
+   produces, and `Merge`'s refusal survives with a mechanical reason for the CPFP
+   child. The same correction went into `internal/signers` and
+   `journal.SignerState`. Nothing about I-2 is cited as live anywhere.
 
 2. **The receipt buffer — settled, and it fits.** `req.Updates` is
    `make(chan *lnrpc.OpenStatusUpdate, 2)` (`lnd/server.go:5190`), and the
-   funding manager blocks when it is full. The new steps 5→6 verify all *n* and
-   then collect *n* receipts, which is exactly what `arm.Receipts` does, and this
-   flow produces exactly two updates per stream before confirmation: `psbt_fund`
-   (read in `Open`) and `chan_pending`. Re-checked against every send site in
-   `funding/manager.go` — `:2217` for `psbt_fund`, `:2873` for `chan_pending`,
-   `:4254` for `chan_open`, and there is no fourth. There is room for the
-   receipt and no room for anything else. **A third update per stream, or a
-   change that stops reading promptly, breaks this and the failure looks like a
-   dead peer.** `arm.Receipts`' doc comment says so where it would be read.
+   funding manager blocks when it is full. Steps 5→6 verify all *n* and then
+   collect *n* receipts, which is what `arm.Receipts` does, and this flow produces
+   exactly two updates per stream before confirmation: `psbt_fund` (read in
+   `Open`) and `chan_pending`. Re-checked against every send site in
+   `funding/manager.go` — `:2217`, `:2873`, `:4254`, and there is no fourth.
+   There is room for the receipt and no room for anything else. **A third update
+   per stream, or a change that stops reading promptly, breaks this and the
+   failure looks like a dead peer.** `arm.Receipts`' doc comment says so where it
+   would be read.
 
 3. **The custody-language change-output copy is still shipping.** `CLAUDE.md`
    explains at length why framing a stuck batch as a custody risk is dangerous,
@@ -76,7 +156,7 @@ that. Items 4 to 6 are what move the rest.
    and the comment at `internal/plan/size.go:246`. Item 6's business, alongside
    demoting the finding.
 
-**Four claims that were wrong today**, found by auditing rather than by working:
+**Four claims that were wrong**, found by auditing rather than by working:
 `handleFundingSigned` does not exist in LND v0.19.3-beta (it is
 `funderProcessFundingSigned`, `funding/manager.go:2694`) and was cited in three
 documents; there is no CI in this repository, though `CLAUDE.md` and `README.md`
@@ -118,7 +198,19 @@ pinned txid is there.
 proving the sequence and then leaving channels pending is not a success, and a
 probe is usually run from a terminal somebody walks away from.
 
-## One live code gap
+## Two live code gaps, and neither is a safety failure
+
+**Nothing bounds step 4 or step 7 either, and that is deliberate rather than
+overlooked.** `run.FileWallet.wait` polls until the context ends, and the two
+waits have different clocks above them that are not the transport's to enforce:
+step 4 is inside the peers' ten minutes, where a deadline of ours would abort a
+batch the peers were still holding, and step 7 has no deadline at all now that the
+gate is open. What ends either is the operator, or the run's own context. The
+browser path *does* bound both, because `server.Run.Ask` requires a deadline and
+holds a one-at-a-time slot: `webrun.buildWindow()` for step 4 and
+`webrun.SigningWindow` (one hour) for step 7, with comments saying why neither is a
+safety bound. **If a countdown is ever added to the CLI, step 4 is the one it is
+for** — it is the only step inside clock A that takes any time at all.
 
 **Nothing bounds the `chan_pending` wait, and the fallback dies with the context
 that ends it.** `arm.receiptFor` blocks in `Recv` with no deadline of its own,
@@ -497,15 +589,25 @@ over-sign and `internal/combine` survives.
   number the script demands, so asking one more device to sign "just in case"
   breaks the batch. `internal/combine` catches it before `MaybeFinalizeAll` and
   says so with the counts and the device labels; without that the operator gets
-  "Unsupported script type". Worth knowing before designing the signing UI: it
-  must collect exactly *m*.
+  "Unsupported script type". Still live for the CPFP child, and note
+  `checkSignatureCounts` now **skips an input that already carries a complete
+  witness** — the batch's own path, where the signatures were counted by whatever
+  finalized them and what checks the result is `executeWitnesses`. A wallet that
+  over-signs and then finalizes is Sparrow's problem, not this build's; one that
+  over-signs and hands back partials still gets the counts and the labels.
 
-- **A device that returns a *finalized* PSBT is refused, on purpose.** That is
-  I-2: a finalized input is a complete witness, so that device held a
-  broadcastable transaction. It is the right refusal and it is also the one most
-  likely to surprise an operator in assisted mode, where a wallet's default "sign"
-  button may finalize. The design's answer is to let the external wallet apply
-  *m*−1 signatures and collect the last partial here.
+- **A finalized inbound PSBT is refused by `combine.Merge` and expected by
+  `combine.Accept`, and the two are right for opposite reasons.** This used to be
+  one rule and it used to be I-2: a finalized input is a complete witness, so that
+  device held a broadcastable transaction. I-2 is dissolved. What survives is
+  mechanical — a merge *unions* partial signatures and finalization discards them,
+  so a device that finalizes on its own leaves the other devices in the round
+  nothing to add to. That is still true of the CPFP child, which is the only
+  multi-device round left. The batch's wallet goes through `Accept`, where a
+  complete witness is the expected input and the check on it is
+  `executeWitnesses` rather than a signature count. **If you find yourself
+  re-justifying either in I-2's words, stop**: `CLAUDE.md`'s I-2 section is the
+  record of why that reasoning is gone.
 
 - **`internal/arm`'s publish test leaves open channels and spends cold coins.**
   It is the only test that publishes, and it has to, because "the transaction
@@ -541,19 +643,22 @@ over-sign and `internal/combine` survives.
   `bootstrap` does not fix it.** A container restart leaves Core's non-default
   wallets unloaded, which every wallet call reports as "Requested wallet does not
   exist" and `make -C regtest bootstrap` cures. A *different* failure looks like a
-  code bug and is not: `internal/run` and `internal/settle` failing with
-  "combining the cold wallet's partials: no device added a signature — every
-  device returned the packet it was given" means `cold1`/`cold2` hold keys from a
-  different generation than the descriptors in `cold-watch`, so
+  code bug and is not: `internal/settle` failing with "combining the cold wallet's
+  partials: no device added a signature — every device returned the packet it was
+  given", or `internal/run` failing with "the harness combining its own halves"
+  from `Env.SignLikeSparrow`, means `cold1`/`cold2` hold keys from a different
+  generation than the descriptors in `cold-watch`, so
   `walletprocesspsbt` returns the packet untouched. Only `make -C regtest reset`
   (~1 min) fixes that, and `winthistle doctor` will report the coins as fine
   throughout, because they are. Reach for `reset` on that message rather than
   reading the combine path.
 
-- **`internal/run`'s regtest tests open real channels and abort them.** Two
-  channels to two peers for the cold-probe test, one stream for the failure
-  test, all cancelled or abandoned — so they add to the pending-channel pressure
-  every abort test creates. Same cure: `make -C regtest mine N=2016`.
+- **`internal/run`'s regtest tests open real channels and abort them.** Four
+  tests now: two channels for the cold probe, two for the cancellation test, two
+  for the below-minimum failure test and one for the `--psbt` file-path test. All
+  cancelled or abandoned, so they add to the pending-channel pressure every abort
+  test creates. Same cure: `make -C regtest mine N=2016`. The file-path test is
+  *n* = 1 deliberately, because it proves a transport rather than a batch size.
 
 - **The composition's failure path aborts without asking.** `run.Do` tears the
   batch down on any failure between `arm.Open` and the publish, because nothing

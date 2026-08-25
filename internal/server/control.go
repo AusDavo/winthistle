@@ -469,11 +469,12 @@ func alreadyRunning(err error, live *Run) string {
 	}
 
 	b.WriteString(prose.Para("One at a time, on purpose. There is one journal, " +
-		"one cold wallet and one armed window, and the place two runs collide is " +
-		"the expensive one: the second run's dress rehearsal builds a decoy over " +
-		"the same coins the first run is about to spend. It would either lose coin " +
-		"selection or take the inputs out from under a batch that is already " +
-		"armed, with the cold wallet out and the peers waiting."))
+		"one armed window and one wallet with the coins in it, and the place two " +
+		"runs collide is the expensive one: a second batch built from that wallet " +
+		"spends the outputs the first one is about to. Whichever transaction " +
+		"confirms takes the inputs out from under a batch that is already armed, " +
+		"with the peers waiting and every channel in it committed to an outpoint " +
+		"that will never exist."))
 	if live != nil {
 		b.WriteString("\n")
 		b.WriteString(prose.Para(fmt.Sprintf("Run %s is the one that is going. "+

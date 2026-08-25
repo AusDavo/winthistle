@@ -55,7 +55,10 @@ Commands:
   doctor                   check every prerequisite and print what fixes each
   serve                    serve the local web UI on [server] bind, and print
                            the URL with the startup token in it
-  run --batch FILE         open the batch: Phase 0, the armed window, Phase 2
+  run --batch FILE --psbt FILE
+                           open the batch: Phase 0, the armed window, Phase 2.
+                           --psbt is where you save the transaction you build
+                           in Sparrow, and where the signed one is read back
   bump RUN-ID              build, sign and broadcast a CPFP child of a stalled
                            batch. Never a replacement — see I-4
   recover [RUN-ID]         list runs that stopped, or take one apart
@@ -67,16 +70,21 @@ Commands:
 Common flags:
   --config PATH            winthistle.toml (default: ./winthistle.toml)
 
-The web UI can open a batch: it starts a run, answers the four questions a run
-asks, and stops one. What it cannot do is publish — that stays inside the
-sequence that earned it. Missing from it still: the file and QR transports, the
-countdown, and the screens that list what an earlier run left behind, which
-recover is still the only way to read.
+This program builds nothing, holds no keys, selects no coins and derives no
+addresses. It does the two things Sparrow and LND cannot do between them: it
+attributes the funding outputs to peers, so you can see which peer each one
+funds and at what amount, and it holds the gate — every channel reaches
+chan_pending before the transaction is allowed to reach the network.
 
-Either front door drives the same sequence: the peer pre-flight, the fee source,
-the dress rehearsal and the reserve check for Phase 0; the armed window and its
-single publish for Phase 1; the confirmation watch, the policy pass and the CPFP
-child for Phase 2; and the abort and recovery paths under all of it. See
+The web UI can open a batch: it starts a run, answers the questions a run asks,
+and stops one. What it cannot do is publish — that stays inside the sequence
+that earned it. Missing from it still: the countdown, and the screens that list
+what an earlier run left behind, which recover is still the only way to read.
+
+Either front door drives the same sequence: the peer pre-flight, the fee source
+and the reserve check for Phase 0; the armed window, the wallet's two visits and
+the single publish for Phase 1; the confirmation watch, the policy pass and the
+CPFP child for Phase 2; and the abort and recovery paths under all of it. See
 HANDOFF.md.
 `
 
@@ -350,8 +358,12 @@ func runCmd(ctx context.Context, args []string) error {
 	probe := fs.Bool("probe", false, "shim-probe every peer first. Costs each "+
 		"accepted peer a pending-channel slot for ~11 minutes, and this run then "+
 		"waits that out before arming")
-	psbtDir := fs.String("psbt-dir", "", "where to write PSBTs for signers that "+
-		"have no command (default: alongside the journal)")
+	psbtPath := fs.String("psbt", "", "where the transaction you build in Sparrow "+
+		"gets saved, and where this run reads it back from. The signed one goes "+
+		"beside it with -signed on the name. Required")
+	change := fs.String("change", "", "your wallet's change address, if you want "+
+		"the verifier to check the script rather than recognise the key origins. "+
+		"Needed only by a wallet that writes no key origins at all")
 	settleFor := fs.Duration("settle-for", run.DefaultSettleFor,
 		"how long Phase 2 watches for confirmations and applies policies")
 	yes := fs.Bool("yes", false, "do not ask before arming. The blunt-abandon "+
@@ -363,6 +375,12 @@ func runCmd(ctx context.Context, args []string) error {
 		return errors.New("run needs --batch FILE. `winthistle example-batch` " +
 			"prints one to start from")
 	}
+	// Checked before LND is dialled and long before a peer is told anything: it
+	// refuses a path that already exists, and a refusal here has cost nothing.
+	wallet, err := run.NewFileWallet(*psbtPath, os.Stdout)
+	if err != nil {
+		return err
+	}
 
 	cfg, err := loadConfig(*cfgPath)
 	if err != nil {
@@ -373,11 +391,15 @@ func runCmd(ctx context.Context, args []string) error {
 		return err
 	}
 
-	d, closeAll, err := connect(ctx, cfg, *psbtDir)
+	// The signers still come from the configuration, and the batch no longer uses
+	// them: `winthistle bump` is built out of the same Deps and the CPFP child is
+	// still a multi-device round. An empty [[signer]] list is fine for a run now.
+	d, closeAll, err := connect(ctx, cfg, "")
 	if err != nil {
 		return err
 	}
 	defer closeAll()
+	d.Signing = wallet
 
 	if !*yes {
 		fmt.Printf("\n%s", webrun.Summary(batch))
@@ -401,6 +423,7 @@ func runCmd(ctx context.Context, args []string) error {
 	res, err := run.Do(ctx, d, run.Options{
 		Config: cfg, Batch: batch, RunID: id,
 		StopBeforePublish: *stopBefore, Probe: *probe, SettleFor: *settleFor,
+		Change: *change,
 	})
 	if res != nil {
 		fmt.Printf("\nrun %s\n", res.RunID)

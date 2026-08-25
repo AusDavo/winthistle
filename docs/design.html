@@ -366,12 +366,24 @@ footer p{font-size:.9rem; color:var(--muted)}
     </div>
     <div class="note">
       <span class="lbl">Step 4, concretely</span>
-      <pre style="margin-top:.5rem">channel 1  bitrefill    <b>bcrt1q...9f4a</b>   250,000 sat
-channel 2  acinq        <b>bcrt1q...c17b</b>   250,000 sat
+      <pre style="margin-top:.5rem">channel 1  bitrefill         250,000 sat
+    <b>bcrt1q0y0m2xwq6xh3d3h6d6dqzmgyzc0gdz7zxr6c6c4h3fjqz9f4amqk8s2ea</b>
 
-<i>Enter these as recipients in Sparrow, choose your coins</i>
-<i>and fee, then Save PSBT — do not sign yet.</i></pre>
+channel 2  acinq             250,000 sat
+    <b>bcrt1qhtl7hc8ckygznefeyjd37je92vspksmqg9dg7rrnsa0ls003c17bqhea9y</b>
+
+<i>Enter these as recipients, choose your coins and the fee,</i>
+<i>and save the PSBT. Do not sign it yet.</i>
+
+  - Save it here, unsigned. Binary or base64, either is read:
+      /home/you/batch.psbt</pre>
+      <p style="margin-top:.6rem">Each address is printed on a line of its own. A P2WSH funding address is 62 characters and the pane is 78, so a label column wide enough to read pushes it past the edge — and a wrapped address is one an operator has to reassemble by hand at the one step where a wrong character costs a channel. Alone on a line it is also one double-click to select.</p>
       <p style="margin-top:.6rem">A PSBT skeleton was considered and rejected: Sparrow signs PSBTs, it does not fund them. There is no "load this unfunded PSBT and choose coins for it" flow outside Core's <code>walletcreatefundedpsbt</code>, and removing Core is the point.</p>
+    </div>
+    <div class="note warn">
+      <span class="lbl">"Do not sign yet" is enforced, and it is I&middot;1</span>
+      Step 4 is the one moment left where the gate can be defeated from outside. The operator has a funded transaction and nothing has reached <code>chan_pending</code>, so a signature here means somebody is holding a broadcastable funding transaction with no channel recoverable — and a wallet's Broadcast button is two clicks from its Sign button. A transaction that reached the network at that moment would confirm one 2-of-2 output per channel with no channel behind any of them, which is the outcome the whole sequence is arranged around.
+      <p style="margin-top:.6rem">So a packet arriving here with any signature on it — a partial or a complete witness — is refused, by <code>combine.Unsigned</code>, before <code>psbt_verify</code> is called. The cost is building the transaction again inside clock A. Everywhere <em>after</em> step 6 the opposite is true: a complete witness is what step 7 is asked for, because by then a wallet holding signed bytes front-runs nothing.</p>
     </div>
     <div class="note warn">
       <span class="lbl">This page used to reject <code>skip_finalize</code>, and the reason it gave was false</span>
@@ -440,6 +452,12 @@ channel 2  acinq        <b>bcrt1q...c17b</b>   250,000 sat
       <span class="lbl">Not yet true of the code</span>Today the verifier has no severity at all. <code>plan.Problem</code>'s own comment reads <em>"Every problem is a refusal. There is no severity here on purpose"</em>, and all nine findings above plus the fee and change ones refuse alike. Moving four of them to the existing <code>Verification.Unchecked</code> list — which is there "so that a clean result is not read as a broader guarantee than it is" — is a scheduled change. This box will be wrong in one direction until it lands, and it is better to say which direction than to describe the code as though it had caught up.
     </div>
     <p>Two consequences of the app no longer selecting coins. It cannot <em>size</em> a change output for you, only tell you yours is too small. And nothing pre-excludes a legacy coin any more — Sparrow picks the coins, so <code>LegacyInput</code> at step 5 is the first thing that notices, which is why it stays a refusal rather than joining the reports.</p>
+    <div class="note">
+      <span class="lbl">Which output is the change, now that the app does not choose it</span>
+      Not named — <strong>recognised</strong>. The plan cannot name a script it never derived, and an output the plan does not name is an <code>UnnamedOutput</code> refusal, so without an answer here the verifier would refuse every transaction Sparrow builds. <code>plan.RecogniseChangeIn</code> reads the master key fingerprints off the transaction's <em>own inputs</em> — those are the wallet that is about to sign — and accepts an output carrying those same fingerprints on derivation branch 1. That is the evidence a hardware signer uses to decide an output is its own change rather than a payment, and <code>plan.Change.Recognise</code> already existed for it.
+      <p style="margin-top:.6rem"><strong>It is weaker than naming the script, and the report says so</strong> — such an output renders as "recognised by key origin rather than by address". The packet gets to nominate its own change output, and the circle is deliberately small: the funding outputs are checked by script and to the satoshi against addresses LND issued, so nothing here can move a channel's money, and a wallet that lies about its own change address has already taken the coins it is about to sign for.</p>
+      <p style="margin-top:.6rem"><code>run --change ADDRESS</code> names the script instead, which is the stronger check, and it is the answer for a wallet that writes no key origins at all — that case is a refusal saying which of the two to supply, rather than a plan reported as broken.</p>
+    </div>
   </div>
 </section>
 
@@ -486,7 +504,8 @@ channel 2  acinq        <b>bcrt1q...c17b</b>   250,000 sat
    │  <i>.psbt on disk, both directions</i>
 <b>signers</b>  USB · SD card · QR
    <i>─ ─ ─ ─ ─ trust boundary: keys never cross ─ ─ ─ ─ ─</i></pre>
-    <p>Note what carries the PSBT: <strong>a file</strong>. The app writes one and reads one back, and Sparrow is on the same desktop as the devices. No browser, no tunnel for the transport, no file sync, no shared mount, no extra daemon. Bitcoin Core does not appear at all.</p>
+    <p>Note what carries the PSBT: <strong>a file</strong>. The app writes none and reads two — <code>--psbt FILE</code> at step 4 and <code>FILE-signed.psbt</code> beside it at step 7, the second name derived rather than asked for so the two cannot be given the same value. Sparrow is on the same desktop as the devices. No browser, no tunnel for the transport, no file sync, no shared mount, no extra daemon. Bitcoin Core does not appear at all.</p>
+    <p>It refuses a <code>--psbt</code> path that already exists, and that is a rule rather than caution: the funding addresses the transaction pays to did not exist before the run — LND issues them at step 2 — so a file that predates the run cannot be this batch's transaction, and reading one would arm a batch against somebody else's outputs and find out at step 5. The check is made before LND is dialled, where a refusal costs nothing at all.</p>
     <div class="split wide">
       <div class="card">
         <span class="lbl">One transport, one contract</span>
@@ -766,7 +785,8 @@ floor_sat_per_vb = 2.0              <i># no default, on purpose</i></pre>
       <li><span class="sev s-cost">settled in source</span> <strong>Can the initiator read a peer's <code>minimum_depth</code>?</strong> No. It is in <code>accept_channel</code> and in LND's stored channel record, and in no RPC. So step 9 <em>observes</em> it — the number of confirmations a channel has when it first appears is that peer's answer — and the design must not promise "usable after <em>k</em> confirmations" up front. It is authoritative, it arrives far too late to plan with, and it is exactly the right thing to record for the next batch.</li>
     </ul>
     <div class="note warn">
-      <span class="lbl">What this page is ahead of</span>This revision describes the design after the inversion. The armed window has now been reshaped around it — <code>skip_finalize</code> at verify, the receipts before any signing, the journal's reordered states, and no <code>psbt_finalize</code> call anywhere in the build — and the sequence above is what the code does. What has not caught up is narrower: the fee and change findings still refuse rather than report, and the sequence-number refusal is still in the verifier. Each place that matters is flagged in the section it belongs to rather than collected here, so that a reader cannot act on one without seeing the caveat beside it.
+      <span class="lbl">What this page is ahead of</span>This revision describes the design after the inversion, and as of 2026-08-26 the code does the sequence above. The armed window was reshaped around it — <code>skip_finalize</code> at verify, the receipts before any signing, the journal's reordered states, and no <code>psbt_finalize</code> call anywhere in the build — and then <code>run</code> stopped building the transaction and stopped signing it: it prints the recipients, reads two files, and <code>internal/combine</code> is now the acceptance check on what comes back rather than the place partial signatures are combined. What has not caught up is narrower: the fee and change findings still refuse rather than report, and the sequence-number refusal is still in the verifier. Each place that matters is flagged in the section it belongs to rather than collected here, so that a reader cannot act on one without seeing the caveat beside it.
+      <p style="margin-top:.6rem">Still in the tree and no longer on any path a batch takes: Bitcoin Core (the fee estimate and <code>testmempoolaccept</code>), the watch-only wallet setup, the dress rehearsal, the multi-device signing round, the CPFP child and the web UI's device questions. Deleting them is the next slice, and it has to decide what replaces the fee number and the one pre-flight there is.</p>
     </div>
   </div>
 </section>

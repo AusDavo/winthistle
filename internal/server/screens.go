@@ -272,9 +272,9 @@ func nothingToStart(live *Run) string {
 			"is at risk in it.")
 	}
 	return prose.Para(fmt.Sprintf("Run %s is going, so there is nothing to "+
-		"start. One at a time: there is one journal, one cold wallet and one "+
-		"armed window, and a second run's dress rehearsal would build a decoy "+
-		"over the coins this one is about to spend.", live.ID))
+		"start. One at a time: there is one journal, one armed window and one "+
+		"wallet with the coins in it, and a second batch built from that wallet "+
+		"would spend the outputs this one is about to.", live.ID))
 }
 
 func overview(cfgPath string) string {
@@ -477,13 +477,42 @@ func title(r *Run) string {
 // transports.
 func waitingOn(r *Run, q *Question) string {
 	left := q.Deadline.Sub(q.Asked).Round(time.Second)
-	if r.Kind == KindBatch && q.Reply == "" {
-		return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
-			"%s, which is %s from when it was asked. That is not a signing gate — "+
-			"the signing round is over and this batch is being taken apart. Letting "+
-			"it pass declines the escalation, which leaves an abort to be finished "+
-			"by hand rather than anything that was at risk.",
-			q.Deadline.Format(time.TimeOnly), left))
+	if r.Kind == KindBatch {
+		// Three question shapes, and what letting each one pass costs is different
+		// in all three — so the copy has to tell them apart. It does it the way
+		// questionForm already decides its enctype: off the fields. A question with
+		// no Reply is a decision (the blunt abandon). A question with a Reply and no
+		// Payload is step 4, because there is nothing to hand out until the wallet
+		// has built something. One with both is step 7.
+		//
+		// Inferring is worth it here. The alternative was one sentence covering all
+		// three, and the one it used to have called every batch question a signing
+		// gate — which after the inversion is true of none of them.
+		switch {
+		case q.Reply == "":
+			return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+				"%s, which is %s from when it was asked. That is not a signing gate — "+
+				"nothing is being signed and this batch is being taken apart. Letting "+
+				"it pass declines the escalation, which leaves an abort to be finished "+
+				"by hand rather than anything that was at risk.",
+				q.Deadline.Format(time.TimeOnly), left))
+		case q.Payload == "":
+			return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+				"%s, which is %s from when it was asked. That clock is the peers': "+
+				"their reservations are running and this is the only step inside them "+
+				"that takes any time. Letting it pass costs a restart and nothing "+
+				"else — no transaction has been shown to LND yet, so what expires is "+
+				"the shims and they are cancelled for you.",
+				q.Deadline.Format(time.TimeOnly), left))
+		default:
+			return prose.Para(fmt.Sprintf("It is waiting on you. Answer below, before "+
+				"%s, which is %s from when it was asked. That is this page holding a "+
+				"slot open, not a gate on anything: every channel in this batch is "+
+				"already recoverable by force-close and nothing is in any mempool. "+
+				"Letting it pass takes the batch apart, which costs each peer a "+
+				"pending-channel slot for 2016 blocks and no funds at all.",
+				q.Deadline.Format(time.TimeOnly), left))
+		}
 	}
 	switch r.Kind {
 	case KindSetup:

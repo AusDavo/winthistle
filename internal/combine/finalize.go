@@ -52,10 +52,11 @@ var (
 // packet that produced them: the witnesses have been executed against their
 // inputs' scripts, and the txid is the one that was verified.
 type Finalized struct {
-	// RawTx is the network serialization. This is what psbt_finalize is handed,
-	// what the journal stores, and what PublishTransaction eventually
-	// broadcasts — one set of bytes, produced once, so nothing downstream can
-	// re-derive it slightly differently.
+	// RawTx is the network serialization: what the journal stores and what
+	// PublishTransaction eventually broadcasts — one set of bytes, produced once,
+	// so nothing downstream can re-derive it slightly differently. Nothing hands
+	// these to LND's funding flow; there is no psbt_finalize call in this build,
+	// because a skip_finalize verify has already left the intent finalized.
 	RawTx []byte
 
 	// TxID is the transaction's txid, in the byte order humans and Core use. It
@@ -241,6 +242,45 @@ func (f *Finalized) Recheck(p *plan.Plan) (*plan.Verification, error) {
 	return v, nil
 }
 
+// SigningWalletLabel is what a refusal calls the wallet at step 7.
+//
+// The labels exist so that a refusal can name which of m devices caused it. At
+// step 7 there is one wallet and one file, so there is nothing to disambiguate —
+// but DeviceError still renders a label, and an empty one would read as a packet
+// from nowhere.
+const SigningWalletLabel = "the signing wallet"
+
+// Accept is step 7's answer, checked: the whole of Complete bar the merge.
+//
+// base is the unsigned PSBT the wallet built at step 4 — the one this app
+// verified against the plan and handed to all n streams at step 5, so it is the
+// only packet whose provenance is known and it is what everything below is
+// checked against. signed is the same transaction with signatures on it, however
+// the wallet chose to hand them back: complete witnesses, which is what Sparrow
+// produces, or a complete set of partial signatures, which is what a wallet
+// holding fewer than m keys produces. Either is finalized and executed here.
+//
+// It is not a weaker Complete. The base-packet guard, the txid pin, the UTXO
+// check, the field-conflict rules, the witness execution and the plan re-check
+// all run exactly as they do for a multi-device round. What is absent is the only
+// thing a single packet cannot need, which is a union.
+func Accept(p *plan.Plan, base, signed []byte) (*Finalized, *plan.Verification, error) {
+	merged, err := merge(base, []Part{{Label: SigningWalletLabel, PSBT: signed}},
+		carryFinalized)
+	if err != nil {
+		return nil, nil, err
+	}
+	final, err := Finalize(merged)
+	if err != nil {
+		return nil, nil, err
+	}
+	v, err := final.Recheck(p)
+	if err != nil {
+		return nil, v, err
+	}
+	return final, v, nil
+}
+
 // Complete is the whole of half one: merge, finalize, and re-verify against the
 // plan. Nothing else in this package needs to be called in order.
 func Complete(p *plan.Plan, base []byte, parts []Part) (*Finalized, *plan.Verification, error) {
@@ -269,6 +309,14 @@ func Complete(p *plan.Plan, base []byte, parts []Part) (*Finalized, *plan.Verifi
 func checkSignatureCounts(p *psbt.Packet, signers []string) error {
 	for i := range p.Inputs {
 		in := p.Inputs[i]
+		if isFinal(in) {
+			// Already a complete witness, which is what Accept's input carries.
+			// Finalization discarded the partial signatures, so counting them here
+			// would report a fully signed input as having none — and btcd's finalizer
+			// will not touch it either. What checks this input is executeWitnesses,
+			// which runs the witness rather than counting it.
+			continue
+		}
 		if in.WitnessUtxo == nil {
 			continue
 		}

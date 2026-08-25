@@ -63,11 +63,16 @@ func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 
 // ConfiguredSigners builds the transports from the [[signer]] blocks.
 //
-// Separate from Connect because a browser-driven run does not want them: the
+// For the CPFP child, which is the only multi-device round left. The batch's
+// wallet is a SigningWallet and comes in through --psbt; these are the devices
+// `winthistle bump` asks for partial signatures, and a configuration with no
+// [[signer]] blocks is now an ordinary configuration rather than an unusable one.
+//
+// Separate from Connect because a browser-driven bump does not want them: the
 // devices are the same devices and the labels are the same labels, but the
 // packet goes out through the page rather than through a command or a file
-// handshake. Nil for an empty configuration is right — Do refuses a run with no
-// signers, and the refusal it gives says what to add.
+// handshake. Nil for an empty configuration is right — bump refuses a child with
+// no signers, and the refusal it gives says what to add.
 func ConfiguredSigners(cfg *config.Config, psbtDir string, out io.Writer) (Signers, error) {
 	if len(cfg.Signers) == 0 {
 		return nil, nil

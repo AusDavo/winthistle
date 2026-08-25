@@ -37,15 +37,21 @@
 // the rehearsal and the page in the batch would make the rehearsal's number a
 // prediction about a round that never happened.
 //
-// # What a signer is not allowed to hand back
+// # What a signer in one of these rounds is not allowed to hand back
 //
-// A finalized PSBT. Nothing here enforces that — internal/combine does, and it
-// refuses one outright — but it is worth saying at the transport layer too,
-// because this is where an operator's wallet software gets to choose. A
-// finalized input is a complete witness, which means that device held a
-// broadcastable transaction, and I-2 is that no external party ever does. In
-// assisted mode the answer is to let the external wallet apply m−1 signatures
-// and collect the last partial here.
+// A finalized PSBT. Nothing here enforces that — internal/combine does, and
+// combine.Merge refuses one outright — but it is worth saying at the transport
+// layer too, because this is where an operator's wallet software gets to choose.
+//
+// The reason is not the one it used to be. This said I-2: a finalized input is a
+// complete witness, so that device held a broadcastable transaction, and no
+// external party may ever be in that position. I-2 is dissolved — the gate now
+// closes before anything is signed, so a wallet holding signed bytes front-runs
+// nothing — and the refusal survives it mechanically. These rounds *union*
+// partial signatures from m devices, and finalization discards them, so a device
+// that finalizes on its own leaves the others nothing to add to. The batch's own
+// wallet is asked through run.SigningWallet instead, and combine.Accept expects
+// exactly the complete witness this refuses.
 //
 // The signature type is rehearsal.Signer, which is the same function the dress
 // rehearsal measures. That is deliberate: the rehearsal's number is a
@@ -202,9 +208,9 @@ func (s *Set) handshake(ctx context.Context, round, label, psbtB64 string) (comb
 
 	fmt.Fprintf(s.opts.Out, "\n%s\n", label)
 	fmt.Fprint(s.opts.Out, prose.Bullet("Take this file to the device and sign it. "+
-		"Do not let the wallet finalize: this tool combines the partial signatures "+
-		"itself, and a device that hands back a finalized transaction held a "+
-		"broadcastable one, which is refused (I-2)."))
+		"Do not let the wallet finalize: this round collects a partial signature "+
+		"from each device and unions them here, so a device that finalizes on its "+
+		"own leaves the others nothing to add to and the packet is refused."))
 	fmt.Fprintf(s.opts.Out, "      %s\n", req)
 	fmt.Fprint(s.opts.Out, prose.Bullet("Then put the signed PSBT here. Base64 or "+
 		"binary, either is read:"))

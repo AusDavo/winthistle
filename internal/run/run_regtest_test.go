@@ -8,51 +8,74 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/AusDavo/winthistle/internal/abort"
-	"github.com/AusDavo/winthistle/internal/combine"
+	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
-	"github.com/AusDavo/winthistle/internal/rehearsal"
 	"github.com/AusDavo/winthistle/internal/run"
-	// Aliased because this file already has a local helper called setup().
-	setuppkg "github.com/AusDavo/winthistle/internal/setup"
 )
 
 // fixtureChannelSat matches the other packages' fixtures, so a peer that
 // accepts one accepts the others.
 const fixtureChannelSat = 250_000
 
-// coldSigners is the harness's simulated 2-of-2, behind the interface the run
-// uses.
+// sparrow is the harness playing the wallet at steps 4 and 7.
 //
-// The two halves are Core wallets rather than a command, which is the point:
-// the composition takes a Signers, so what the transport is — a subprocess, a
-// file handshake, a browser upload — is not the run's business. What matters
-// is that each device returns a partial signature and none of them can complete
-// the transaction alone, which is the property I-2 rests on.
-type coldSigners struct {
+// Two Core wallets and no hardware, standing in for the one thing this app no
+// longer does: it builds the transaction from the recipients it is handed, and it
+// signs it and finalizes it before handing it back. The combining happens *here*,
+// outside the app, which is the whole difference from the fixture this replaced —
+// combine.Accept has to meet the input it will actually get, which is one packet
+// with complete witnesses, not m partials.
+//
+// coldwallet and internal/bitcoind survive item 5 exactly for this. The
+// application drops Core; a regtest test still needs something to build and sign
+// a funding transaction, and this is that something rather than a back door.
+type sparrow struct {
 	t   *testing.T
 	env *regtestenv.Env
+
+	// feeRate is the rate the app's own plan will judge the transaction against,
+	// read off the same configuration the run reads. A fixture that picked its own
+	// would be testing the fee finding rather than the sequence.
+	feeRate float64
+
+	// signedWith records the packet handed back at step 7, so a test can prove
+	// the bytes that reached the publish call are these.
+	signed []byte
+
+	// beforeSign runs just before the wallet answers step 7. It is where a test
+	// that wants to interrupt the run puts the interruption, because step 7 is
+	// where an operator's Ctrl-C is most likely to land: n peers hold
+	// reservations, every channel is at chan_pending, and the teardown has real
+	// work to do.
+	beforeSign func(ctx context.Context) error
 }
 
-func (c coldSigners) Labels() []string { return regtestenv.ColdSigners() }
-
-func (c coldSigners) Round(string) []rehearsal.Device {
-	var out []rehearsal.Device
-	for _, label := range regtestenv.ColdSigners() {
-		label := label
-		out = append(out, rehearsal.Device{
-			Label: label,
-			Sign: func(_ context.Context, psbtB64 string) (combine.Part, error) {
-				return c.env.SignPartial(c.t, label, psbtB64), nil
-			},
+func (s *sparrow) Built(_ context.Context, pay []run.Recipient) ([]byte, error) {
+	outputs := make([]coldwallet.Output, 0, len(pay))
+	for _, r := range pay {
+		outputs = append(outputs, coldwallet.Output{
+			Address: r.Address, AmountSat: r.AmountSat,
 		})
 	}
-	return out
+	funded := s.env.BuildPSBTPaying(s.t, s.env.Cold, outputs, s.feeRate)
+	return funded.Raw, nil
+}
+
+func (s *sparrow) Signed(ctx context.Context, unsigned []byte) ([]byte, error) {
+	if s.beforeSign != nil {
+		if err := s.beforeSign(ctx); err != nil {
+			return nil, err
+		}
+	}
+	s.signed = s.env.SignLikeSparrow(s.t, unsigned)
+	return s.signed, nil
 }
 
 // blunt authorises i_know_what_i_am_doing, which is the standard route rather
@@ -96,8 +119,9 @@ func setup(t *testing.T, peers []string, amounts []int64) (
 	out := new(bytes.Buffer)
 	d := run.Deps{
 		LND: env.Alice, Node: env.Node, Wallet: env.Cold,
-		Journal: j, Signers: coldSigners{t: t, env: env},
-		Out: out, Confirm: blunt(t),
+		Journal: j,
+		Signing: &sparrow{t: t, env: env, feeRate: cfg.Fees.FloorSatPerVB},
+		Out:     out, Confirm: blunt(t),
 	}
 	o := run.Options{Config: cfg, Batch: batch, RunID: "run-test-" + t.Name()}
 	return d, o, out, env
@@ -283,148 +307,41 @@ func writeFile(t *testing.T, path, body string) string {
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
-// TestARejectedWalletStopsTheRunBeforeAnythingIsAsked.
+// TestARejectedWalletStopsTheRunBeforeAnythingIsAsked lived here, and it went
+// with the gate it was about.
 //
-// The gate that was deliberately absent until it was not. `winthistle doctor`
-// refuses a wallet whose exact descriptors a human compared and rejected, and
-// nothing stopped `run` opening a batch against the same wallet — the two
-// commands shared a journal and not a gate.
+// setup.Check read back a human's verdict on the cold wallet's descriptor pair,
+// first, before LND was asked anything, and the test's real subject was that
+// placement rather than the refusal — that the peer section had not printed when
+// it fired. `run` no longer selects coins, derives addresses or asks Core for
+// change, so it never reads those descriptors and a refusal about them would have
+// no subject. The gate itself is unchanged and still tested, in internal/setup and
+// through `winthistle doctor`, which is where somebody setting a wallet up meets
+// it. Item 5 of docs/replan-2026-08.md deletes the package.
+
+// cancelDuringSigning cancels the run at step 7, which is where an operator's
+// Ctrl-C is most likely to land and where it costs the most.
 //
-// What matters here is not only that it refuses but *where*: first, before LND
-// is asked anything. A refusal at that point has cost nothing — no stream, no
-// reservation, no coin lock, and no peer has been told a channel is coming. So
-// the assertions are that the peer section never printed and that the failure is
-// the sentinel rather than something that happens to have gone wrong.
-func TestARejectedWalletStopsTheRunBeforeAnythingIsAsked(t *testing.T) {
-	env := regtestenv.Start(t)
-	peers := env.Peers(t)
-	if len(peers) < 1 {
-		t.Skip("this test needs a peer to prove one was not asked")
-	}
-	d, o, out, env := setup(t, peers[:1], []int64{fixtureChannelSat})
+// It replaced a fixture that cancelled between two devices of the batch's signing
+// round. There is no such round any more — one wallet is asked once — so the
+// equivalent moment is the wallet being asked and the operator walking away. By
+// then arm.Open has returned, n peers hold reservations and every channel has
+// reached chan_pending holding a commitment signature, so the teardown has real
+// work to do rather than nothing.
+func cancelDuringSigning(t *testing.T, env *regtestenv.Env, cancel func(),
+	rate float64, cancelled chan struct{}) *sparrow {
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-	defer cancel()
-
-	// The harness cold wallet, as it is — and a human answer saying it is not
-	// theirs. The journal is this test's own temp file, so nothing leaks into
-	// another run.
-	descs, err := env.Cold.ListDescriptors(ctx)
-	if err != nil {
-		t.Fatalf("listing %s's descriptors: %v", regtestenv.ColdWallet, err)
+	return &sparrow{
+		t: t, env: env, feeRate: rate,
+		beforeSign: func(ctx context.Context) error {
+			close(cancelled)
+			cancel()
+			// Return the context's error rather than a signature, which is what a
+			// real transport does when the operator interrupts it.
+			<-ctx.Done()
+			return ctx.Err()
+		},
 	}
-	var receive, change string
-	for _, dd := range descs {
-		switch {
-		case dd.Active && !dd.Internal:
-			receive = dd.Desc
-		case dd.Active && dd.Internal:
-			change = dd.Desc
-		}
-	}
-	if receive == "" || change == "" {
-		t.Fatalf("%s has no active pair — run: make harness", regtestenv.ColdWallet)
-	}
-	addrs, err := env.Node.DeriveAddresses(ctx, receive, 0, 0)
-	if err != nil {
-		t.Fatalf("deriving the first address: %v", err)
-	}
-	changeAddrs, err := env.Node.DeriveAddresses(ctx, change, 0, 0)
-	if err != nil {
-		t.Fatalf("deriving the first change address: %v", err)
-	}
-
-	// First: the same wallet with no answer recorded gets past the gate. Without
-	// this the test below would pass on a gate that refuses everything.
-	before, err := setuppkg.Check(ctx, env.Cold, d.Journal, o.Config.Bitcoind.Wallet)
-	if err != nil {
-		t.Fatalf("an unanswered wallet was refused: %v", err)
-	}
-	if before.Rejected() || before.Confirmed() {
-		t.Fatalf("the harness wallet already carries an answer in this journal: %+v",
-			before.Record)
-	}
-
-	if _, err := d.Journal.RecordSetup(ctx, journal.Setup{
-		Wallet: o.Config.Bitcoind.Wallet, Outcome: journal.SetupRejected,
-		Receive: receive, Change: change, SampleSize: 5,
-		FirstReceive: addrs[0], FirstChange: changeAddrs[0],
-	}); err != nil {
-		t.Fatalf("recording the rejection: %v", err)
-	}
-
-	res, err := run.Do(ctx, d, o)
-	t.Logf("\n%s", out.String())
-
-	if !errors.Is(err, setuppkg.ErrRejectedWallet) {
-		t.Fatalf("run returned %v, want ErrRejectedWallet", err)
-	}
-	if res != nil && res.Armed != nil {
-		t.Fatal("a rejected wallet armed a batch")
-	}
-	if strings.Contains(out.String(), "Phase 0 — the peers") {
-		t.Error("the run reached the peer pre-flight before refusing. The point of " +
-			"this gate is that it costs nothing: a peer that has been asked about a " +
-			"channel holds a pending-channel slot for about eleven minutes.")
-	}
-	screen := strings.Join(strings.Fields(out.String()), " ")
-	for _, want := range []string{
-		"did not match",
-		"Nothing was opened and nothing was asked of any peer",
-		"new wallet name",
-		"no RPC that removes a descriptor",
-	} {
-		if !strings.Contains(screen, want) {
-			t.Errorf("the refusal screen does not say %q:\n%s", want, out.String())
-		}
-	}
-}
-
-// cancelDuringBatchRound is a Signers that cancels the run partway through the
-// real signing round: the first device signs, and then the context is cancelled
-// while the second is being asked.
-//
-// That is where Ctrl-C is most likely to land and where it costs the most. By
-// then arm.Open has returned, n peers hold reservations, and every channel that
-// reached chan_pending is holding a commitment signature — so the teardown has
-// real work to do rather than nothing.
-type cancelDuringBatchRound struct {
-	t      *testing.T
-	env    *regtestenv.Env
-	cancel func()
-
-	// cancelled is closed once the cancel has been made, so the test can tell
-	// "the run stopped because we cancelled it" from "the run stopped for some
-	// other reason and this fixture never fired".
-	cancelled chan struct{}
-}
-
-func (c *cancelDuringBatchRound) Labels() []string { return regtestenv.ColdSigners() }
-
-func (c *cancelDuringBatchRound) Round(name string) []rehearsal.Device {
-	labels := regtestenv.ColdSigners()
-	out := make([]rehearsal.Device, 0, len(labels))
-	for i, label := range labels {
-		label, i := label, i
-		out = append(out, rehearsal.Device{
-			Label: label,
-			Sign: func(ctx context.Context, psbtB64 string) (combine.Part, error) {
-				// The rehearsal has to succeed: the gate is what decides whether
-				// the batch is armed at all, and a run that never arms leaves
-				// nothing for the teardown to take apart.
-				if name != "batch" || i == 0 {
-					return c.env.SignPartial(c.t, label, psbtB64), nil
-				}
-				close(c.cancelled)
-				c.cancel()
-				// Return the context's error rather than a signature, which is
-				// what a real transport does when the operator interrupts it.
-				<-ctx.Done()
-				return combine.Part{}, ctx.Err()
-			},
-		})
-	}
-	return out
 }
 
 // TestCancellingMidRunStillTakesTheBatchApart is the test that was missing when
@@ -453,19 +370,18 @@ func TestCancellingMidRunStillTakesTheBatchApart(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	signers := &cancelDuringBatchRound{
-		t: t, env: env, cancel: cancel, cancelled: make(chan struct{}),
-	}
-	d.Signers = signers
+	cancelled := make(chan struct{})
+	d.Signing = cancelDuringSigning(t, env, cancel, o.Config.Fees.FloorSatPerVB,
+		cancelled)
 
 	res, err := run.Do(ctx, d, o)
 	t.Logf("\n%s", out.String())
 
 	select {
-	case <-signers.cancelled:
+	case <-cancelled:
 	default:
-		t.Fatal("the run never reached the batch's second device, so nothing was " +
-			"cancelled and this test proved nothing")
+		t.Fatal("the run never reached step 7, so nothing was cancelled and this " +
+			"test proved nothing")
 	}
 	if err == nil {
 		t.Fatal("a cancelled run reported success")
@@ -507,5 +423,146 @@ func TestCancellingMidRunStillTakesTheBatchApart(t *testing.T) {
 	}
 	if run.State != journal.StateAborted {
 		t.Errorf("the run ended in %s, not %s", run.State, journal.StateAborted)
+	}
+}
+
+// syncWriter is the transcript, safe to read while the run is writing it.
+//
+// The operator half of the test below runs on the test's own goroutine and the
+// run on another, which is the right way round — the harness helpers call
+// t.Fatalf, and t.Fatalf from a goroutine that is not the test's abandons that
+// goroutine silently and hangs the run instead of failing it.
+type syncWriter struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (w *syncWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *syncWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// waitFor blocks until the transcript says something, or the test gives up.
+func waitFor(t *testing.T, out *syncWriter, want string) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Minute)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), want) {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("the run never said %q:\n%s", want, out.String())
+}
+
+// TestTheFilePathDrivesTheWholeSequence is the --psbt path end to end.
+//
+// Everything above it drives the SigningWallet seam directly. This one goes
+// through the transport an operator actually uses: the app prints a table, waits
+// for a file, verifies it, arms the batch over it, waits for a signed file, and
+// checks what came back. The harness plays Sparrow on the test's own goroutine —
+// coldwallet.Build for the unsigned transaction and both halves combined
+// *outside* the app for a complete witness, which is the input combine.Accept
+// exists for and the one a partial-signature fixture would never produce.
+//
+// The publish is withheld, so this costs one peer a pending-channel slot and
+// nothing else.
+func TestTheFilePathDrivesTheWholeSequence(t *testing.T) {
+	env := regtestenv.Start(t)
+	peers := env.Peers(t)
+	if len(peers) < 1 {
+		t.Skip("this test needs one peer")
+	}
+	d, o, _, env := setup(t, peers[:1], []int64{fixtureChannelSat})
+	o.StopBeforePublish = true
+
+	out := new(syncWriter)
+	d.Out = out
+
+	dir := t.TempDir()
+	wallet, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+	if err != nil {
+		t.Fatalf("the file transport: %v", err)
+	}
+	wallet.Poll = 100 * time.Millisecond
+	d.Signing = wallet
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	type outcome struct {
+		res *run.Result
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		res, err := run.Do(ctx, d, o)
+		done <- outcome{res, err}
+	}()
+
+	// Step 4, as the operator does it: read the table, build the transaction,
+	// save it where the app said.
+	waitFor(t, out, "Step 4")
+	pay := regtestenv.RecipientsIn(t, out.String())
+	funded := env.BuildPSBTPaying(t, env.Cold, pay, o.Config.Fees.FloorSatPerVB)
+	if err := os.WriteFile(wallet.Unsigned, funded.Raw, 0o600); err != nil {
+		t.Fatalf("saving the unsigned transaction: %v", err)
+	}
+
+	// Step 7, after the gate has opened. Nothing was signed before this line, and
+	// the transcript above it is the evidence.
+	waitFor(t, out, "Step 7")
+	if !strings.Contains(out.String(), "with nothing signed") {
+		t.Errorf("the transcript does not say the gate opened over an unsigned "+
+			"transaction:\n%s", out.String())
+	}
+	signed := env.SignLikeSparrow(t, funded.Raw)
+	if err := os.WriteFile(wallet.SignedPath(), signed, 0o600); err != nil {
+		t.Fatalf("saving the signed transaction: %v", err)
+	}
+
+	got := <-done
+	t.Logf("\n%s", out.String())
+	if got.err != nil {
+		t.Fatalf("the run: %v", got.err)
+	}
+	if got.res.Armed == nil {
+		t.Fatal("the batch never reached the gate")
+	}
+	if got.res.Armed.TxID != funded.TxID {
+		t.Errorf("the batch armed at %s and the transaction the harness built is "+
+			"%s. I-3 says these are the same string or the batch is lost",
+			got.res.Armed.TxID, funded.TxID)
+	}
+	if got.res.Published {
+		t.Fatal("--stop-before-publish published")
+	}
+	if env.InMempool(t, funded.TxID) {
+		t.Fatalf("%s reached the mempool", funded.TxID)
+	}
+	if got.res.Aborted == nil || !got.res.Aborted.Clean() {
+		t.Errorf("the teardown did not finish cleanly: %+v", got.res.Aborted)
+	}
+
+	// The journal's one signer row is the wallet, and it signed.
+	jr, err := d.Journal.Load(ctx, o.RunID)
+	if err != nil {
+		t.Fatalf("reading the run back: %v", err)
+	}
+	if len(jr.Signers) != 1 {
+		t.Fatalf("the journal holds %d signer rows for a batch signed by one "+
+			"wallet: %+v", len(jr.Signers), jr.Signers)
+	}
+	if jr.Signers[0].State != journal.SignerSigned {
+		t.Errorf("the wallet is recorded as %q, want %q. \"partial\" is what an "+
+			"earlier build wrote and it is not what one file with complete witnesses "+
+			"is", jr.Signers[0].State, journal.SignerSigned)
 	}
 }

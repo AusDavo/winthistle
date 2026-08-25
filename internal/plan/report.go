@@ -219,12 +219,20 @@ func (v *Verification) Report() string {
 		what := "NOT IN THE PLAN"
 		switch {
 		case a.Recognised:
-			what = a.Label + ", recognised by key origin rather than by address"
+			what = a.Label
 		case a.Named:
 			what = a.Label
 		}
 		b.WriteString(fmt.Sprintf("  %d  %14s   %s\n", a.Index, prose.Sats(a.AmountSat), what))
 		b.WriteString("      " + a.Address + "\n")
+		// On its own line, because the label plus a bech32m address plus this
+		// clause is 88 columns against a 78-column pane — and it stopped being a
+		// rare line the day the app stopped building the transaction. Recognition
+		// is now the ordinary way the change output is identified, so the sentence
+		// that says how weak that claim is has to fit.
+		if a.Recognised {
+			b.WriteString("      recognised by key origin rather than by address\n")
+		}
 	}
 
 	if v.ChangeFloorSat > 0 {

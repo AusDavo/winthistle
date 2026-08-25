@@ -1,33 +1,57 @@
-// Package combine merges the partial signatures the signers return into one
-// transaction, finalizes it here, and checks what it extracted before anything
-// else sees it.
+// Package combine is the acceptance check on an inbound PSBT: the one place a
+// packet that came back from somebody else's wallet is parsed, pinned to the
+// transaction LND committed to, executed against its own scripts, re-checked
+// against the plan, and turned into the bytes that get broadcast.
 //
-// This is I-2's only piece of real code. Signers return *partial* signatures;
-// combining and finalizing happen in-app, so no external party ever holds a
-// transaction it could broadcast. Take that away and I-1's gate — publish only
-// once every channel is already recoverable — can be defeated from outside, by
-// a device or a wallet that simply publishes early. The gate is not a lock if
-// somebody else has a key.
+// # What this package is for now, and what it used to be for
 //
-// btcd's psbt package has no Combine. It gives Packet.Serialize, B64Encode,
-// IsComplete, SanityCheck and GetTxFee, and the package gives NewFromRawBytes,
-// MaybeFinalizeAll and Extract. Merging n partially-signed packets into one is
-// ours, and this one trusts neither side of the exchange:
+// It used to be I-2's only piece of real code. Signers returned *partial*
+// signatures; combining and finalizing happened in-app, so no external party
+// ever held a transaction it could broadcast, and I-1's gate could not be
+// defeated from outside by a device that simply published early.
 //
-//   - every returned packet must carry the same unsigned transaction as the
-//     base (I-3), and a mismatch names the device that caused it;
-//   - per-input partial signatures are unioned by public key, and two different
-//     signatures for one key are refused rather than one of them chosen;
+// I-2 is dissolved, and the reason is recorded in CLAUDE.md rather than quietly
+// dropped: after the inversion there is no "before the gate opens". Step 6 takes
+// every channel to chan_pending over an *unsigned* transaction, and only then is
+// anything signed. A wallet holding a fully signed batch front-runs nothing —
+// every channel is already recoverable by force-close. So the expected input at
+// step 7 is exactly what this package used to refuse: one packet, from one
+// wallet, with complete witnesses on it.
+//
+// What survives is everything except the reason. The checks were never only
+// about who held the bytes; they are about whether these bytes are the
+// transaction n peers have already committed to:
+//
+//   - the returned packet must carry the same unsigned transaction as the base
+//     (I-3), and after the inversion that is the *only* load-bearing check on
+//     what comes back. LND's own FinalizeRawTX compares the outputs and the
+//     inputs' previous outpoints and stops, so sequence numbers, version and
+//     locktime are unchecked there and each moves the txid;
+//   - the UTXO a wallet attaches to an input must be the one the base already
+//     had. LND's psbt.SumUtxoInputValues trusts that field without checking it
+//     belongs to the input, so a wallet that could rewrite it could rewrite the
+//     fee;
 //   - witness scripts, redeem scripts, sighash types and key derivations are
-//     carried forward, and a later packet may not overwrite an earlier one's —
-//     a disagreement is reported, not dropped;
-//   - the UTXO a signer attaches to an input must be the one the base already
-//     had. LND's psbt.SumUtxoInputValues trusts that field, so a signer that
-//     could rewrite it could rewrite the fee;
-//   - a packet that arrives already finalized is refused. A finalized input is
-//     a complete witness, which means that device held a broadcastable
-//     transaction. That is the thing I-2 exists to prevent, and it is worth
-//     failing loudly on rather than accepting quietly.
+//     carried forward from the base, and the returned packet may not disagree
+//     with it — a disagreement is reported, not dropped;
+//   - every witness is executed against its own script before the bytes leave
+//     this package, and the extracted transaction is re-verified against the
+//     plan. See Finalize and Recheck.
+//
+// # Two ways in, and the difference is how many packets come back
+//
+// Accept is the happy path: one wallet, one file, witnesses already complete or
+// a complete set of partials — the whole of Complete bar the merge.
+//
+// Merge and Complete are the multi-packet path. btcd's psbt package has no
+// Combine, so unioning n partially-signed packets into one is ours. The CPFP
+// child still goes out to m devices and comes back in m pieces (internal/bump),
+// and the harness plays the operator with two Core wallets, so this path is not
+// vestigial. A packet that arrives *finalized* is still refused there, and the
+// reason is now mechanical rather than custodial: finalization discards the
+// partial signatures, so there is nothing left to union with anybody else's, and
+// a device that finalized on its own has ended a round the other devices were
+// still in. Accept is where a complete witness is the expected input.
 //
 // # This answers docs/design.html's finalizepsbt question by not asking it
 //
@@ -91,13 +115,19 @@ var (
 	// about a witness script, a redeem script, a derivation or a UTXO.
 	ErrConflictingField = errors.New("this device disagrees with an earlier packet")
 
-	// ErrAlreadyFinalized means a device returned a finalized input.
+	// ErrAlreadyFinalized means a device in a multi-device round returned a
+	// finalized input.
 	//
-	// I-2: a finalized input carries a complete witness, so that device held a
-	// transaction it could have broadcast. The app must be the only party ever
-	// in that position.
+	// This used to be I-2 — a finalized input is a complete witness, so that
+	// device held a broadcastable transaction, and the app had to be the only
+	// party ever in that position. I-2 is dissolved and the refusal is not: a
+	// merge unions partial signatures, finalization discards them, so a finalized
+	// packet has nothing left to union with the other devices' and the round it
+	// was part of is over. Accept is the entry point where a complete witness is
+	// the expected input; Merge is not.
 	ErrAlreadyFinalized = errors.New("this device returned a finalized input, " +
-		"which means it held a transaction it could have broadcast itself")
+		"and a finalized input has no partial signatures left to combine with the " +
+		"other devices'")
 
 	// ErrNoSignatures means the merge added nothing: every device returned the
 	// packet it was given.
@@ -208,6 +238,42 @@ func firstBytes(b []byte) string {
 	return string(b)
 }
 
+// ErrAlreadySigned means a packet that was supposed to be unsigned carries
+// signatures.
+//
+// This one is I-1, and it is the only check in this package that is. Step 4 is
+// before the gate: a wallet that signs there leaves the operator holding a
+// broadcastable funding transaction while no channel has reached chan_pending, so
+// a broadcast at that moment would confirm n 2-of-2 outputs with no channel
+// behind them. Every other check here is about whether the bytes are the
+// transaction the peers committed to; this one is about when they were signed.
+var ErrAlreadySigned = errors.New("this packet is signed and should not be")
+
+// Unsigned reports whether a packet carries any signature at all.
+//
+// Partial signatures and complete witnesses both count, because either is enough
+// to be worth refusing at step 4 and neither is enough to be sure a transaction
+// is broadcastable — which is exactly why the answer cannot be "is it complete".
+func Unsigned(raw []byte) error {
+	packet, err := psbt.NewFromRawBytes(bytes.NewReader(raw), false)
+	if err != nil {
+		return fmt.Errorf("that is not a PSBT: %w", err)
+	}
+	for i := range packet.Inputs {
+		in := packet.Inputs[i]
+		switch {
+		case isFinal(in):
+			return fmt.Errorf("%w: input %d already carries a complete witness",
+				ErrAlreadySigned, i)
+		case len(in.PartialSigs) > 0 || len(in.TaprootKeySpendSig) > 0 ||
+			len(in.TaprootScriptSpendSig) > 0:
+
+			return fmt.Errorf("%w: input %d carries a signature", ErrAlreadySigned, i)
+		}
+	}
+	return nil
+}
+
 // ParseBase64 decodes a base64 PSBT, for the transport a browser upload uses.
 func ParseBase64(s string) ([]byte, error) {
 	packet, err := psbt.NewFromRawBytes(bytes.NewReader([]byte(s)), true)
@@ -235,6 +301,25 @@ func ParseBase64(s string) ([]byte, error) {
 // while this one runs with n funding streams already open and the useful answer
 // is which device to go back to.
 func Merge(base []byte, parts []Part) (*Merged, error) {
+	return merge(base, parts, refuseFinalized)
+}
+
+// finalizedInputs is what to do with an inbound input that already carries a
+// complete witness.
+//
+// The two entry points want opposite answers and both are right for their own
+// caller, which is why this is a parameter rather than a rule: Merge is unioning
+// partial signatures and a complete witness has none, while Accept is reading one
+// wallet's finished work. One code path with a flag rather than two copies of the
+// field-conflict merging, because two copies could disagree about one packet.
+type finalizedInputs int
+
+const (
+	refuseFinalized finalizedInputs = iota
+	carryFinalized
+)
+
+func merge(base []byte, parts []Part, final finalizedInputs) (*Merged, error) {
 	basePacket, err := psbt.NewFromRawBytes(bytes.NewReader(base), false)
 	if err != nil {
 		return nil, fmt.Errorf("the base PSBT does not parse: %w", err)
@@ -306,7 +391,7 @@ func Merge(base []byte, parts []Part) (*Merged, error) {
 
 		for i := range packet.Inputs {
 			where := fmt.Sprintf("input %d", i)
-			added, err := mergeInput(&out.Inputs[i], packet.Inputs[i], label, where)
+			added, err := mergeInput(&out.Inputs[i], packet.Inputs[i], label, where, final)
 			if err != nil {
 				return nil, err
 			}
@@ -340,14 +425,39 @@ func Merge(base []byte, parts []Part) (*Merged, error) {
 
 // mergeInput folds one returned input into the accumulator, and returns how many
 // partial signatures it contributed.
-func mergeInput(dst *psbt.PInput, src psbt.PInput, label, where string) (int, error) {
-	// I-2. Checked before anything else about the input, because if this fires
-	// the operator has a process problem rather than a data problem.
+func mergeInput(dst *psbt.PInput, src psbt.PInput, label, where string,
+	final finalizedInputs) (int, error) {
+
+	// Checked before anything else about the input, because if this fires under
+	// refuseFinalized the operator has a process problem rather than a data
+	// problem: one device ended a round the others were still in.
+	witnesses := 0
 	if isFinal(src) {
-		return 0, deviceErr(label, where, fmt.Errorf("%w. Only partial signatures "+
-			"may leave a signer; combining and finalizing happen here, and that is "+
-			"what stops anything outside this process from publishing before every "+
-			"channel in the batch is recoverable", ErrAlreadyFinalized))
+		if final == refuseFinalized {
+			return 0, deviceErr(label, where, fmt.Errorf("%w. This round collects a "+
+				"partial signature from each device and unions them here, so a device "+
+				"that finalizes on its own leaves the others nothing to add to. Nothing "+
+				"is lost: no transaction has been published, so this is one more "+
+				"signing round with that device told not to finalize",
+				ErrAlreadyFinalized))
+		}
+		// The finished witness, carried as it arrived. mergeScript rather than
+		// assignment so that a second packet disagreeing about the same input is
+		// reported rather than silently overwriting the first — the same rule every
+		// other field in this function follows.
+		if err := mergeScript(&dst.FinalScriptSig, src.FinalScriptSig,
+			"final scriptSig", label, where); err != nil {
+			return 0, err
+		}
+		if err := mergeScript(&dst.FinalScriptWitness, src.FinalScriptWitness,
+			"final witness", label, where); err != nil {
+			return 0, err
+		}
+		// A complete witness is a contribution. Without this a fully signed packet
+		// would come back with nothing "added" — finalization discards the partial
+		// signatures mergeSigs counts — and Merge would call it a wallet that
+		// returned the packet it was given.
+		witnesses = 1
 	}
 
 	// The UTXO is the input's amount and its script. LND reads the attached
@@ -437,7 +547,7 @@ func mergeInput(dst *psbt.PInput, src psbt.PInput, label, where string) (int, er
 		added++
 	}
 	added += len(src.TaprootScriptSpendSig)
-	return added, nil
+	return added + witnesses, nil
 }
 
 // mergeOutput folds one returned output's metadata in.

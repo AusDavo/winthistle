@@ -9,6 +9,78 @@ import (
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
+// Recipient is one output the wallet is asked to pay: an address to paste in, an
+// amount, and what it is for.
+type Recipient struct {
+	// Label is what this output is, in the operator's terms — "channel 2 acinq",
+	// or the anchor reserve. It is for the screen; nothing matches on it.
+	Label string
+
+	Address   string
+	AmountSat int64
+}
+
+// recipientsOf is what the operator has to enter in their wallet.
+//
+// Every output the plan will name except the change, which is theirs. The reserve
+// top-up is in the list because it is an output the batch has to pay and a
+// transaction missing it fails at step 5 — it is not a channel, so it is easy to
+// read past in a list that otherwise looks like the batch file.
+func recipientsOf(streams *arm.Streams, p *prepared) []Recipient {
+	byKey := aliases(p.facts)
+	out := make([]Recipient, 0, len(streams.All)+1)
+	for i, st := range streams.All {
+		label := byKey[strings.ToLower(st.Peer)]
+		if label == "" {
+			label = short(st.Peer)
+		}
+		out = append(out, Recipient{
+			Label:     fmt.Sprintf("channel %d  %s", i+1, label),
+			Address:   st.FundingAddress,
+			AmountSat: st.FundingAmount,
+		})
+	}
+	if p.topUp != nil {
+		out = append(out, Recipient{
+			Label:     "anchor reserve",
+			Address:   p.topUp.Address,
+			AmountSat: p.topUp.AmountSat,
+		})
+	}
+	return out
+}
+
+// recipientTable prints them: what and how much on one line, the address alone
+// on the next.
+//
+// The address gets a line of its own because it does not fit beside anything. A
+// P2WSH funding address is 62 characters and the pane is 78, so a label column
+// wide enough to read pushes it past the edge — and a wrapped address is one an
+// operator has to reassemble by hand at the one step where a wrong character
+// costs a channel. Alone on a line it is also one double-click to select.
+//
+// Printed in full for the same reason: they are copy-pasted from the terminal,
+// never typed, and an abbreviated address is one somebody might reconstruct.
+// Amounts aligned, so a swapped pair is visible — which is one of the things
+// step 5 catches after the fact and this is the chance to catch before it.
+func recipientTable(rs []Recipient) string {
+	width := 0
+	for _, r := range rs {
+		if n := len([]rune(r.Label)); n > width {
+			width = n
+		}
+	}
+	var b strings.Builder
+	for _, r := range rs {
+		// prose.Sats carries its own unit. It was given another one here for one
+		// commit, which printed "250,000 sat sat" on the one screen an operator
+		// reads addresses off.
+		fmt.Fprintf(&b, "  %-*s  %14s\n", width, r.Label, prose.Sats(r.AmountSat))
+		fmt.Fprintf(&b, "      %s\n\n", r.Address)
+	}
+	return b.String()
+}
+
 // reportArmed is the screen at the last reversible moment: every channel is
 // recoverable, the transaction is signed, and nothing has been broadcast.
 //

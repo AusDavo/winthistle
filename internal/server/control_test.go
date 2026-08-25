@@ -256,7 +256,12 @@ func TestASecondConcurrentRunIsRefused(t *testing.T) {
 	if !strings.Contains(got, "one run at a time") {
 		t.Errorf("the refusal does not say what the rule is:\n%s", got)
 	}
-	if !strings.Contains(got, "dress rehearsal") {
+	// The reason, and it is not the one it used to be. This asserted "dress
+	// rehearsal" — the second run's rehearsal building a decoy over the first's
+	// coins — and there is no rehearsal any more. The collision survives it: the
+	// app no longer picks coins, so two batches built from one wallet spend the
+	// same outputs and whichever confirms strands the other.
+	if !says(got, "spends the outputs the first one is about to") {
 		t.Errorf("the refusal does not say why the rule is what it is:\n%s", got)
 	}
 	if l.started != 1 {

@@ -43,12 +43,15 @@ exists: `winthistle setup`, `run`, `bump`, `doctor`, `recover` and `serve` all
 work against the cluster in `regtest/`. `internal/arm` runs the **inverted**
 sequence — `skip_finalize` at verify, the *n* receipts before anything is signed,
 one publish — and the I-1 gate is observed at *n* = 3 with nothing signed when it
-opens. `internal/combine` has seventeen adversarial tests on
-inbound PSBTs. `internal/plan` has the batch verifier. `winthistle serve` carries
-a loopback bind, a startup token, strict `Origin` and `Host` checks and no CORS,
-and can open a batch, run a setup and a bump, and serve the journal read-only.
-The signet harness is two bitcoinds and no LND. None of that is broken, and none
-of it should be described as broken.
+opens. `run` **builds nothing and signs nothing**: it prints the recipients, reads
+the unsigned transaction back from `--psbt FILE`, and reads the signed one from
+`FILE-signed.psbt`. `internal/combine` has twenty adversarial tests on inbound
+PSBTs. `internal/plan` has the batch verifier. `winthistle serve` carries a
+loopback bind, a startup token, strict `Origin` and `Host` checks and no CORS, and
+can open a batch — asking the page for the transaction and then for the
+signatures — run a setup and a bump, and serve the journal read-only. The signet
+harness is two bitcoinds and no LND. None of that is broken, and none of it should
+be described as broken.
 
 **What the replan cuts, and which item deletes it.** Nothing has been deleted
 yet — this is a description of intent, not of the tree:
@@ -60,25 +63,39 @@ yet — this is a description of intent, not of the tree:
   there is **no `psbt_finalize` call anywhere in this build**; `arm.Publish` takes
   the signed bytes as a parameter and refuses any whose txid is not the pinned
   one. The journal runs arming → armed → signing → publishing → published.
-- **Item 4** adds the `--psbt` path to `run` and stops calling `coldwallet`.
-  Note `run` today has `--psbt-dir`, which is the file handshake for a signer
-  with no command. It is a different flag; do not conflate them.
+- ~~**Item 4** adds the `--psbt` path to `run` and stops calling `coldwallet`.~~
+  **Done, 2026-08-26** — see `docs/replan-2026-08.md`'s "Item 4, as built".
+  `run.SigningWallet` is the seam (`Built` at step 4, `Signed` at step 7), with
+  `run.FileWallet` behind `--psbt FILE` and a two-question page wallet in
+  `internal/webrun`. `internal/run` does not import `internal/coldwallet`, which
+  survives **inside the harness** as the stand-in for Sparrow. `setup.Check` and
+  `rehearsal.Gate` are no longer called: both were about machinery the app has
+  given up, not about the batch.
 
-  **A collision to settle before writing that path, and item 3 deliberately left
-  it.** `internal/combine` survives, and `combine.ErrAlreadyFinalized`
-  (`combine.go:94`) refuses a device that returns a *finalized* input — with I-2
-  named in the comment and the error text saying "Only partial signatures may
-  leave a signer". Step 7 is "sign in Sparrow", which returns exactly that.
-  **The surviving code refuses the new happy path's own input, citing a dissolved
-  invariant.** Item 3 did not touch it because nothing item 3 built produces a
-  fully signed inbound packet: `arm` never calls `combine.Merge`, and `run`'s
-  signers are still the harness's partial-signature halves. Settling it then
-  would have meant either a check with no caller exercising the new path or
-  deleting one the current happy path relies on. Decide it explicitly here, in
-  the same commit as the `--psbt` path and the package comment; do not delete the
-  check silently. The base-packet guard at `combine.go:249` is a different check
-  and should stay. `journal.SignerPartial`'s doc comment also still names I-2, for
-  the same reason and with the same fix due here.
+  **The collision item 3 left open is settled.** `combine` is now *the acceptance
+  check on an inbound PSBT*, and its package comment says so. `combine.Accept` is
+  the happy path — one wallet, one file, complete witnesses or a complete set of
+  partials — and it is the whole of `Complete` bar the merge. `Merge` still
+  refuses a finalized packet, and the reason is mechanical rather than custodial:
+  a merge unions partial signatures, finalization discards them, so a device that
+  finalizes on its own leaves the other devices nothing to add to. That is still
+  true of the CPFP child, which is the only multi-device round left. The same
+  correction went into `internal/signers` and into `journal.SignerState`, which
+  gained `SignerSigned` for the batch and kept `SignerPartial` for the child.
+
+  **One new refusal, and it is I-1.** `combine.Unsigned` refuses a step-4 packet
+  that carries any signature. Step 4 is *before* the gate: a wallet that signs
+  there leaves the operator holding a broadcastable funding transaction while
+  nothing has reached `chan_pending`, and Sparrow's broadcast button is two clicks
+  from its signing one. That is the last place I-1 can be defeated from outside.
+
+  **The change output is recognised, not named.** The app does not build the
+  transaction, so it does not know the change address, and an output the plan does
+  not name is an `UnnamedOutput` refusal. `plan.RecogniseChangeIn` reads the master
+  fingerprints off the transaction's own inputs and accepts an output carrying
+  those on branch 1 — the evidence a hardware signer uses. It is weaker than
+  naming the script and the report says so; `run --change ADDRESS` names it
+  instead, and is the answer for a wallet that writes no key origins.
 - **Item 5** deletes `coldwallet`, `setup` and the `setups` table, `bump`,
   `rehearsal`, `signers`' multi-device round, `server`, `webrun`, `signet/`,
   `doctor`'s Core checks, and `internal/bitcoind` from the application.
@@ -92,7 +109,10 @@ yet — this is a description of intent, not of the tree:
 change the pin before then.
 
 What survives: `arm` · `plan` · `combine` · `peers` · `reserve` · `settle` ·
-`journal` · `methods` · `lnd` · `prose` · `config`.
+`journal` · `methods` · `lnd` · `prose` · `config`. As of item 4 those are what
+`internal/run` imports, plus `abort`, `fees` and `bitcoind` — the last two only
+for the fee estimate and `testmempoolaccept`, which is item 5's open question —
+and `rehearsal` for the `Signers` type the CPFP child still needs.
 
 **What is still missing is the mainnet cold probe.** The safety model below is
 verified against LND source *and* against a running node — but never against
@@ -199,6 +219,20 @@ program. Do not carry it forward as a weaker caveat.
 the app publishes once, after *n* receipts. What dissolved is the claim about who
 else may hold the bytes.
 
+**And there is one place left where "before the gate opens" still exists.** Step 4
+is before it: the operator has a funded transaction and nothing has reached
+`chan_pending`. A wallet that signs there — the same visit, two clicks from
+Broadcast — could put a transaction on the network that confirms one 2-of-2 output
+per channel with no channel behind any of them. So step 4 refuses a signed packet
+(`combine.Unsigned`), and the copy says do not sign yet. That refusal is I-1's,
+not I-2's, and it is not negotiable for the same reason the gate is not.
+
+**`internal/combine`'s remaining finalized-input refusal is not I-2 either.**
+`combine.Merge` still refuses one, because a merge unions partial signatures and
+finalization discards them, so a device that finalizes ends a round the others
+were still in. `combine.Accept` — the batch's path — expects a complete witness.
+Do not re-justify either in I-2's words.
+
 ### I-3 · The TXID must not move after verification
 
 LND commits to the funding outpoint at `psbt_verify`. Hash the unsigned tx at
@@ -263,6 +297,18 @@ is". The reasoning below survives the demotion intact — it is why the fact is
 worth *saying*. Your fee and change arrangements are yours, and after the
 inversion the app does not build the transaction and so cannot size a change
 output; it can only tell you yours is too small.
+
+**Which output is the change, now that the app does not choose it.** Not named —
+recognised. `plan.RecogniseChangeIn` reads the master fingerprints off the
+transaction's own inputs, and `plan.Change.Recognise` accepts an output carrying
+those same fingerprints on derivation branch 1. That is the evidence a hardware
+signer uses to call an output its own change, and the verification report marks it
+"recognised by key origin rather than by address" because the claim is weaker than
+a script. `run --change ADDRESS` names the script instead — stronger, and the only
+route for a wallet that writes no key origins at all, where the refusal says so
+rather than reporting the plan as broken. **Do not "simplify" this by trusting any
+unnamed output**: the whole product is the check that every output is accounted
+for.
 
 **Nothing is at risk while the batch is unconfirmed.** The coins are ours,
 unspent, in a transaction only we could have signed. Every channel reached
@@ -391,7 +437,7 @@ From `docs/replan-2026-08.md`, which is the document that describes the future.
 1. ~~Prove the inversion on regtest.~~ **Done, 2026-08-25.**
 2. ~~Rewrite the docs to this direction.~~ **Done.**
 3. ~~Change `arm` to the new sequence.~~ **Done, 2026-08-26.**
-4. Add the `--psbt` path to `run`, stop calling `coldwallet`.
+4. ~~Add the `--psbt` path to `run`, stop calling `coldwallet`.~~ **Done, 2026-08-26.**
 5. Delete the cut packages.
 6. Demote the fee and change findings, remove `Replaceable`.
 
@@ -432,6 +478,15 @@ abort path*.
   regtest test still needs something to build and sign a funding transaction.
   That is the harness playing the operator's part, not a back door for directed
   mode.
+
+  **Since item 4 it plays Sparrow properly, which means it combines outside the
+  app.** `Env.SignLikeSparrow` collects both halves and unions and finalizes them
+  itself, so what a test hands to `combine.Accept` is one packet with a complete
+  witness — the input the production path will actually get.
+  `Env.SignWithColdWallet` still returns *m* partials, for the CPFP child.
+  `Env.RecipientsIn` reads the recipients off the printed step-4 table the way an
+  operator reads them off a terminal, which is also the only test there is that
+  the table is legible.
 
   **It is not run by CI, because there is no CI in this repository.** This file
   used to say "this is what CI uses" and `README.md` said the same. There is no
