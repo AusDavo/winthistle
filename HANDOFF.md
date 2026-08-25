@@ -1,5 +1,34 @@
 # Winthistle — handoff
 
+> ## ⚠ Superseded in direction on 2026-08-25 — read `docs/replan-2026-08.md` first.
+>
+> Everything below is an accurate record of **what the code does** and why, and
+> it stays valuable for exactly that. It is no longer the plan.
+>
+> **The plan is now:** a minimalist CLI wizard doing the two things Sparrow and
+> LND cannot do between them — attribute the funding outputs to peers, and hold
+> the I-1 gate. Cut: directed mode (`coldwallet`, `setup`), Bitcoin Core, `bump`,
+> `rehearsal`, the multi-device signing round, the web UI (`server`, `webrun`),
+> `signet/`, and the `Replaceable` check. Fee and change findings become
+> disclosure rather than refusals. I-2 dissolves; I-1 and I-3 stand.
+>
+> **What makes it possible:** `skip_finalize` with `no_publish` reaches
+> `chan_pending` over an *unsigned* transaction, so every channel is
+> force-closeable **before** anything is signed. The peers' ten-minute clock then
+> covers only the unsigned build. Source-verified against LND v0.19.3-beta;
+> **not yet proven on a node**, and that proof is item 1 of the replan's build
+> order.
+>
+> **"Next actions" below is void.** The new order is: (1) prove the inversion on
+> regtest; (2) rewrite `CLAUDE.md`, this file, `README.md` and `docs/design.html`
+> *and republish the artifact*; (3) `arm` to the new sequence; (4) `run --psbt`
+> and the CLI; (5) delete the cut packages; (6) demote the fee/change findings.
+> Modify in place on a branch — `arm`, `combine` and `plan` are the tested core.
+>
+> Two things below are worth carrying forward unchanged: the "Watch out for"
+> section, and the mainnet cold probe, which this replan does not touch.
+
+
 Read this first. `CLAUDE.md` is loaded automatically and carries the four
 invariants and the do-not-reintroduce list; treat those as settled.
 

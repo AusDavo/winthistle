@@ -1,3 +1,33 @@
+> ## ⚠ The direction below changed on 2026-08-25. Read `docs/replan-2026-08.md` first.
+>
+> David has replanned this app as a **minimalist CLI wizard around Sparrow and
+> LND**. Directed mode, Bitcoin Core, `winthistle bump`, the dress rehearsal, the
+> multi-device signing round, the web UI and the signet harness are all **cut**.
+> Nothing is implemented yet — the only change in the repo is that document — so
+> everything below still describes the code accurately and is still the guide to
+> *what exists*. It is no longer the guide to *what should exist*.
+>
+> **Three specific statements below are now wrong, and one of them will block
+> work if taken at face value:**
+>
+> 1. **`skip_finalize` is NOT non-negotiable, and the reason given for rejecting
+>    it is false.** The rejected list says it "skips the step that produces the
+>    `chan_pending` gate". It does not. With `no_publish` set,
+>    `PsbtIntent.Verify` closes `PsbtReady` itself, which is exactly what drives
+>    the funding flow to `chan_pending` — over an *unsigned* transaction. Source
+>    citations are in the replan. Do not refuse work on this basis; the gate
+>    opening before anything is signed is the centre of the new design.
+> 2. **I-2 dissolves**, and soundly: once the gate closes before any signature
+>    exists, an external wallet holding a broadcastable transaction has nothing
+>    to front-run. I-3 inherits the weight it carried.
+> 3. **I-4's `Replaceable` sequence check is a lint**, not an enforcement — this
+>    file already says full-RBF makes `replaceable: false` intent rather than
+>    protection. Authorship is what enforces I-4, and that is unchanged.
+>
+> **I-1 and I-3 stand exactly as written.** So does the rest of the
+> do-not-reintroduce list. If you believe one of *those* is wrong, say so and
+> stop.
+
 # Winthistle
 
 A local, guided web UI for batch-opening Lightning channels in one on-chain
