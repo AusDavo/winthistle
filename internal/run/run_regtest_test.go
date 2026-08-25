@@ -120,7 +120,7 @@ func setup(t *testing.T, peers []string, amounts []int64) (
 	d := run.Deps{
 		LND: env.Alice, Node: env.Node, Wallet: env.Cold,
 		Journal: j,
-		Signing: &sparrow{t: t, env: env, feeRate: cfg.Fees.FloorSatPerVB},
+		Signing: &sparrow{t: t, env: env, feeRate: cfg.Fees.TargetSatPerVB},
 		Out:     out, Confirm: blunt(t),
 	}
 	o := run.Options{Config: cfg, Batch: batch, RunID: "run-test-" + t.Name()}
@@ -371,7 +371,7 @@ func TestCancellingMidRunStillTakesTheBatchApart(t *testing.T) {
 	defer cancel()
 
 	cancelled := make(chan struct{})
-	d.Signing = cancelDuringSigning(t, env, cancel, o.Config.Fees.FloorSatPerVB,
+	d.Signing = cancelDuringSigning(t, env, cancel, o.Config.Fees.TargetSatPerVB,
 		cancelled)
 
 	res, err := run.Do(ctx, d, o)
@@ -511,7 +511,7 @@ func TestTheFilePathDrivesTheWholeSequence(t *testing.T) {
 	// save it where the app said.
 	waitFor(t, out, "Step 4")
 	pay := regtestenv.RecipientsIn(t, out.String())
-	funded := env.BuildPSBTPaying(t, env.Cold, pay, o.Config.Fees.FloorSatPerVB)
+	funded := env.BuildPSBTPaying(t, env.Cold, pay, o.Config.Fees.TargetSatPerVB)
 	if err := os.WriteFile(wallet.Unsigned, funded.Raw, 0o600); err != nil {
 		t.Fatalf("saving the unsigned transaction: %v", err)
 	}

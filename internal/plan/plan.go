@@ -215,7 +215,9 @@ func (f Fee) tolerance() float64 {
 	return f.Tolerance
 }
 
-func (f Fee) cpfpTarget() float64 {
+// CPFPTarget is the rate the change output has to be able to lift the package
+// to, which is what its size is checked against.
+func (f Fee) CPFPTarget() float64 {
 	if f.CPFPTargetSatPerVB > 0 {
 		return f.CPFPTargetSatPerVB
 	}

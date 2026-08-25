@@ -26,16 +26,20 @@
 // allow_rbf = true and saw the run proceed would reasonably conclude it had
 // been honoured.
 //
-// # The fee floor has no default, on purpose
+// # The fee rate has no default, on purpose
 //
-// fees.Request.FloorSatPerVB is the operator's own floor, and this package will
-// not invent one. Core's estimatesmartfee is entitled to answer "insufficient
-// data" — it does so on every regtest node, on a freshly synced one, and on any
-// node that has been offline — and a batch built at a guessed rate cannot be
-// corrected afterwards, because I-4 forbids replacing it. So an unset floor
-// stays unset and internal/fees refuses to produce a rate when it is the only
-// thing left; see winthistle doctor, which says so before the evening starts
-// rather than during it.
+// [fees] target_sat_per_vb is the rate the operator intends to pay, and this
+// package will not invent one. It used to come from Core's estimatesmartfee,
+// with a configured floor behind it because the estimator is entitled to answer
+// "insufficient data" and does so on every regtest node, on a freshly synced one
+// and on any node that has been offline. Core is gone from this build and no
+// third party may be asked in its place, so the number is declared.
+//
+// A rate that quietly became zero would be the worst default this tool could
+// ship: it is the one figure in a batch with no right answer, and I-4 means a
+// batch built at the wrong one cannot be corrected by replacing it. So an unset
+// rate is a refusal, at load time, before the evening starts rather than during
+// it.
 package config
 
 import (
@@ -53,10 +57,7 @@ import (
 const DefaultPath = "winthistle.toml"
 
 // Defaults for the keys that have one.
-const (
-	DefaultJournal      = "~/.winthistle/runs.db"
-	DefaultTargetBlocks = 6
-)
+const DefaultJournal = "~/.winthistle/runs.db"
 
 // Config is winthistle.toml.
 type Config struct {
@@ -105,16 +106,29 @@ func (l Limits) MinConfirmations() int {
 	return 0
 }
 
-// Fees is the [fees] block: what to ask Core, and what to do when Core has
-// nothing to say.
+// Fees is the [fees] block: the rate you intend to pay, declared.
 type Fees struct {
-	// FloorSatPerVB has no default. Zero means the operator set none, which is
-	// legal and is exactly the state that makes a node with no estimate an error
-	// rather than a guess.
-	FloorSatPerVB float64
-
-	TargetBlocks int
-	Mode         string
+	// TargetSatPerVB is the fee rate the batch is expected to be built at. It
+	// has no default and zero is refused.
+	//
+	// It is declared rather than fetched, and that is the whole of the change
+	// this key represents. Core's estimatesmartfee used to answer it; Core is
+	// gone from this build, and the no-third-party rule forbids the obvious
+	// substitute — a fee API is handed the size of what is being built and the
+	// moment it is being built, which together are most of what this tool exists
+	// not to leak.
+	//
+	// Declaring it is not a worse answer than fetching it. This program does not
+	// build the transaction and does not choose the fee: Sparrow does, at step 4,
+	// with whatever estimate the operator trusts. What the verifier needs is
+	// something to compare the built transaction against, and "the rate you said
+	// you were aiming at" is a stronger thing to check against than a number this
+	// program went and looked up on the operator's behalf. Everything else in
+	// this tool works that way — you declare the batch, it checks the
+	// transaction.
+	//
+	// plan.DefaultFeeTolerance is how far either side of it passes.
+	TargetSatPerVB float64
 }
 
 var knownSections = map[string]bool{
@@ -195,13 +209,9 @@ func Load(path string) (*Config, error) {
 	c.Limits = Limits{RequireConfirmedInputs: confirmed}
 
 	f := doc.section("fees")
-	floor, err := f.number(path, "floor_sat_per_vb", 0)
+	target, err := f.number(path, "target_sat_per_vb", 0)
 	fail(err)
-	target, err := f.integer(path, "target_blocks", DefaultTargetBlocks)
-	fail(err)
-	mode, err := f.str(path, "mode", "")
-	fail(err)
-	c.Fees = Fees{FloorSatPerVB: floor, TargetBlocks: int(target), Mode: mode}
+	c.Fees = Fees{TargetSatPerVB: target}
 
 	errs = append(errs, doc.unknown(knownSections)...)
 	errs = append(errs, c.validate(path, doc)...)
@@ -248,14 +258,13 @@ func (c *Config) validate(path string, doc *document) []string {
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
 
-	need(c.Fees.FloorSatPerVB >= 0, "[fees] floor_sat_per_vb cannot be negative")
-	need(c.Fees.TargetBlocks > 0, "[fees] target_blocks must be at least 1")
-	switch strings.ToUpper(c.Fees.Mode) {
-	case "", "CONSERVATIVE", "ECONOMICAL":
-	default:
-		out = append(out, fmt.Sprintf("[fees] mode is %q; Core has two, "+
-			"CONSERVATIVE and ECONOMICAL", c.Fees.Mode))
-	}
+	need(c.Fees.TargetSatPerVB > 0, "[fees] target_sat_per_vb is required: the "+
+		"fee rate you intend to build the batch at, in sat/vB. There is no default "+
+		"and there is not going to be one — this tool asks nothing for a fee "+
+		"estimate, and a floor that quietly became zero would be the worst "+
+		"possible default for the one number in a batch that cannot be corrected "+
+		"afterwards (I-4). Take it from your own wallet or mempool, and "+
+		"`winthistle run --fee-rate` overrides it for one run")
 
 	return out
 }
@@ -294,9 +303,8 @@ func resolve(base, path string) string {
 // Example is the file `winthistle doctor` prints when there is none.
 //
 // It is the same block as docs/design.html's, minus allow_rbf, which this tool
-// refuses — see the package comment — and plus the one key the design's block did
-// not have: the fee floor, which has no default and is what stands in when Core
-// cannot estimate.
+// refuses — see the package comment — and with [fees] as this build reads it:
+// one key, the rate you intend to pay, which has no default.
 const Example = `[lnd]
 address  = "127.0.0.1:10009"
 tls_cert = "~/.lnd/tls.cert"
@@ -314,9 +322,7 @@ journal = "~/.winthistle/runs.db"
 require_confirmed_inputs = true
 
 [fees]
-floor_sat_per_vb = 2.0                # no default: see winthistle doctor
-target_blocks    = 6
-mode             = "CONSERVATIVE"
+target_sat_per_vb = 12.0              # no default: the rate you mean to pay
 
 `
 

@@ -381,7 +381,7 @@ journal = %q
 abort_after_signing_seconds = 300
 
 [fees]
-floor_sat_per_vb = 1.0
+target_sat_per_vb = 1.0
 
 [[signer]]
 label = "cold1"

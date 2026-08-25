@@ -98,7 +98,7 @@ func (p *Plan) Document() string {
 			"child transaction that lifts this one to %.0f sat/vB. This batch can "+
 			"never be replaced (I-4) — replacing it moves every outpoint and "+
 			"destroys every channel in it — so the change output is the only way "+
-			"a stuck batch is ever accelerated.", p.Fee.cpfpTarget())))
+			"a stuck batch is ever accelerated.", p.Fee.CPFPTarget())))
 
 	b.WriteString("\nFee\n")
 	b.WriteString(prose.Bullet(fmt.Sprintf("Target %.2f sat/vB; anything from %.2f to "+

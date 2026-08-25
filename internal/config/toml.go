@@ -269,6 +269,16 @@ var retiredSections = map[string]string{
 }
 
 var retiredKeys = map[string]string{
+	"fees.floor_sat_per_vb": "is gone: it was the floor under Core's " +
+		"estimatesmartfee, for the nodes that have no estimate. Core is not asked " +
+		"for a fee any more and nothing else is asked either. Set " +
+		"target_sat_per_vb to the rate you mean to pay.",
+	"fees.target_blocks": "is gone: it was estimatesmartfee's confirmation " +
+		"target, and nothing estimates now. Set target_sat_per_vb to the rate you " +
+		"mean to pay.",
+	"fees.mode": "is gone: it was estimatesmartfee's CONSERVATIVE or ECONOMICAL, " +
+		"and nothing estimates now. Set target_sat_per_vb to the rate you mean to " +
+		"pay.",
 	"limits.abort_after_signing_seconds": "is gone: it was the 5:00 gate, and " +
 		"the window it bounded no longer contains a signing round. The batch is " +
 		"signed at step 7, after every channel has reached chan_pending, so a slow " +

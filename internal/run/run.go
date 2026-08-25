@@ -77,7 +77,6 @@ package run
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -89,7 +88,6 @@ import (
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/combine"
 	"github.com/AusDavo/winthistle/internal/config"
-	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/peers"
@@ -158,6 +156,10 @@ type Options struct {
 
 	// SettleFor bounds Phase 2. Zero means DefaultSettleFor.
 	SettleFor time.Duration
+
+	// FeeRateSatPerVB overrides [fees] target_sat_per_vb for this run. Zero means
+	// use the configured one. Neither is an estimate: see feeFor.
+	FeeRateSatPerVB float64
 
 	// Change names the wallet's change address, when the operator knows it and
 	// wants the stronger check. Empty is the ordinary case: the app does not build
@@ -282,7 +284,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 type prepared struct {
 	chain   string
 	chans   []arm.Channel
-	rate    fees.Rate
+	fee     plan.Fee
 	finding reserve.Finding
 	topUp   *plan.TopUp
 	probes  []peers.Probe
@@ -346,21 +348,17 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 		}
 	}
 
-	// 3. The fee rate, from Core and nowhere else. The app does not choose the
-	//    fee any more — Sparrow does, at step 4 — but the verifier still needs a
-	//    number to call one too low or too high, and the no-third-party rule
-	//    forbids the obvious substitute. Item 5 removes Core and does not yet say
-	//    what replaces this.
+	// 3. The fee rate, declared rather than fetched. The app does not choose the
+	//    fee — Sparrow does, at step 4 — and it no longer asks anything what the
+	//    fee should be either. What the verifier needs is something to compare the
+	//    built transaction against, and that is what the operator said they were
+	//    aiming at.
 	section(d.Out, "Phase 0 — the fee rate")
-	p.rate, err = fees.Estimate(ctx, d.Node, fees.Request{
-		TargetBlocks:  o.Config.Fees.TargetBlocks,
-		Mode:          o.Config.Fees.Mode,
-		FloorSatPerVB: o.Config.Fees.FloorSatPerVB,
-	})
+	p.fee, err = feeFor(o)
 	if err != nil {
-		return p, fmt.Errorf("the fee rate: %w", err)
+		return p, err
 	}
-	fmt.Fprint(d.Out, p.rate.Report())
+	fmt.Fprint(d.Out, feeReport(p.fee, o))
 
 	// 4. The anchor reserve, which is about this node's own hot wallet and is
 	//    the one thing that can refuse step 5 for a reason unrelated to the
@@ -489,7 +487,7 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	}
 	batchPlan, err := streams.Plan(arm.Blueprint{
 		Chain:   p.chain,
-		Fee:     p.rate.Fee(),
+		Fee:     p.fee,
 		TopUp:   p.topUp,
 		Aliases: aliases(p.facts),
 		Change:  change,
@@ -565,15 +563,17 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 			"being signed", verified.TxID, final.TxID)
 	}
 
-	// The only pre-flight there is, and specifically not a broadcast.
-	ok, why, _, err := d.Node.TestMempoolAccept(ctx, hex.EncodeToString(final.RawTx))
-	if err != nil {
-		return nil, nil, err
-	}
-	if !ok {
-		return nil, nil, fmt.Errorf("testmempoolaccept would refuse this transaction: %s", why)
-	}
-	fmt.Fprintf(d.Out, "testmempoolaccept: allowed. %s in fees, %d vB, %.2f sat/vB.\n",
+	// There is no pre-flight here any more, and its absence is stated rather than
+	// left to be discovered. testmempoolaccept validated the batch without
+	// relaying it, and it was Core's; Core is gone. What survives is narrower and
+	// is not nothing: combine.Accept, above, executed every input's witness
+	// against its own script, which answers "will each input validate" more
+	// directly than a mempool test does and needs no chain data at all. What is
+	// genuinely lost is node policy — min relay fee, standardness, ancestor
+	// limits — and plan.Verify lists exactly that in Verification.Unchecked,
+	// which the operator has already read by this point.
+	fmt.Fprintf(d.Out, "signed and checked: %s in fees, %d vB, %.2f sat/vB. "+
+		"Every witness executed against its own script.\n",
 		prose.Sats(final.FeeSat), final.Vsize,
 		float64(final.FeeSat)/float64(final.Vsize))
 

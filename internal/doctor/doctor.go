@@ -62,11 +62,11 @@ import (
 	"github.com/AusDavo/winthistle/internal/bitcoind"
 	"github.com/AusDavo/winthistle/internal/coldwallet"
 	"github.com/AusDavo/winthistle/internal/config"
-	"github.com/AusDavo/winthistle/internal/fees"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/peers"
+	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -201,7 +201,7 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) *Report {
 	checkColdWallet(ctx, r, cfg, node, wallet, j)
 	checkCoins(ctx, r, cfg, wallet)
 	checkReserve(ctx, r, cli, opts)
-	checkFees(ctx, r, cfg, node)
+	checkFees(ctx, r, cfg)
 	checkPeers(ctx, r, cli, opts)
 	checkJournal(ctx, r, cfg, wallet, j, journalErr)
 	return r
@@ -648,40 +648,28 @@ func checkReserve(ctx context.Context, r *Report, cli *lnd.Client, opts Options)
 	}
 }
 
-func checkFees(ctx context.Context, r *Report, cfg *config.Config, node *bitcoind.Client) {
+// checkFees reports the rate the operator declared, because there is nothing
+// left to check it against.
+//
+// It used to ask Core for an estimate and compare. Core is gone and no third
+// party may be asked in its place, so what is verifiable here is that a rate was
+// set at all — config.Load already refuses a file without one — and what is
+// worth saying is what the number will be used for. Printing it on this screen
+// is the point: it is the last chance to notice a mis-typed fee before the
+// evening, and I-4 means it cannot be corrected afterwards.
+func checkFees(_ context.Context, r *Report, cfg *config.Config) {
 	c := r.add(Check{Name: "the fee rate"})
-	if node == nil {
-		c.Status = Skip
-		c.say("not checked: Core could not be reached")
-		return
-	}
-	rate, err := fees.Estimate(ctx, node, fees.Request{
-		TargetBlocks:  cfg.Fees.TargetBlocks,
-		Mode:          cfg.Fees.Mode,
-		FloorSatPerVB: cfg.Fees.FloorSatPerVB,
-	})
-	if err != nil {
-		c.fail("%v", err)
-		c.say("Core is entitled to answer \"insufficient data\", and does so on " +
-			"every regtest node, on a freshly synced one, and on any node that has " +
-			"been offline for a while. That is not a fault — but a rate has to come " +
-			"from somewhere, and I-4 means a rate chosen badly cannot be corrected " +
-			"by replacing the transaction.")
-		c.fix("# add to %s:\n[fees]\nfloor_sat_per_vb = 2.0", cfg.Path)
-		return
-	}
-	c.say("%s", rate.Summary())
-	if !rate.Estimated() {
-		c.warn("Core had no estimate, so the batch would be built at a floor rather " +
-			"than at a market rate. Worth knowing before the evening rather than " +
-			"during it.")
-	}
-	if cfg.Fees.FloorSatPerVB == 0 {
-		c.warn("[fees] floor_sat_per_vb is not set. It has no default on purpose: a " +
-			"node with no estimate and no floor is an error rather than a guess, " +
-			"and this node happens to have an estimate today.")
-		c.fix("# add to %s:\n[fees]\nfloor_sat_per_vb = 2.0", cfg.Path)
-	}
+	f := plan.Fee{TargetSatPerVB: cfg.Fees.TargetSatPerVB}
+	c.say("%.2f sat/vB, declared in %s", f.TargetSatPerVB, cfg.Path)
+	c.say("a batch paying between %.2f and %.2f sat/vB passes step 5",
+		f.Low(), f.High())
+	c.say("the change output is checked for being able to lift the batch to "+
+		"%.2f sat/vB with a CPFP child", f.CPFPTarget())
+	c.warn("Nothing here estimated this. Bitcoin Core answered it until this " +
+		"build dropped Core, and no fee API replaced it — one is handed the size " +
+		"of what you are building and the moment you are building it. Take the " +
+		"number from your own wallet or mempool, and check it today rather than " +
+		"during the run: there is no RBF on a funding transaction (I-4).")
 }
 
 func checkPeers(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {

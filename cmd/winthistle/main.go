@@ -175,6 +175,9 @@ func runCmd(ctx context.Context, args []string) error {
 	change := fs.String("change", "", "your wallet's change address, if you want "+
 		"the verifier to check the script rather than recognise the key origins. "+
 		"Needed only by a wallet that writes no key origins at all")
+	feeRate := fs.Float64("fee-rate", 0, "the sat/vB you mean to build this batch "+
+		"at, overriding [fees] target_sat_per_vb. Nothing here estimates it: step 5 "+
+		"checks the transaction you built against this number, a quarter either way")
 	settleFor := fs.Duration("settle-for", run.DefaultSettleFor,
 		"how long Phase 2 watches for confirmations and applies policies")
 	yes := fs.Bool("yes", false, "do not ask before arming. The blunt-abandon "+
@@ -231,7 +234,7 @@ func runCmd(ctx context.Context, args []string) error {
 	res, err := run.Do(ctx, d, run.Options{
 		Config: cfg, Batch: batch, RunID: id,
 		StopBeforePublish: *stopBefore, Probe: *probe, SettleFor: *settleFor,
-		Change: *change,
+		Change: *change, FeeRateSatPerVB: *feeRate,
 	})
 	if res != nil {
 		fmt.Printf("\nrun %s\n", res.RunID)

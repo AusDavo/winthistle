@@ -396,7 +396,7 @@ journal = %q
 require_confirmed_inputs = true
 
 [fees]
-floor_sat_per_vb = 1.0
+target_sat_per_vb = 1.0
 `,
 		aliceAddr, filepath.Join(e.Root, "regtest", "creds", "alice", "tls.cert"),
 		macPath, coreAddr, e.rpcUser, e.rpcPass, ColdWallet,

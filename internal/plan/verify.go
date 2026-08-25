@@ -241,11 +241,14 @@ func (p *Plan) Verify(raw []byte) (*Verification, error) {
 	}
 
 	v.Unchecked = append(v.Unchecked,
-		"whether the inputs are confirmed — a PSBT carries no chain height, so "+
-			"this is enforced during coin selection in directed mode and stated as a "+
-			"constraint in the plan otherwise",
+		"whether the inputs are confirmed — a PSBT carries no chain height, and "+
+			"this app selects no coins, so it is stated as a constraint in the plan "+
+			"and enforced by the wallet that picked them",
 		"node policy: min relay fee, standardness and ancestor limits. "+
-			"testmempoolaccept answers those and needs Core")
+			"Core's testmempoolaccept answers those and this build does not run it: "+
+			"it dials no Bitcoin node at all. Each input's witness is executed "+
+			"against its own script before the transaction is published, which is "+
+			"narrower and is checked here")
 
 	sort.SliceStable(v.Problems, func(i, j int) bool {
 		return v.Problems[i].Code < v.Problems[j].Code
@@ -551,12 +554,12 @@ func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
 		v.Unchecked = append(v.Unchecked, note)
 		return
 	}
-	floor := ChangeFloor(v.Size.Vsize, v.FeeSat, p.Fee.cpfpTarget(), child)
+	floor := ChangeFloor(v.Size.Vsize, v.FeeSat, p.Fee.CPFPTarget(), child)
 	v.ChangeFloorSat = floor
 	if change.AmountSat < floor {
 		add(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
 			fmt.Sprintf("Change is %d sat, which cannot fund a child big enough to "+
-				"lift this batch to %.2f sat/vB.", change.AmountSat, p.Fee.cpfpTarget()),
+				"lift this batch to %.2f sat/vB.", change.AmountSat, p.Fee.CPFPTarget()),
 			fmt.Sprintf("A %d vB child on top of a %d vB parent needs %d sat of "+
 				"change to leave anything above the %d sat dust limit. Reduce a "+
 				"funding amount or add a coin.",

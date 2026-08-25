@@ -37,9 +37,7 @@ journal = "/state/runs.db"
 require_confirmed_inputs = true
 
 [fees]
-floor_sat_per_vb = 2.5
-target_blocks    = 12
-mode             = "ECONOMICAL"
+target_sat_per_vb = 2.5
 
 `
 
@@ -57,7 +55,7 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	if cfg.Limits.MinConfirmations() != 1 {
 		t.Error("require_confirmed_inputs did not become a confirmation floor")
 	}
-	if cfg.Fees.FloorSatPerVB != 2.5 || cfg.Fees.TargetBlocks != 12 {
+	if cfg.Fees.TargetSatPerVB != 2.5 {
 		t.Errorf("fees read back as %+v", cfg.Fees)
 	}
 }
@@ -83,6 +81,9 @@ wallet  = "cold"
 
 [server]
 journal = "/state/runs.db"
+
+[fees]
+target_sat_per_vb = 12.0
 `))
 	if err != nil {
 		t.Fatalf("reading a minimal file: %v", err)
@@ -91,11 +92,34 @@ journal = "/state/runs.db"
 		t.Error("require_confirmed_inputs defaulted to false. An unconfirmed " +
 			"parent can be replaced, which moves our input, which moves the txid")
 	}
-	// The one key with no default, on purpose.
-	if cfg.Fees.FloorSatPerVB != 0 {
-		t.Errorf("the fee floor defaulted to %g. It must not: a node with no "+
-			"estimate and no floor is an error rather than a guess",
-			cfg.Fees.FloorSatPerVB)
+	if cfg.Server.Journal != "/state/runs.db" {
+		t.Errorf("the journal path read back as %q", cfg.Server.Journal)
+	}
+}
+
+// TestAMissingFeeRateIsRefusedRatherThanDefaultedToZero.
+//
+// The one key with no default, and the reason is the whole of item 5's first
+// decision. Core's estimatesmartfee answered this until Core was removed, and
+// CLAUDE.md forbids the obvious substitute, so the number is declared. A
+// declared number that quietly becomes zero is the worst default this tool
+// could ship: the fee is the one figure in a batch with no right answer, and
+// I-4 means a batch built at the wrong one cannot be corrected by replacing it.
+//
+// Two independent refusals stand between a missing number and a batch built
+// against nothing — this one, and plan.Build's on a non-positive target. This
+// is the one that fires before LND is dialled.
+func TestAMissingFeeRateIsRefusedRatherThanDefaultedToZero(t *testing.T) {
+	body := strings.Replace(good, "target_sat_per_vb = 2.5", "", 1)
+	_, err := Load(write(t, "winthistle.toml", body))
+	if err == nil {
+		t.Fatal("a file with no fee rate loaded, and the rate is now zero")
+	}
+	if !strings.Contains(err.Error(), "target_sat_per_vb is required") {
+		t.Errorf("the refusal does not name the key: %v", err)
+	}
+	if !strings.Contains(err.Error(), "I-4") {
+		t.Errorf("the refusal does not say why it cannot be corrected later: %v", err)
 	}
 }
 
@@ -183,9 +207,9 @@ func TestWhatElseIsRefused(t *testing.T) {
 				"[limits]\nabort_after_signing_seconds = 300", 1),
 			want: "no longer contains a signing round",
 		},
-		"a mode Core does not have": {
-			body: strings.Replace(good, `"ECONOMICAL"`, `"CHEAPEST"`, 1),
-			want: "Core has two",
+		"a third key that was retired": {
+			body: strings.Replace(good, "[fees]", "[fees]\nmode = \"ECONOMICAL\"", 1),
+			want: "nothing estimates now",
 		},
 		"a key set twice": {
 			body: strings.Replace(good, "[server]",
