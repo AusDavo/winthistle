@@ -253,31 +253,42 @@ footer p{font-size:.9rem; color:var(--muted)}
 @media (prefers-reduced-motion:reduce){*{animation:none !important; transition:none !important}}
 </style>
 
+
 <header>
   <div class="band">
-    <div class="gut eyebrow"><b>Design</b>rev 1<br>draft</div>
+    <div class="gut eyebrow"><b>Design</b>rev 2<br>the inversion</div>
     <div class="wordmark">
       <h1>Winthistle</h1>
       <span class="tag">Channel Opener</span>
     </div>
-    <p class="standfirst">A local, guided interface for opening a batch of Lightning channels in one transaction, funded straight from cold storage — including multisig cold storage — without the tmux choreography.</p>
+    <p class="standfirst">A command-line wizard for opening a batch of Lightning channels in one transaction, around Sparrow and LND — doing the two things those two cannot do between them.</p>
     <dl class="facts">
-      <div><dt class="lbl">Node</dt><dd>LND ≥ 0.18</dd></div>
-      <div><dt class="lbl">PSBT engine</dt><dd>Core or Sparrow</dd></div>
-      <div><dt class="lbl">Signing</dt><dd>external only</dd></div>
-      <div><dt class="lbl">Deployment</dt><dd>localhost / tailnet</dd></div>
+      <div><dt class="lbl">Node</dt><dd>LND, over gRPC</dd></div>
+      <div><dt class="lbl">PSBT engine</dt><dd>Sparrow, or similar</dd></div>
+      <div><dt class="lbl">Signing</dt><dd>external, unhurried</dd></div>
+      <div><dt class="lbl">Front end</dt><dd>one terminal</dd></div>
     </dl>
   </div>
 </header>
 
 <section>
   <div class="band">
-    <div class="gut eyebrow"><b>Premise</b>what this replaces</div>
+    <div class="gut eyebrow"><b>Premise</b>what this is for</div>
     <h2>The work is coordination, not cryptography</h2>
-    <p>The manual process works. What makes it arduous is that a human is holding the state machine in their head: which pane is which peer, which prompt wants base64 and which wants raw hex, which pane has <code>--no_publish</code>, how much reserve LND will demand once the new channels exist, and how many of the ten minutes are left. Every one of those is mechanical, and every one of them is a place to lose a channel — or, in the worst case, coins.</p>
-    <p>So this tool owns the state machine and the clock, and hands the human back exactly two jobs: <strong>approve the transaction</strong> and <strong>sign it</strong>. Nothing else should require a decision under time pressure.</p>
+    <p>The manual process works. What makes it arduous is that a human is holding the state machine in their head: which pane is which peer, which prompt wants base64 and which wants raw hex, which pane has <code>--no_publish</code>, how much reserve LND will demand once the new channels exist, and how many of the ten minutes are left. Every one of those is mechanical, and every one of them is a place to lose a channel.</p>
+    <p>So this tool owns the state machine and the clock, and hands the human back exactly two jobs: <strong>build the transaction in the wallet you already use</strong> and <strong>sign it</strong>. Nothing else should require a decision under time pressure.</p>
+    <div class="split wide">
+      <div class="card">
+        <span class="lbl">Job one · attribute the outputs</span>
+        <p>A funding output is a P2WSH 2-of-2 with a peer. No signing wallet can tell you which peer it funds, at what amount, or that two were not swapped. Sparrow shows you payments to unrecognised addresses. This tool prints the plan that gives them names.</p>
+      </div>
+      <div class="card">
+        <span class="lbl">Job two · hold the gate</span>
+        <p>Get all <em>n</em> channels to <code>chan_pending</code> — the receipt that each is recoverable by force-close — and only then let the transaction reach the network. That is I·1, and it is the whole safety argument.</p>
+      </div>
+    </div>
     <div class="note">
-      <span class="lbl">Scope</span>One LND node, one funding transaction, <em>n</em> channels, funded by an external single-sig or <em>m</em>-of-<em>n</em> wallet whose keys never touch this machine.
+      <span class="lbl">Scope</span>One LND node, one funding transaction, <em>n</em> channels. It builds nothing, holds no keys, selects no coins, derives no addresses, and opens no socket except to your LND. It assumes a wallet with coins in it — hot, cold, single-sig, multisig. Which of those does not matter to this program.
     </div>
   </div>
 </section>
@@ -285,30 +296,35 @@ footer p{font-size:.9rem; color:var(--muted)}
 <section>
   <div class="band">
     <div class="gut eyebrow"><b>Invariants</b>load-bearing</div>
-    <h2>Four rules that shape everything else</h2>
-    <p>These come from LND's own protocol constraints, not from preference, and each is enforced in code as a gate rather than documented as advice. The first one is the reason this tool can claim that no channel in a batch is ever left unrecoverable.</p>
+    <h2>Three rules that shape everything else</h2>
+    <p>These come from LND's own protocol constraints, not from preference. Each carries a source citation so you can verify it rather than trust this page. There were four; the second dissolved, and its dissolution is recorded below rather than quietly dropped, because an invariant that disappears without explanation is indistinguishable from one that was abandoned.</p>
     <div class="invariants wide">
       <div class="inv">
         <span class="n">I·1</span>
         <div>
           <h3>Publish only once every channel is already recoverable.</h3>
           <p>LND's "DO NOT PUBLISH" warning is about <em>ordering</em>, not authorship. The condition that actually matters is that the transaction must not reach the network before every channel has received its peer's <code>funding_signed</code> — the counterparty signature on our initial commitment transaction, which is precisely what lets a force-close recover the funds.</p>
-          <p>In <code>funding/manager.go</code>, <code>chan_pending</code> is emitted strictly <em>after</em> <code>CompleteReservation(nil, commitSig)</code> has stored that signature and after <code>WatchNewChannel</code> has handed the outpoint to the ChainArbitrator. So <strong><em>n</em> <code>chan_pending</code> events is exactly the safe condition</strong> — and we gate on it: <code>no_publish</code> is set on <em>every</em> channel, not all but the last. Once all <em>n</em> report pending, we publish. There is no ordering in which the transaction can reach the network while any channel is still unrecoverable, because we hold the only copy of it until the gate opens.</p>
+          <p>In <code>funding/manager.go</code>, <code>funderProcessFundingSigned</code> (<code>:2694</code>) emits <code>chan_pending</code> (<code>:2884</code>) strictly <em>after</em> <code>CompleteReservation(nil, commitSig)</code> (<code>:2789</code>) has stored that signature, and after <code>WatchNewChannel</code> (<code>:2862</code>) has handed the outpoint to the ChainArbitrator. The broadcast block sits between them at <code>:2805</code>, guarded by <code>completeChan.ChanType.HasFundingTx()</code>. So <strong><em>n</em> <code>chan_pending</code> events is exactly the safe condition</strong> — and we gate on it: <code>no_publish</code> is set on <em>every</em> channel, not all but the last.</p>
+          <p><strong>The citation used to name <code>handleFundingSigned</code>, and no such function exists.</strong> It is not a rename — there is no <code>handleFundingSigned</code> at v0.19.3-beta and there never was. The ordering was right and the name was ungreppable, which is how a citation stops being checkable. Corrected here, in <code>CLAUDE.md</code> and in the handoff.</p>
         </div>
       </div>
-      <div class="inv">
-        <span class="n">I·2</span>
+      <div class="inv" style="border-left-color:var(--rule-2)">
+        <span class="n" style="color:var(--muted)">I·2</span>
         <div>
-          <h3>The app holds the last signature.</h3>
-          <p>I·1 is only true if nothing <em>else</em> can broadcast. A fully-signed transaction is a bearer instrument: any party holding one can publish it, buggily or maliciously, before the gate opens. So signers return <strong>partial signatures</strong>, and combining and finalizing happen in-app — no external device ever possesses a broadcastable transaction. For <em>m</em>-of-<em>n</em> this falls out for free. For single-sig it cannot, since the lone signer necessarily produces a complete transaction; there, a genuinely air-gapped signer with no network path is a requirement rather than a preference.</p>
+          <h3>Dissolved — and this is the record of why.</h3>
+          <p>I·2 read: <em>the app holds the last signature.</em> Signers returned <strong>partial</strong> signatures, combining and finalizing happened in-app, and no external party ever held a broadcastable transaction. It existed for exactly one reason — so that nothing could broadcast <em>before the I·1 gate opened</em> and defeat it from outside.</p>
+          <p><strong>After the inversion there is no "before the gate opens."</strong> Every channel reaches <code>chan_pending</code> at step 6; you do not sign until step 7. A wallet holding a fully signed transaction front-runs nothing, because every channel is already recoverable by force-close. The invariant is not relaxed — it has nothing left to protect against. The <em>m</em>−1 signing dance that assisted mode specified is deleted with it.</p>
+          <p><strong>The single-sig caveat becomes moot rather than unmet.</strong> It used to say that a single-sig wallet returns a complete transaction, so there was no partial-signature path to hold it up in, and that on single-sig this property rested on the operator's setup rather than on structure. That was an honest limit on an invariant that now has nothing to reach. Which kind of wallet you sign with stopped mattering to this program, and it should stop pretending otherwise.</p>
+          <p class="dim">This is not a licence to add a broadcast path. I·1 still says the app publishes once, after <em>n</em> receipts. What dissolved is the claim about who else may hold the bytes.</p>
         </div>
       </div>
       <div class="inv">
         <span class="n">I·3</span>
         <div>
           <h3>The TXID must not move after verification.</h3>
-          <p>LND commits to the funding outpoint at <code>psbt_verify</code>: <em>"no inputs or outputs can change, only signatures can be added. If the TXID changes between this call and the publish step then the channel will never be created and the funds will be in limbo."</em> A signer that re-selects coins or re-derives change silently breaks the batch, so the app hashes the verified transaction and refuses any returned PSBT whose unsigned TXID differs, naming the device that did it.</p>
-          <p>That check is not a duplicate of LND's, because LND's is narrower than the sentence above sounds. <code>PsbtIntent.FinalizeRawTX</code> compares the outputs and the inputs' <em>previous outpoints</em> and stops — "the fields in the PSBT part are allowed to change" — and sequence numbers, version and locktime live in the wire transaction rather than in the PSBT part. <code>CompileFundingTx</code> then takes the channel point from <code>i.FinalTX.TxHash()</code>, the transaction it was just handed. So a returned transaction with different sequence numbers has a different TXID and LND would adopt it — replaceability included, which is I·4's whole hazard. Nor does LND check the signatures: <code>verifyInputsSigned</code> only asserts that each input has <em>something</em> attached. Both gaps are closed before LND is asked.</p>
+          <p>LND commits to the funding outpoint at <code>psbt_verify</code>: <em>"no inputs or outputs can change, only signatures can be added. If the TXID changes between this call and the publish step then the channel will never be created and the funds will be in limbo."</em> So the app hashes the verified transaction and refuses any returned PSBT whose unsigned TXID differs, naming the device that did it.</p>
+          <p><strong>I·3 now carries the weight I·2 used to.</strong> It is the <em>only</em> load-bearing check on what comes back from the signing wallet, which makes the next paragraph the most important one on this page.</p>
+          <p>That check is not a duplicate of LND's, because LND's is narrower than the sentence above sounds. <code>PsbtIntent.FinalizeRawTX</code> compares the outputs and the inputs' <em>previous outpoints</em> and stops — "the fields in the PSBT part are allowed to change" — and sequence numbers, version and locktime live in the wire transaction rather than in the PSBT part. <code>CompileFundingTx</code> then takes the channel point from the transaction it was just handed. So a returned transaction with different sequence numbers has a different TXID and LND would adopt it. Nor does LND check the signatures: <code>verifyInputsSigned</code> only asserts that each input has <em>something</em> attached. Both gaps are closed before LND is asked.</p>
           <p>This is also why LND's <code>verifyAllInputsSegWit</code> rejects legacy inputs outright — <em>"risk of malleability"</em>. A malleable input is a TXID that can move after we have committed to it, which is the same failure wearing a different hat.</p>
         </div>
       </div>
@@ -316,108 +332,112 @@ footer p{font-size:.9rem; color:var(--muted)}
         <span class="n">I·4</span>
         <div>
           <h3>No RBF on the funding transaction, ever. CPFP or wait.</h3>
-          <p>Replacing the funding transaction changes the outpoints and destroys every channel in the batch. No code path in this build replaces one, and the batch verifier refuses any funding input that signals replaceability.</p>
-          <p><strong>The change output is a mitigation, not part of the invariant — but it is still required.</strong> This paragraph used to read "therefore always include a change output we control", which conflated what I·4 forbids with what it costs. A stuck batch can only be accelerated by spending its change, so a change output is the only lever, and the verifier refuses a batch without one or with one too small to matter. What that gate protects is not the coins — nothing is at risk in an unconfirmed transaction only we could have signed — but the signing ceremony, and the escape from a batch that has no way out at all. See <a href="#frozen">A batch that never confirms</a>.</p>
-          <p><strong><code>replaceable: false</code> is a statement of intent, not a defence — and this is a correction.</strong> The paragraph above used to end "disable replaceability in the UI entirely", which implied the flag protected something. Measured against Bitcoin Core v29, the version this build develops against: <code>mempoolfullrbf</code> does not exist even as a hidden debug option, and <code>getmempoolinfo</code> reports <code>"fullrbf": true</code> with no way to turn it off. Full-RBF is unconditional, so a higher-fee conflict relays regardless of what our sequence numbers signal. The flag is still set, and should be — but what actually enforces I·4 is that only we can sign our inputs, and nothing here builds a replacement.</p>
-          <p>Building that child is <code>winthistle bump</code>, and it is not a small command. The change output belongs to cold storage, so the child comes back unsigned and accelerating a batch costs a <strong>second cold-wallet session</strong> — its own transport, its own verification, its own journal rows. There is no shortcut that does not amount to a hot key able to spend the batch's change, which is I·2 again from the other end.</p>
-          <p><strong>The child itself is always replaceable, and the distinction is the whole of this invariant's scope.</strong> The funding transaction can never be replaced: <em>n</em> peers hold commitment signatures against its outpoints, replaceability is off at construction, and the batch verifier refuses any input that signals it. A child is the opposite case in every respect — nobody has committed to anything about it, it spends the batch's change and pays cold storage back, and only cold storage can sign a replacement of it. So it is built BIP-125 replaceable and the child verifier <em>requires</em> that, which is what makes a second lift an ordinary replacement rather than a grandchild paying for a longer chain. Two verifiers is what lets both rules be stated at once; one verifier with a flag on it would be a switch on the invariant.</p>
-          <p>Two consequences worth knowing before asking for a second lift. A replacement has to beat the standing child's <em>absolute</em> fee, not merely its rate — BIP-125 rule 3, plus rule 4's charge for its own bandwidth — and Core's refusal for that says only <code>insufficient fee</code>, naming neither figure, so the app checks it before a device is asked and says what target would clear it. And the sequence number is pinned to exactly <code>0xfffffffd</code> rather than to anything replaceable: the child is a version 2 transaction, so a sequence with bit 31 clear stops being an RBF signal and becomes a BIP-68 <em>relative timelock</em>, and a child that cannot be mined beside its parent cannot enter a mempool at all.</p>
-          <p>The child also has a ceiling nothing else in this design meets, and it is worth stating because it is discovered at the worst possible moment otherwise. A child concentrates the whole package's lift into about 150 virtual bytes, so its <em>own</em> fee rate is roughly <code>parentVsize / childVsize</code> times the package target — a multiplier near fifty on a three-channel batch. <code>WalletKit.PublishTransaction</code> hands the transaction to btcwallet, which calls <code>SendRawTransaction(tx, false)</code>; rpcclient turns that <code>false</code> into <code>maxfeerate: 0.1</code> BTC/kvB, and no WalletKit parameter reaches it. So above <strong>10,000 sat/vB of the child's own rate</strong> — about a 210 sat/vB package target on a 7,000 vB parent, less on a larger batch — the node declines to relay a perfectly valid transaction. The app refuses that lift <em>before</em> the signing round and says both ways out: ask for a smaller lift, or hand the signed child to Core directly with <code>sendrawtransaction &lt;hex&gt; 0</code>, which is the same bytes by a route that takes an argument. Measured against Core 29: refused at the default with <code>max-fee-exceeded</code>, accepted with <code>maxfeerate 0</code>.</p>
+          <p>Replacing the funding transaction changes the outpoints and destroys every channel in the batch. <strong>What enforces this is authorship, which is all that ever enforced it:</strong> only we can sign those inputs, and no code path in this repository builds a replacement.</p>
+          <p><strong><code>replaceable: false</code> is a statement of intent, not a defence.</strong> Measured against Bitcoin Core v29, the version this build develops against: <code>mempoolfullrbf</code> does not exist even as a hidden debug option, and <code>getmempoolinfo</code> reports <code>"fullrbf": true</code> with no way to turn it off. Full-RBF is unconditional, so a higher-fee conflict relays regardless of what our sequence numbers signal.</p>
+          <p><strong>Which is why the verifier's sequence-number refusal is being withdrawn.</strong> Refusing a transaction over a signal that changes nothing is a lint wearing an invariant's clothes. It is still in the code today and still refuses; removing it is a scheduled change, not a completed one. Note what that leaves: with the sequence check gone, a wallet that flips replaceability on is caught by the I·3 txid pin, since changing a sequence number changes the TXID.</p>
+          <p class="dim">Your <em>other</em> wallet, holding the same keys, can build a replacement. The discipline lives in the human. See <a href="#frozen">A batch that never confirms</a> for the one case where that is the right thing to do, and the ordering that keeps it from losing funds.</p>
         </div>
       </div>
     </div>
     <div class="note warn">
-      <span class="lbl">Cost of I·1</span>Setting <code>no_publish</code> on every channel also sets <code>NoFundingTxBit</code>, and that bit gates <code>rebroadcastFundingTx</code> — so LND will not re-broadcast the funding transaction on restart. We inherit that duty. Publishing through <code>WalletKit.PublishTransaction</code> rather than bitcoind hands the transaction to LND's wallet-level rebroadcaster, which <em>"will continually attempt to re-broadcast the transaction on start up, until it enters the chain"</em>, restoring the property by another route. The raw transaction is also kept in the run journal so we can re-broadcast independently.
+      <span class="lbl">Cost of I·1</span>Setting <code>no_publish</code> on every channel also sets <code>NoFundingTxBit</code> (<code>lnwallet/reservation.go:402</code>), and that bit gates <code>rebroadcastFundingTx</code> (<code>funding/manager.go:757</code>) — so LND will not re-broadcast the funding transaction on restart. We inherit that duty. Publishing through <code>WalletKit.PublishTransaction</code> rather than bitcoind hands the transaction to LND's wallet-level rebroadcaster, which <em>"will continually attempt to re-broadcast the transaction on start up, until it enters the chain"</em>, restoring the property by another route. The raw transaction is also kept in the run journal.
+      <p style="margin-top:.6rem">Precisely: <code>NoFundingTxBit</code> does not skip only the broadcast. It gates four things — the broadcast, the startup rebroadcast, the funding-input witness verification inside <code>CompleteReservation</code> (<code>lnwallet/wallet.go:2274</code>, which has no witnesses to check), and the transaction label. <code>CompleteReservation</code>, <code>WatchNewChannel</code> and the <code>chan_pending</code> emission are untouched, which is exactly what I·1 needs.</p>
     </div>
   </div>
 </section>
 
 <section>
   <div class="band">
-    <div class="gut eyebrow"><b>Sequence</b>the funding flow</div>
+    <div class="gut eyebrow"><b>Sequence</b>nine steps</div>
     <h2>What the app actually drives</h2>
     <p>The interactive <code>lncli</code> prompts exist only because the CLI is interactive. Underneath is a plain gRPC state machine, fully scriptable, and the client generates the identifiers — so the app owns every handle from the first call.</p>
+    <p><strong>Read the gate row first.</strong> Everything above it is reversible at no cost; everything below it happens with every channel already recoverable. That line moved, and moving it is what this revision is about.</p>
     <div class="ladder wide">
       <div class="row head"><span>#</span><span>Owner</span><span>Step</span></div>
-      <div class="row"><span class="n">1</span><span><span class="actor a-app">app</span></span><span class="what">Generate <em>n</em> random 32-byte pending channel IDs, one per peer. Connect to each peer; read their limits and required confirmation depth.<span class="mono">ConnectPeer · ListPeers</span></span></div>
-      <div class="row"><span class="n">2</span><span><span class="actor a-app">app</span></span><span class="what">Open <em>n</em> funding streams, each with a PSBT shim. <code>no_publish</code> is true for <strong>every</strong> channel — see I·1.<span class="mono">OpenChannel{funding_shim.psbt_shim{pending_chan_id, no_publish}}</span></span></div>
-      <div class="row"><span class="n">3</span><span><span class="actor a-lnd">lnd</span></span><span class="what">Each stream returns a funding address and the exact amount it expects.<span class="mono">→ psbt_fund{funding_address, funding_amount}</span></span></div>
-      <div class="row"><span class="n">4</span><span><span class="actor a-app">app</span></span><span class="what">Build <strong>one</strong> unsigned PSBT: <em>n</em> funding outputs, the reserve top-up, and change. Coin selection, fee rate and change all come from a watch-only Core wallet.<span class="mono">walletcreatefundedpsbt</span></span></div>
-      <div class="row"><span class="n">5</span><span><span class="actor a-app">app</span></span><span class="what">Verify the unsigned PSBT against all <em>n</em> streams. Each LND stream checks that its own script and amount are present.<span class="mono">FundingStateStep{psbt_verify{funded_psbt, pending_chan_id}}</span></span></div>
-      <div class="row"><span class="n">6</span><span><span class="actor a-sig">signers</span></span><span class="what">Collect <em>m</em> partial signatures out of band. Combine and finalize <em>in-app</em> (I·2) — no Core, in either engine — then execute every input's witness against its own script, assert the TXID is unchanged, and re-run the batch verifier on the transaction that came out. <code>testmempoolaccept</code> adds node policy where Core is present, and validates without relaying, so this does not publish.<span class="mono">internal/combine · testmempoolaccept</span></span></div>
-      <div class="row"><span class="n">7</span><span><span class="actor a-lnd">lnd</span></span><span class="what">Finalize <strong>all <em>n</em></strong> channels. Each stores its peer's commitment signature, hands its outpoint to the ChainArbitrator, and reports <code>chan_pending</code>. Nothing is broadcast, by any of them.<span class="mono">FundingStateStep{psbt_finalize{final_raw_tx, pending_chan_id}}</span></span></div>
-      <div class="row gate"><span class="n">8</span><span><span class="actor a-app">gate</span></span><span class="what">Require <em>n</em> of <em>n</em> <code>chan_pending</code>. Export and store channel backups. Until this check passes, the signed transaction exists only in our journal — so the batch is abortable at zero cost right up to this line.<span class="mono">ExportAllChannelBackups</span></span></div>
-      <div class="row gate"><span class="n">9</span><span><span class="actor a-net">publish</span></span><span class="what">Publish. Every channel is already recoverable by force-close before the transaction ever reaches a peer's mempool.<span class="mono">WalletKit.PublishTransaction</span></span></div>
+      <div class="row"><span class="n">1</span><span><span class="actor a-app">app</span></span><span class="what">Pre-flight. Peers reachable, keys well-formed, anchor reserve sufficient for the batch. Nothing is opened and nothing can time out.<span class="mono">ConnectPeer · GetNodeInfo · RequiredReserve</span></span></div>
+      <div class="row"><span class="n">2</span><span><span class="actor a-app">app</span></span><span class="what">Open <em>n</em> funding streams, each with a PSBT shim. <code>no_publish</code> is true for <strong>every</strong> channel — see I·1. <strong>Clock A starts here.</strong><span class="mono">OpenChannel{funding_shim.psbt_shim{pending_chan_id, no_publish}}</span></span></div>
+      <div class="row"><span class="n">3</span><span><span class="actor a-app">app</span></span><span class="what">Print the plan: each peer, its alias, the funding address LND just issued, the exact amount, and the forwarding policy that channel will carry.<span class="mono">→ psbt_fund{funding_address, funding_amount}</span></span></div>
+      <div class="row"><span class="n">4</span><span><span class="actor a-sig">sparrow</span></span><span class="what">Build the transaction. Paste the addresses in as recipients, choose coins and fee, Save PSBT. <strong>Do not sign yet.</strong> Addresses are copy-pasted from the terminal, never typed.<span class="mono">unsigned PSBT, n funding outputs + change</span></span></div>
+      <div class="row"><span class="n">5</span><span><span class="actor a-app">app</span></span><span class="what">Verify the unsigned PSBT against the plan, output by output — then hand it to all <em>n</em> streams with <code>skip_finalize</code>. LND pins the funding outpoint here (I·3). A mis-paste is caught by our own check <em>before</em> anything is pinned.<span class="mono">FundingStateStep{psbt_verify{funded_psbt, pending_chan_id, skip_finalize}}</span></span></div>
+      <div class="row gate"><span class="n">6</span><span><span class="actor a-app">gate</span></span><span class="what"><strong><em>n</em> of <em>n</em> <code>chan_pending</code>. The gate is open, and nothing has been signed.</strong> Every channel is now recoverable by force-close. Export and store channel backups. <strong>Clock A stops, clock B starts.</strong><span class="mono">ExportAllChannelBackups</span></span></div>
+      <div class="row"><span class="n">7</span><span><span class="actor a-sig">sparrow</span></span><span class="what">Sign, with no clock running and nobody waiting. Take an hour if the device is in another building.<span class="mono">signed PSBT back, by file</span></span></div>
+      <div class="row gate"><span class="n">8</span><span><span class="actor a-net">publish</span></span><span class="what">Is the unsigned TXID unchanged (I·3)? Then publish, exactly once. Every channel was already recoverable before the transaction reached a peer's mempool.<span class="mono">WalletKit.PublishTransaction</span></span></div>
+      <div class="row"><span class="n">9</span><span><span class="actor a-app">app</span></span><span class="what">Watch to confirmation, then apply each channel's forwarding policy the moment it goes active.<span class="mono">PendingChannels · ListChannels · UpdateChannelPolicy</span></span></div>
     </div>
     <div class="note">
-      <span class="lbl">Deliberate omission</span>LND documents <code>skip_finalize</code> as a shortcut for batch members, and <code>base_psbt</code> chaining as a way to accumulate outputs. We use neither. Chaining is an ergonomic crutch for the CLI — we build the transaction ourselves. And <code>skip_finalize</code> skips the very step that produces the <code>chan_pending</code> gate in step 8, which is the one thing this design will not give up.
+      <span class="lbl">Step 4, concretely</span>
+      <pre style="margin-top:.5rem">channel 1  bitrefill    <b>bcrt1q...9f4a</b>   250,000 sat
+channel 2  acinq        <b>bcrt1q...c17b</b>   250,000 sat
+
+<i>Enter these as recipients in Sparrow, choose your coins</i>
+<i>and fee, then Save PSBT — do not sign yet.</i></pre>
+      <p style="margin-top:.6rem">A PSBT skeleton was considered and rejected: Sparrow signs PSBTs, it does not fund them. There is no "load this unfunded PSBT and choose coins for it" flow outside Core's <code>walletcreatefundedpsbt</code>, and removing Core is the point.</p>
+    </div>
+    <div class="note warn">
+      <span class="lbl">This page used to reject <code>skip_finalize</code>, and the reason it gave was false</span>
+      The previous revision said <code>skip_finalize</code> "skips the very step that produces the <code>chan_pending</code> gate", and called that non-negotiable. <strong>It does not skip the gate.</strong> In <code>lnwallet/chanfunding/psbt_assembler.go:290-304</code>, <code>PsbtIntent.Verify</code> ends by closing <code>PsbtReady</code> itself when <code>!i.shouldPublish &amp;&amp; skipFinalize</code> — setting <code>FinalTX</code> to the <em>unsigned</em> transaction and the state to <code>PsbtFinalized</code> — and <code>funding/manager.go:2308</code> reads that channel with a bare <code>case nil:</code>, commented <em>"Nil error means the flow continues normally now."</em>
+      <p style="margin-top:.6rem">What it actually skips is handing LND a <strong>signed</strong> transaction, which <code>lnwallet/wallet.go:1899</code> only stores when <code>ShouldPublishFundingTX()</code> is true. With <code>no_publish</code> set — which I·1 requires anyway — LND never needs a signature. <code>CompileFundingTx</code> still runs (<code>:1880</code>) because it "sets the actual funding outpoint in stone", and the unsigned transaction suffices: every input is segwit, so witnesses cannot move the TXID. LND refuses <code>skip_finalize</code> without <code>no_publish</code> (<code>:764</code>), so the dangerous combination is unreachable.</p>
+      <p style="margin-top:.6rem"><strong>Proved on regtest, 2026-08-25.</strong> Two streams opened with <code>psbt_shim</code> and <code>no_publish</code>, an unsigned batch transaction, <code>psbt_verify</code> with <code>skip_finalize</code> on each — and both channels reported <code>chan_pending</code> at exactly the outpoints the funding addresses resolve to in the unsigned transaction, with the mempool clear, in under a second. Nothing in that test signs anything; the absence is the assertion.</p>
+    </div>
+    <div class="note">
+      <span class="lbl">Still a deliberate omission</span><code>base_psbt</code> chaining, which LND documents as a way to accumulate outputs across sequential opens. Its old rejection was "we build the transaction ourselves", and that is no longer true — Sparrow builds it. The reason that survives is better: chaining makes LND the assembler, so there is never a single moment at which the whole output set is checked against the whole plan. Our verifier checks all <em>n</em> outputs at once, which is what catches a swapped, missing or duplicated one. Chaining defeats the check this tool exists for.
     </div>
   </div>
 </section>
 
 <section>
   <div class="band">
-    <div class="gut eyebrow"><b>Constraint</b>the ten minutes</div>
-    <h2>Budgeting the window</h2>
-    <p>An LND peer forgets a pending channel after roughly ten minutes, and LND's own docs concede there's no reliable way to know the deadline for a non-LND peer. With <em>n</em> parallel streams there are <em>n</em> clocks starting at slightly different moments, so the real budget is the earliest one. The app shows a single countdown: the minimum remaining across all streams.</p>
-    <p>Machine work inside that window is trivial — well under a minute for a realistic batch. Effectively the entire budget belongs to <strong>humans handling hardware</strong>. That reframing is what the phase model below is built on.</p>
-    <div class="gauge wide">
-      <div class="scale">
-        <div class="ticks"></div>
-        <div class="seg fixed" style="left:0; width:7%"><span>RPC</span></div>
-        <div class="seg sign" style="left:7%; width:43%"><span>signing rounds — measured in rehearsal</span></div>
-        <div class="seg over" style="left:50%; width:50%"><span>margin held in reserve for one retry</span></div>
-        <div class="abort" style="left:50%"></div>
-      </div>
-      <div class="axis"><span>0:00</span><span>2:00</span><span>4:00</span><span>6:00</span><span>8:00</span><span>10:00</span></div>
-      <div class="key">
-        <span><i style="background:var(--teal-soft); border:1px solid var(--teal)"></i>App + LND round-trips (~30 s)</span>
-        <span><i style="background:var(--amber-soft)"></i>Signing — the only variable</span>
-        <span><i style="background:var(--hazard-soft)"></i>Abort threshold at 5:00</span>
-      </div>
-    </div>
-    <p>The 5:00 line is a hard gate, not a warning: if rehearsal showed a signing round-trip slower than five minutes, the app will not arm the batch. Note what running out of time now costs, though. Because nothing is published until the step 8 gate, a lapsed window strands no channels and spends no fees — it costs one more signing round. The clock is an inconvenience, not a hazard.</p>
-  </div>
-</section>
-
-<section>
-  <div class="band">
-    <div class="gut eyebrow"><b>Model</b>three phases</div>
-    <h2>Move every slow thing outside the clock</h2>
-    <p>The reason the manual process is stressful is that it begins the countdown before anyone knows whether the signing setup works. Splitting the run into a rehearsal, an armed window, and a settlement pass means the clock only ever covers work whose duration has already been measured.</p>
-
-    <div class="phase untimed wide">
-      <div class="hd"><span class="num">0</span><h3>Rehearsal</h3><span class="clock">no clock running</span></div>
-      <p class="dim">No funding streams are open, so nothing can time out. Everything here is repeatable and free.</p>
-      <ol>
-        <li><strong>Peer pre-flight.</strong> Connect to each peer, validate the key on the curve, and read what LND's own gossip graph knows — alias, addresses, and the capacities of the channels that peer already has. That last is the only evidence available about what it will accept, and it is evidence rather than a limit. <strong>Do not promise "usable after <em>k</em> confirmations" here: <code>minimum_depth</code> cannot be read.</strong> The peer states it in <code>accept_channel</code>; LND stores it as <code>OpenChannel.NumConfsRequired</code> and exposes it over no RPC — <code>min_accept_depth</code> appears in <code>lnrpc</code> only on <code>ChannelAcceptResponse</code>, which is the <em>responder's</em> side of somebody else's channel. What can be shown up front is a prediction from LND's own default policy (3 to 6, scaled by capacity), labelled as one. The real figure is learned in Phase 2, after the fact — see the confirmation watch.</li>
-        <li><strong>Reserve arithmetic.</strong> Ask LND, don't guess: <code>WalletKit.RequiredReserve</code>, compared against the balance LND itself will judge — the node's own unspent witness outputs in the <em>default</em> account, unlocked, at <em>zero</em> confirmations, which is what <code>CheckReservedValue</code> sums. Two figures, not one: <code>additional_public_channels = 1</code> is what <code>psbt_verify</code> will demand, because none of the batch is in the channel database yet, and <code>= n</code> is what the node needs once all of them are pending. Block on the first, warn on the second, and add a top-up output to a fresh <code>p2tr</code> node address for any shortfall — <code>CheckReservedValue</code> credits outputs that pay into the wallet, so a top-up inside the batch counts at step 5 with no extra transaction and no wait. Private members do not count at all: <code>enforceNewReservedValue</code> returns early for an unannounced channel.</li>
-        <li><strong>Lock the coin set and the fee rate.</strong> Segwit inputs only, confirmed inputs only, with a change output sized so a CPFP child could pay for itself.</li>
-        <li><strong>Choose the forwarding policy, per peer.</strong> It belongs here and it belongs <em>in the plan document, beside the amounts</em>, because it is the same decision: a channel's capacity and what it will charge to route are chosen together or the second one is not chosen at all. Nobody is asked again — Phase 2 applies it in a loop with no human in it — and a channel with no policy is not neutral, it is LND's defaults of 1000 msat and 1 ppm, which on a large channel is close to free routing for whoever notices first. A policy LND would refuse is refused here too, where it costs nothing: <code>UpdateChannelPolicy</code> reports an invalid CLTV delta <em>inside a successful response</em>, and by Phase 2 the transaction is public.</li>
-        <li><strong>Dress rehearsal.</strong> Build a decoy PSBT — same inputs, same fee, outputs paying back to the cold wallet — and push it through every signer for real. Confirm each device produces a valid witness, combine and finalize it, run <code>testmempoolaccept</code>, then throw it away.</li>
-        <li><strong>Record the measurement.</strong> The rehearsal's wall-clock signing time becomes the gate on Phase 1.</li>
-      </ol>
-      <p class="dim">This phase catches the two failures that cost the most last time: a signer that produces malformed witnesses, and a reserve shortfall discovered mid-window.</p>
-    </div>
+    <div class="gut eyebrow"><b>Constraint</b>two clocks</div>
+    <h2>They have different owners and different consequences</h2>
+    <p>An earlier revision of this page conflated these into "the ten minutes". They are not one clock, and the dangerous one is not the one anybody watches.</p>
 
     <div class="phase timed wide">
-      <div class="hd"><span class="num">1</span><h3>Armed window</h3><span class="clock">countdown live</span></div>
-      <p class="dim">Steps 1–8 of the sequence above, with the countdown visible throughout. The transaction shape is already decided; only the funding addresses are new.</p>
-      <ul>
-        <li><strong>Re-arm is one action.</strong> If the window lapses, cancel every shim with <code>FundingStateStep{shim_cancel{pending_chan_id}}</code>, reopen the streams for fresh addresses, and re-issue the same transaction with the outputs swapped. Nothing has been broadcast, so nothing is lost — the cost is one more signing round.</li>
-        <li><strong>Sequential fallback.</strong> If signers are too slow to batch at all, the app offers one channel per transaction. More fees, no atomicity, but it completes. Naming this as a supported mode beats discovering it at 9:30 on the clock.</li>
-        <li><strong>Nothing else is clickable.</strong> During the window the UI shows the countdown, the signing tracker, and abort. No settings, no editable fields.</li>
-      </ul>
+      <div class="hd"><span class="num">A</span><h3>Ten minutes — the peer's</h3><span class="clock">steps 2 → 6</span></div>
+      <p class="dim">Our node never expires a PSBT reservation. <code>pruneZombieReservations</code> skips them outright — <em>"these reservations are always initiated by us and the remote peer is likely going to cancel them after some idle time anyway"</em> — so the only clock is the peer's, and it stops at <code>chan_pending</code>, when the reservation completes.</p>
+      <div class="gauge">
+        <div class="scale">
+          <div class="ticks"></div>
+          <div class="seg fixed" style="left:0; width:3%"></div>
+          <div class="seg over" style="left:3%; width:97%"><span>margin — the whole window, unspent</span></div>
+        </div>
+        <div class="axis"><span>0:00</span><span>2:00</span><span>4:00</span><span>6:00</span><span>8:00</span><span>10:00</span></div>
+        <div class="key">
+          <span><i style="background:var(--teal-soft); border:1px solid var(--teal)"></i>Steps 2–6 — measured at 0.55 s for <em>n</em> = 2</span>
+          <span><i style="background:var(--hazard-soft)"></i>Formerly: the signing round</span>
+        </div>
+      </div>
+      <p><strong>That sliver on the left is the point of the whole revision.</strong> The previous design put a cold-storage signing round inside this window and spent a phase model, a dress rehearsal and a 5:00 abort gate on making it fit. With <code>skip_finalize</code> the window contains no signing at all — only RPCs — so the machinery that defended it is gone, along with the reason for it.</p>
+      <p><strong>What blowing clock A costs: a restart.</strong> Nothing was broadcast, <code>shim_cancel</code> still works after a successful <code>psbt_verify</code>, and re-arming is free. Ten minutes is LND's default — <code>chanfunding.DefaultReservationTimeout</code>, checked by a sweeper on <code>lncfg.DefaultZombieSweeperInterval</code> = 1 minute, neither adjustable in a release build, so a peer holds one for at most 11 minutes. Measured against the harness at <strong>10m41s</strong>. A CLN or Eclair peer has its own, and any peer can reconfigure it: design against this as a convention, not a guarantee.</p>
     </div>
 
-    <div class="phase untimed wide">
-      <div class="hd"><span class="num">2</span><h3>Settlement</h3><span class="clock">until confirmed + active</span></div>
-      <p class="dim">The transaction is public and the channels are pending. Two things still need watching.</p>
-      <ul>
-        <li><strong>Close the fee-policy race.</strong> New channels sit at LND's defaults — 1000 msat base, 1 ppm — from the moment they go active. The app takes the channel point from each <code>chan_pending</code>, polls until the channel is active, and applies the intended policy via <code>UpdateChannelPolicy</code> immediately. Policy is chosen per peer back in Phase 0, so this needs no human at all.</li>
-        <li><strong>Confirmation watch.</strong> Track depth — from Core, since LND reports no confirmation count for a pending channel either — and offer the CPFP child from the change output if the batch stalls — <code>winthistle bump</code>, which is a second cold-wallet session rather than a button. Never offer a replacement. The depth to compare against cannot be asked for, so it is <em>observed</em>: the number of confirmations a channel has when it first appears in <code>ListChannels</code> is that peer's <code>minimum_depth</code>, from above. It is authoritative, it arrives far too late to plan with, and it is exactly the right thing to record for the next batch.</li>
-      </ul>
+    <div class="phase timed wide" style="border-left-color:var(--hazard)">
+      <div class="hd"><span class="num">B</span><h3>About 2016 blocks — also the peer's</h3><span class="clock" style="background:var(--hazard-soft); color:var(--hazard)">step 6 → confirmation</span></div>
+      <p class="dim">Roughly two weeks. <code>waitForTimeout</code> counts <code>lncfg.DefaultMaxWaitNumBlocksFundingConf</code> from the channel's broadcast height, and <code>fundingTimeout</code> fires — <em>"only returned for the responder"</em> (<code>funding/manager.go:2914</code>). The peer marks the channel cancelled and forgets it. We never do.</p>
+      <p><strong>Blowing clock B is worse than blowing clock A, and it is the one nothing draws attention to.</strong> Clock A expiring costs a restart. Clock B expiring means the peer has deleted their state — and a funding transaction that confirms <em>afterwards</em> leaves this node holding coins in a 2-of-2 with a counterparty who no longer knows about the channel. Only a force-close gets out of it, and only because the commitment signature was stored at step 6.</p>
+      <p>So the recovery output names clock B <strong>in blocks</strong> — <em>"peers give up at block 887,412, about 13 days"</em> — rather than saying there is time. <code>PendingChannels</code> publishes the countdown as <code>funding_expiry_blocks</code>; the app watches it and warns long before it is urgent.</p>
     </div>
+  </div>
+</section>
+
+<section>
+  <div class="band">
+    <div class="gut eyebrow"><b>Verifier</b>refuse vs report</div>
+    <h2>The difference between a tool and a nanny</h2>
+    <p>The app does not build your transaction, so most of what it could complain about is none of its business. The split is what it will <em>stop</em> for, and what it will merely tell you.</p>
+    <div class="split wide">
+      <div class="card" style="border-left:3px solid var(--hazard)">
+        <span class="lbl" style="color:var(--hazard)">Refuses</span>
+        <p>The transaction does not match the plan you approved, or an invariant is broken. <code>UnnamedOutput</code>, <code>MissingOutput</code>, <code>DuplicateOutput</code>, <code>WrongAmount</code>, <code>LegacyInput</code> (I·3, and LND's own requirement), <code>DuplicateInput</code>, <code>MismatchedUTXO</code>, <code>NoUTXOInfo</code> — and the TXID pin at step 8.</p>
+      </div>
+      <div class="card" style="border-left:3px solid var(--teal)">
+        <span class="lbl">Reports</span>
+        <p>Your fee and change arrangements are yours. <code>ChangeMissing</code>, <code>ChangeTooSmall</code>, <code>FeeTooLow</code>, <code>FeeTooHigh</code>. A batch with no change output has no CPFP lever and therefore no exit but an out-of-band double-spend — worth <em>saying</em>, and not worth refusing over.</p>
+      </div>
+    </div>
+    <div class="note warn">
+      <span class="lbl">Not yet true of the code</span>Today the verifier has no severity at all. <code>plan.Problem</code>'s own comment reads <em>"Every problem is a refusal. There is no severity here on purpose"</em>, and all nine findings above plus the fee and change ones refuse alike. Moving four of them to the existing <code>Verification.Unchecked</code> list — which is there "so that a clean result is not read as a broader guarantee than it is" — is a scheduled change. This box will be wrong in one direction until it lands, and it is better to say which direction than to describe the code as though it had caught up.
+    </div>
+    <p>Two consequences of the app no longer selecting coins. It cannot <em>size</em> a change output for you, only tell you yours is too small. And nothing pre-excludes a legacy coin any more — Sparrow picks the coins, so <code>LegacyInput</code> at step 5 is the first thing that notices, which is why it stays a refusal rather than joining the reports.</p>
   </div>
 </section>
 
@@ -425,28 +445,27 @@ footer p{font-size:.9rem; color:var(--muted)}
   <div class="band">
     <div class="gut eyebrow"><b>Commissioning</b>proving it once</div>
     <h2>The state machine, tested on mainnet, at zero cost</h2>
-    <p>Phase 0 opens no funding streams — that is exactly what makes it untimed, and exactly why it cannot vouch for LND's funding flow. Signers, descriptors and fee arithmetic are the things rehearsal proves. Everything in the sequence from step 2 onward is untested by it.</p>
-    <p>Rather than stand up a signet Lightning network for that, we lean on the property that already governs this design: <strong>nothing is at risk until broadcast.</strong> Every step short of publishing can therefore run against mainnet, against real peers, with real coins that never move. (There <em>is</em> a signet harness, and it has no LND in it at all — two bitcoinds, for the descriptor rescan and the prune horizon, which need chain history rather than peers.)</p>
-    <p>I·1 makes this sharper than a test mode. Because <code>no_publish</code> is set on every channel in the production flow, the probe is <em>not a separate code path</em> — it is the real run with the final action withheld. There is no rehearsal-only branch that could behave differently on the day, and step 9 is the only line of code the probe does not execute.</p>
-    <p>It is <code>winthistle run --stop-before-publish</code>, and the claim above survived being built: composing it forced exactly one branch, an <code>if</code> between <code>arm.Finalize</code> and <code>arm.Publish</code>. Everything above that line runs unconditionally, the flag is read nowhere else, and the type system carries the rest of the argument — <code>Publish</code> takes an <code>*arm.Armed</code> whose raw transaction lives in an unexported field that only <code>Finalize</code> fills. What differs after the branch is not a code path but a fact: nothing was published, so the run terminates through the abort path, which is the other half of what the probe proves.</p>
+    <p>Regtest proves the code path. It cannot prove <em>these</em> peers, <em>this</em> node and <em>this</em> wallet, and no harness substitutes for that. So we lean on the property that already governs this design: <strong>nothing is at risk until broadcast.</strong> Every step short of publishing can run against mainnet, against real peers, with real coins that never move.</p>
+    <p>I·1 makes this sharper than a test mode. Because <code>no_publish</code> is set on every channel in the production flow, the probe is <em>not a separate code path</em> — it is the real run with the final action withheld. Composing it forced <strong>exactly one branch</strong>, an <code>if</code> before the publish call; everything above that line runs unconditionally, and the type system carries the rest of the argument, since <code>Publish</code> takes a value whose raw transaction lives in an unexported field only one constructor fills.</p>
     <div class="phase untimed wide">
       <div class="hd"><span class="num">C</span><h3>Cold probe</h3><span class="clock">run once per setup</span></div>
-      <p class="dim">Steps 1 through 8 exactly as production runs them. Step 9 is simply not taken.</p>
+      <p class="dim">Steps 1 through 7 exactly as production runs them. Step 8 is simply not taken.</p>
       <ol>
-        <li>Open the streams, build and verify a genuine PSBT, sign it with the real devices, combine and finalize in-app, and confirm <code>testmempoolaccept</code> passes.</li>
-        <li>Finalize all <em>n</em> channels and watch every <code>chan_pending</code> arrive. Confirm the gate at step 8 closes as expected — this is the assertion the whole safety argument rests on.</li>
+        <li>Open the streams, print the plan, build a genuine transaction in the real wallet, and verify it.</li>
+        <li>Watch every <code>chan_pending</code> arrive and confirm the gate at step 6 closes as expected — this is the assertion the whole safety argument rests on, and it now happens with nothing signed.</li>
         <li>Export the channel backups, verifying that step works on pending channels.</li>
-        <li>Stop. Then clear up, which the run does itself rather than suggesting: <code>AbandonChannel</code> for each pending channel — expect <code>pending_funding_shim_only</code> to be refused and the blunt flag to be asked for, which is the normal route here and not a warning sign — <code>shim_cancel</code> for any stream that never finalized, and release the Core UTXO locks.</li>
-        <li>Separately, deliberately let one stream lapse without finalizing, to observe the peer timeout for real rather than trusting the ten-minute figure.</li>
+        <li>Sign it for real, so the devices and the descriptor are exercised, and confirm the TXID has not moved.</li>
+        <li>Stop. Then clear up, which the run does itself rather than suggesting: <code>AbandonChannel</code> for each pending channel — expect <code>pending_funding_shim_only</code> to be refused and the blunt flag to be asked for, which is the normal route here and not a warning sign — and <code>shim_cancel</code> for any stream that never verified.</li>
+        <li>Separately, deliberately let one stream lapse without verifying, to observe the peer timeout for real rather than trusting the ten-minute figure.</li>
       </ol>
       <p class="dim">Cost: nothing on-chain. The only externality is a briefly held reservation on each peer, which their own timeout clears.</p>
     </div>
-    <p>That covers most of the questions the design has to settle. The two it cannot reach both sit past the broadcast line — whether <code>UpdateChannelPolicy</code> accepts a pending-but-inactive channel point, and the settlement path as a whole — and both have since been answered on regtest instead, where a batch really can be published and then watched to confirmation. That is a weaker result than a probe against real peers and it is the right kind of weaker: the code path is the same one, and only the counterparties are not. The remaining exposure is settled by making the <strong>first live run a deliberately small one</strong> — two channels at the smallest size the chosen peers accept — treated as commissioning rather than as a real allocation.</p>
+    <p>The remaining exposure past the broadcast line is settled by making the <strong>first live run a deliberately small one</strong> — two channels at the smallest size the chosen peers accept — treated as commissioning rather than as a real allocation.</p>
     <div class="note">
-      <span class="lbl">Consequence for the build order</span>The abort and recovery paths must therefore be working <em>before</em> the first mainnet probe, since the probe's normal termination <em>is</em> the abort path. That inverts the usual order: <code>shim_cancel</code>, <code>AbandonChannel</code> and the UTXO-lock release ship first, and the happy path is built on top of them.
+      <span class="lbl">Consequence for the build order</span>The abort and recovery paths must be working <em>before</em> the first mainnet probe, since the probe's normal termination <em>is</em> the abort path. That inverts the usual order: <code>shim_cancel</code> and <code>AbandonChannel</code> ship first, and the happy path is built on top of them.
     </div>
     <div class="note warn">
-      <span class="lbl">Which abandon flag</span>Try <code>pending_funding_shim_only</code> first: it refuses unless the channel is both shim-funded and pending, so it structurally cannot touch a confirmed channel. <strong>On regtest it refuses every channel this app opens.</strong> <code>rpcserver.go</code> infers "shim funded" from <code>ThawHeight &gt; 0</code> — there is a standing <code>TODO</code> about storing the funding type properly — and a plain PSBT open carries no thaw height, so the safe flag rejects with <em>"channel … is not externally funded or not pending"</em> on the ordinary path. The fallback to <code>i_know_what_i_am_doing</code> is therefore the standard route rather than an edge case, which moves the burden of safety off LND's flag and onto ours: before escalating, the app re-establishes the missing half of the check itself by asking <code>PendingChannels</code>. If the channel is not pending it refuses outright and offers no confirmation, because there is nothing a human could usefully authorise there.
+      <span class="lbl">Which abandon flag</span>Try <code>pending_funding_shim_only</code> first: it refuses unless the channel is both shim-funded and pending, so it structurally cannot touch a confirmed channel. <strong>It refuses every channel this app opens.</strong> <code>rpcserver.go:3236</code> infers "shim funded" from <code>ThawHeight &gt; 0</code> — there is a standing <code>TODO</code> about storing the funding type properly — and a plain PSBT open carries no thaw height, so the safe flag rejects with <em>"channel … is not externally funded or not pending"</em> on the ordinary path. Confirmed again on the new sequence: channels that reached <code>chan_pending</code> via <code>skip_finalize</code> are refused the same way. So the fallback to <code>i_know_what_i_am_doing</code> is the standard route, which moves the burden of safety off LND's flag and onto ours: before escalating, the app re-establishes the missing half of the check itself by asking <code>PendingChannels</code>. If the channel is not pending it refuses outright and offers no confirmation, because there is nothing a human could usefully authorise there.
     </div>
   </div>
 </section>
@@ -455,56 +474,37 @@ footer p{font-size:.9rem; color:var(--muted)}
   <div class="band">
     <div class="gut eyebrow"><b>Architecture</b>components</div>
     <h2>Where the pieces live</h2>
-    <p>The trust boundary is the design's most important line. The app holds an LND admin macaroon and Core RPC credentials; it never holds key material, and it is never exposed to the internet.</p>
-    <pre><i>DESKTOP — where the devices are</i>          <i>NODE — loopback only</i>
+    <p>The trust boundary is the design's most important line. The app holds a narrow LND macaroon; it never holds key material, it opens no listening port, and it makes no outbound connection except to your LND.</p>
+    <pre><i>WHEREVER YOU WORK</i>                        <i>NODE</i>
 
-<b>browser</b> ─── ssh tunnel ──────────────▶  <b>winthistle</b>
-   │  wizard, countdown, PSBT up/down          ├─ gRPC ─▶ <b>lnd</b>
-   │                                           ├─ RPC ──▶ <b>bitcoind</b>  <i>(optional)</i>
-<b>Sparrow</b>  builds and/or signs                 └─ file ─▶ <b>sqlite</b>    <i>run journal</i>
-   │
+<b>terminal</b> ──── ssh, or the same box ────▶  <b>winthistle</b>
+   │  the plan, the countdown, the prompts      ├─ gRPC ─▶ <b>lnd</b>
+   │                                            └─ file ─▶ <b>sqlite</b>  <i>run journal</i>
+<b>Sparrow</b>  builds, then signs
+   │  <i>.psbt on disk, both directions</i>
 <b>signers</b>  USB · SD card · QR
    <i>─ ─ ─ ─ ─ trust boundary: keys never cross ─ ─ ─ ─ ─</i></pre>
-    <p>Note what carries the PSBT between the two machines: <strong>the browser</strong>. The UI is viewed on the desktop through the tunnel, so a download hands the PSBT to whatever wallet is on that desktop &mdash; Sparrow, or anything else that reads a <code>.psbt</code> &mdash; and an upload hands it back — no file sync, no shared mount, no extra daemon. The topology most people already have turns out to be the transport.</p>
+    <p>Note what carries the PSBT: <strong>a file</strong>. The app writes one and reads one back, and Sparrow is on the same desktop as the devices. No browser, no tunnel for the transport, no file sync, no shared mount, no extra daemon. Bitcoin Core does not appear at all.</p>
     <div class="split wide">
       <div class="card">
-        <span class="lbl">Two engines, one safety model</span>
-        <p>With Core, the app builds the transaction itself and owns coin selection, change and fee rate. Without it, Sparrow builds and the app verifies. The LND sequence and all four invariants are identical either way — see below.</p>
+        <span class="lbl">One transport, one contract</span>
+        <p>The contract is BIP174: <strong>any wallet that round-trips a PSBT works</strong>. Binary or base64, settled by the magic bytes. In-house animated QR is deliberately out of scope; a QR-only signer is reached through a desktop wallet that already does it.</p>
       </div>
       <div class="card">
         <span class="lbl">Resumable by default</span>
-        <p>A closed tab must never orphan a funding stream. SQLite records each pending channel ID against its funding address and output index, per-signer signature state, and the finalized raw transaction — written <em>before</em> the publishing call, so the artifacts survive a crash mid-publish.</p>
+        <p>SQLite records each pending channel ID against its funding outpoint, and the raw transaction — written <em>before</em> the call it describes, so a crash mid-publish leaves artifacts rather than mystery.</p>
       </div>
       <div class="card">
-        <span class="lbl">Transport, not typing</span>
-        <p>Base64 in and out, and file download and upload — the topology above is why that is enough. The contract is BIP174, not an application: <strong>any wallet that round-trips a PSBT against the descriptor works</strong>, and only <em>partial</em> signatures may come back. In-house animated QR is deliberately out of scope; a QR-only signer is reached through a desktop wallet that already does it.</p>
+        <span class="lbl">One front end, on purpose</span>
+        <p>An interactive CLI with one countdown line. Not a TUI: the only thing wanting live redraw is clock A, everything else is prose the CLI already renders, and a second renderer is a second place for copy to be wrong.</p>
       </div>
       <div class="card">
         <span class="lbl">Commissioning without a testnet</span>
-        <p>Harnesses exist — regtest for the failure branches, a Core-only signet pair for the descriptor rescan — but neither is what vouches for the funding flow. The state machine is proven on mainnet with real peers and zero on-chain cost, by exercising every step up to but excluding broadcast. See <em>Commissioning</em> below — that mode is a first-class part of v1, not a debug affordance.</p>
+        <p>A regtest harness covers the failure branches, but it is not what vouches for the funding flow. The state machine is proven on mainnet with real peers and zero on-chain cost, by exercising every step up to but excluding broadcast.</p>
       </div>
     </div>
-
-    <h3 style="margin-top:1.6rem">Two engines</h3>
-    <p>Requiring a fully-synced, unpruned Bitcoin Core is the heaviest thing in the prerequisites, and for a lot of otherwise well-run nodes it is a blocker — Umbrel and friends often prune by default, and a descriptor import needs blocks a pruned node has thrown away. So Core is optional, and the difference between the two modes is convenience, not safety.</p>
-    <div class="tblwrap wide">
-      <table>
-        <thead><tr><th></th><th>Directed — with Core</th><th>Assisted — without</th></tr></thead>
-        <tbody>
-          <tr><td>Builds the PSBT</td><td>The app, via <code>walletcreatefundedpsbt</code></td><td>Sparrow, from a batch plan the app emits</td></tr>
-          <tr><td>Coin selection, change, fee rate</td><td>App-controlled and exact</td><td>Sparrow's, checked by the app against the plan</td></tr>
-          <tr><td>Combine and finalize</td><td>App</td><td>App — unchanged, this is what preserves I·2</td></tr>
-          <tr><td>Pre-flight validation</td><td>Local script execution <em>plus</em> <code>testmempoolaccept</code></td><td>Local script execution only</td></tr>
-          <tr><td>Setup burden</td><td>Descriptor import and a rescan</td><td>None beyond LND</td></tr>
-        </tbody>
-      </table>
-    </div>
-    <p>In assisted mode the app emits a <strong>batch plan</strong> — every funding address with its exact amount, the reserve top-up, a target fee rate and the input constraints — and then verifies what comes back, output by output: each funding script present exactly once at exactly the right amount, no outputs to scripts the plan does not name, fee rate within tolerance, every input segwit and confirmed. That check is strictly mechanical and it is the same check LND's own <code>psbt_verify</code> will repeat at step 5.</p>
     <div class="note">
-      <span class="lbl">On losing <code>testmempoolaccept</code></span>Less of a loss than it sounds. Executing every input's script locally against the witness data in the PSBT answers the question we actually care about — <em>will each input validate</em> — more directly than a mempool acceptance test does, and needs no chain data. What <code>testmempoolaccept</code> adds on top is node <em>policy</em>: min relay fee, standardness, ancestor limits. Worth having, and worth a warning when it is unavailable, but not load-bearing.
-    </div>
-    <div class="note warn">
-      <span class="lbl">Where assisted mode is genuinely weaker</span>I·2 says no external party ever holds a broadcastable transaction. In assisted mode Sparrow builds and signs, so the operator must stop short of Sparrow's own broadcast button. For <em>m</em>-of-<em>n</em> that resolves cleanly: let Sparrow apply <em>m</em>−1 signatures and have the app collect the last partial, and Sparrow never holds a complete transaction. For single-sig it cannot be resolved structurally, which is the same conclusion I·2 already reaches — single-sig funding wants a genuinely air-gapped signer.
+      <span class="lbl">What the harness still needs that the app does not</span>The application drops Bitcoin Core, but a regtest test still needs something to build and sign a funding transaction — something to play Sparrow's part. Core's wallet is the natural stand-in, so the Core client and the simulated multisig cold wallet survive <em>inside the harness</em>. That is not a back door for an app-builds-the-transaction mode; it is the test fixture playing the operator.
     </div>
   </div>
 </section>
@@ -513,17 +513,15 @@ footer p{font-size:.9rem; color:var(--muted)}
   <div class="band">
     <div class="gut eyebrow"><b>Requires</b>prerequisites</div>
     <h2>What the operator has to bring</h2>
-    <p>Nothing here is exotic, but the descriptor and the macaroon both have to be exactly right, and a wrong one of either produces a setup that looks healthy and fails at the worst moment. Both are therefore verified during setup rather than trusted.</p>
+    <p>Less than the previous revision asked for, and the reduction is the point: no Bitcoin Core, no descriptor import, no rescan, no watch-only wallet, no per-device configuration.</p>
     <div class="tblwrap wide">
       <table>
         <thead><tr><th>Component</th><th>Requirement</th><th>Why this floor</th></tr></thead>
         <tbody>
-          <tr><td>LND</td><td>0.18+, reachable over gRPC, with the <code>walletrpc</code> subserver present (it is, in standard builds)</td><td><code>RequiredReserve</code> and <code>PublishTransaction</code> both live in WalletKit</td></tr>
-          <tr><td>Bitcoin Core</td><td><em>Optional.</em> If used: 25+, wallet support on, <strong>not pruned below the cold wallet's birthday</strong></td><td>Buys full coin control, but a rescan needs the blocks. Without it the tool runs in assisted mode — see <em>Two engines</em></td></tr>
-          <tr><td>Cold wallet descriptors</td><td>Receive and change descriptors with full key-origin prefixes and checksums</td><td>Origin info is what lets a hardware signer recognise its own key; without it devices refuse to sign</td></tr>
-          <tr><td>Signers</td><td><em>m</em> devices, each with the multisig wallet already registered, and a way to hand each one a file &mdash; USB, SD card, or a desktop wallet that does the QR round trip</td><td>Registering a multisig config on-device is slow; it must not happen inside the window. The camera is the desktop wallet's, not this tool's &mdash; see <em>Transport, not typing</em></td></tr>
+          <tr><td>LND</td><td>Reachable over gRPC, with the <code>walletrpc</code> subserver present (it is, in standard builds)</td><td><code>RequiredReserve</code> and <code>PublishTransaction</code> both live in WalletKit</td></tr>
+          <tr><td>A wallet</td><td>Sparrow, or anything that builds a transaction to addresses you paste in and exports a PSBT</td><td>The contract is BIP174. Hot, cold, single-sig or multisig — which it is does not matter to this program</td></tr>
           <tr><td>Peers</td><td><code>pubkey@host:port</code> for each, and their minimum channel size</td><td>Peer limits come from <code>accept_channel</code>, so a rejected size is discovered at step 2, on the clock</td></tr>
-          <tr><td>Coins</td><td>Confirmed, segwit-only UTXOs covering capacity + reserve top-up + fee + change</td><td>I·3: legacy inputs are malleable and LND rejects them outright</td></tr>
+          <tr><td>Coins</td><td>Confirmed, segwit-only UTXOs covering capacity + reserve top-up + fee + change</td><td>I·3: legacy inputs are malleable and LND rejects them outright. Nothing pre-filters them now, so this is on you until step 5</td></tr>
         </tbody>
       </table>
     </div>
@@ -531,43 +529,27 @@ footer p{font-size:.9rem; color:var(--muted)}
     <h3 style="margin-top:1.4rem">A macaroon that can do nothing else</h3>
     <p>Do not hand this tool <code>admin.macaroon</code>. LND's <code>bakemacaroon</code> accepts a special <code>uri</code> entity whose action is a literal gRPC method path, so the credential can be restricted to precisely the calls the tool makes — and to nothing else. Broad entities are too coarse to be safe here: <code>offchain:write</code> would also grant <code>SendPayment</code>, and <code>onchain:write</code> would grant <code>SendCoins</code>.</p>
     <pre>lncli bakemacaroon --save_to winthistle.macaroon \
-  <i># read</i>
-  uri:/lnrpc.Lightning/GetInfo \
-  uri:/lnrpc.Lightning/ListPeers \
-  uri:/lnrpc.Lightning/ListChannels \
-  uri:/lnrpc.Lightning/PendingChannels \
-  uri:/lnrpc.Lightning/WalletBalance \
-  uri:/lnrpc.Lightning/SubscribeChannelEvents \
-  uri:/lnrpc.Lightning/ExportAllChannelBackups \
-  uri:/walletrpc.WalletKit/RequiredReserve \
-  uri:/walletrpc.WalletKit/ListUnspent \
-  uri:/walletrpc.WalletKit/ListLeases \
-  <i># act</i>
+  uri:/lnrpc.Lightning/AbandonChannel \
+  uri:/lnrpc.Lightning/CheckMacaroonPermissions \
   uri:/lnrpc.Lightning/ConnectPeer \
+  uri:/lnrpc.Lightning/ExportAllChannelBackups \
+  uri:/lnrpc.Lightning/FundingStateStep \
+  uri:/lnrpc.Lightning/GetInfo \
+  uri:/lnrpc.Lightning/GetNodeInfo \
+  uri:/lnrpc.Lightning/ListChannels \
+  uri:/lnrpc.Lightning/ListPeers \
   uri:/lnrpc.Lightning/NewAddress \
   uri:/lnrpc.Lightning/OpenChannel \
-  uri:/lnrpc.Lightning/FundingStateStep \
+  uri:/lnrpc.Lightning/PendingChannels \
   uri:/lnrpc.Lightning/UpdateChannelPolicy \
-  uri:/lnrpc.Lightning/AbandonChannel \
-  uri:/walletrpc.WalletKit/PublishTransaction</pre>
-    <p>Seventeen methods. <strong>The credential cannot send coins, cannot send payments, cannot close a channel, and cannot sign a message.</strong> Worth checking the list against the sequence yourself rather than trusting it — if a method is missing the tool fails loudly at setup, which is the right direction to fail in. This list is illustrative and will rot; <code>make macaroon</code> prints the one that matches the build in front of you, and a test fails if the two disagree.</p>
-
-    <h3 style="margin-top:1.4rem">The watch-only wallet</h3>
-    <p>One private-key-less descriptor wallet in Core, holding the cold wallet's descriptors. This is what gives us coin selection, change derivation, exact fee rates and PSBT construction with the <code>bip32</code> derivations signers need — for no bespoke cryptography.</p>
-    <pre>bitcoin-cli createwallet "winthistle-cold" <b>true</b> true "" false <b>true</b> true
-<i>#                        disable_private_keys ↑         descriptors ↑</i>
-
-bitcoin-cli -rpcwallet=winthistle-cold importdescriptors '[
-  {"desc":"wsh(sortedmulti(2,[<i>aabbccdd</i>/48h/0h/0h/2h]<i>xpubA</i>/0/*,…))#<i>cksum</i>",
-   "active":true, "internal":false, "range":[0,999], "timestamp":<b>1700000000</b>},
-  {"desc":"wsh(sortedmulti(2,[<i>aabbccdd</i>/48h/0h/0h/2h]<i>xpubA</i>/1/*,…))#<i>cksum</i>",
-   "active":true, "internal":true,  "range":[0,999], "timestamp":<b>1700000000</b>}
-]'</pre>
+  uri:/walletrpc.WalletKit/ListLeases \
+  uri:/walletrpc.WalletKit/ListUnspent \
+  uri:/walletrpc.WalletKit/PublishTransaction \
+  uri:/walletrpc.WalletKit/RequiredReserve</pre>
+    <p>Seventeen methods. <strong>The credential cannot send coins, cannot send payments, cannot close a channel, and cannot sign a message.</strong> This list is illustrative and will rot; <code>winthistle print-macaroon-command</code> prints the one that matches the build in front of you, generated from the method registry, and a test fails if the two disagree.</p>
     <div class="note warn">
-      <span class="lbl">Four setup traps</span><strong>The timestamp is the wallet's birthday, not now.</strong> Pass "now" and Core will report a zero balance because it never scanned the blocks your coins arrived in. And the rescan it does perform takes minutes to hours — so import during setup, never during a batch. <em>Nothing will tell you this has happened.</em> That the birthday is honoured at all is now proved on signet — a wallet imported with a birthday a month before its coins finds them, over a chain with real history. What that same mechanism costs is the other side of it: a wallet imported with a birthday <em>later</em> than its coins imports just as cleanly, derives the correct addresses, passes the address check and reports no error, and is then indistinguishable from a correct wallet that has simply never been paid. A zero balance is therefore not evidence of anything, and no check can be added that would tell the two apart without refusing genuinely new wallets. The birthday is the one input here that cannot be validated, only got right. <strong>Second: <code>sortedmulti</code> and <code>multi</code> produce different addresses from identical keys — but not at every index.</strong> <code>sortedmulti</code> sorts the <em>derived</em> pubkeys, so the two agree wherever the keys already happen to be in ascending order: about half the indices for two keys. So the wrong wallet is not empty, it is <em>plausible</em> — measured against the harness's own 2-of-2, a <code>multi()</code>-where-you-wanted-<code>sortedmulti()</code> wallet found most of the cold wallet's balance, and index 0 agreed on both fixtures. A partial balance is a far better disguise than zero, and an operator who compared one address would have passed a wrong descriptor. <strong>Third: a descriptor with a <code>&lt;0;1&gt;</code> multipath step is silently halved.</strong> <code>getdescriptorinfo</code> returns the first branch alone, under a different checksum from the one it was given, so pasting one line into both fields imports the receive branch where the change branch belongs — and the wallet then derives change to the addresses the batch is also funded from. Split it into two descriptors. <strong>Fourth: Core cannot forget a descriptor.</strong> A wallet holds one active receive branch and one active change branch; importing a corrected pair <em>deactivates</em> the wrong pair rather than removing it, and a deactivated descriptor's coins are still in <code>listunspent</code>. There is no RPC that removes one. So a descriptor that failed the address check is corrected by starting a new wallet, not by importing over the top.
+      <span class="lbl">It rotted, and the count hid it</span>The previous revision of this page listed <code>WalletBalance</code> and <code>SubscribeChannelEvents</code>, which this build does not call at all, and omitted <code>CheckMacaroonPermissions</code> and <code>GetNodeInfo</code>, which it does — while discussing both of those elsewhere on the same page. Both lists were seventeen entries long, so "Seventeen methods" stayed true and nothing looked wrong. An operator following it would have baked two permissions for nothing and had <code>doctor</code> fail on two that were missing. Copy the generated one; do not read this block.
     </div>
-    <p>Which is why setup ends in a round-trip check rather than a success message: the tool derives the first several receive and change addresses from the imported descriptors and asks the operator to confirm they match what their own wallet software displays. Several rather than one, for the reason above — five leaves roughly a three per cent chance of a whole sample agreeing for a 2-of-2, and less for larger quorums. That single comparison catches wrong derivation paths, <code>multi</code>-versus-<code>sortedmulti</code> errors, transposed keys, and truncated xpubs — the whole family of descriptor mistakes, at the only moment when catching them is free.</p>
-    <p>It is also the only step here whose evidence is a person, so the answer is written down: <code>winthistle setup</code> records it in the run journal against the exact descriptors that were compared, and <code>winthistle doctor</code> reads it back. Keying it to the descriptors is what stops it ageing into a claim — an answer given before a re-import describes a pair the wallet no longer derives from, and the pre-flight says so rather than believing it. A wallet whose descriptors were explicitly rejected is refused outright — by the pre-flight and by the run itself, before it asks LND anything, since a refusal that early has cost nothing; one nobody has ever compared is a warning, because a wallet imported by hand is a working wallet that has not been checked. There is no flag that overrides the refusal, for the same reason there is no flag that answers the question: the way past it is to compare the addresses again, or to start a new wallet.</p>
 
     <h3 style="margin-top:1.4rem">Validating peers without asking anyone</h3>
     <p>All of it can be done through LND, and most of it without touching the network at all. Three tiers of certainty:</p>
@@ -576,92 +558,50 @@ bitcoin-cli -rpcwallet=winthistle-cold importdescriptors '[
         <thead><tr><th>Check</th><th>Source</th><th>Cost</th></tr></thead>
         <tbody>
           <tr><td>Pubkey is well-formed</td><td>Local: 33 bytes, compressed, a real point on secp256k1</td><td>None — catches typos and truncation instantly</td></tr>
-          <tr><td>Node exists; alias, addresses, channel count, total capacity</td><td><code>GetNodeInfo</code> — reads LND's own gossip graph, not the network</td><td>None. Also lets the UI show a name instead of a hex blob, which is its own error check</td></tr>
+          <tr><td>Node exists; alias, addresses, channel count, total capacity</td><td><code>GetNodeInfo</code> — reads LND's own gossip graph, not the network</td><td>None. Also lets the plan show a name instead of a hex blob, which is its own error check</td></tr>
           <tr><td>Plausible channel size</td><td>The capacities of that node's existing channels, from the same local graph</td><td>None. The smallest and median capacity are a good empirical proxy for what they accept</td></tr>
           <tr><td>Authoritative minimum, reserve, HTLC limits, accepted commitment type</td><td>A shim probe: open the stream and read <code>accept_channel</code>, or read the rejection text — peers do state their minimum in it</td><td><strong>Free only when it is refused.</strong> A probe the peer accepts holds one of its pending-channel slots for about eleven minutes — see below</td></tr>
         </tbody>
       </table>
     </div>
-    <p>There is no gossip field for "minimum channel size" — it is enforced conversationally, in <code>accept_channel</code>. So the only authoritative check is to ask, and third-party Lightning explorers stay out of the picture entirely. Asking is a shim probe that is then cancelled with <code>shim_cancel</code>.</p>
-
+    <p>There is no gossip field for "minimum channel size" — it is enforced conversationally, in <code>accept_channel</code>. So the only authoritative check is to ask, and third-party Lightning explorers stay out of the picture entirely.</p>
     <div class="note warn">
-      <span class="lbl">The probe is not free</span>Reading <code>handleFundingOpen</code> in order: the peer counts its live reservations for us plus its pending channels with no thaw height, and refuses with <code>ErrMaxPendingChannels</code> if that count already reaches <code>--maxpendingchannels</code> — <strong>LND's default for which is 1</strong>. Only after every limit check does it call <code>InitChannelReservation</code> and send <code>accept_channel</code>. So the cost splits in two, in opposite directions. A probe the peer <strong>refuses</strong> costs nothing at all: no reservation is created, so probing downwards to find a peer's minimum is free however many times you do it. A probe the peer <strong>accepts</strong> costs one of that peer's pending-channel slots, and <code>shim_cancel</code> does not give it back — <code>CancelFundingIntent</code> deletes an entry in our own wallet's map and sends the peer nothing. Only the peer's own zombie sweeper releases it, after ten minutes plus up to a minute of sweeper granularity.
+      <span class="lbl">The probe is not free</span>Reading <code>handleFundingOpen</code> in order: the peer counts its live reservations for us plus its pending channels with no thaw height, and refuses with <code>ErrMaxPendingChannels</code> if that count already reaches <code>--maxpendingchannels</code> — <strong>LND's default for which is 1</strong>. Only after every limit check does it call <code>InitChannelReservation</code> and send <code>accept_channel</code>. So the cost splits in two, in opposite directions. A probe the peer <strong>refuses</strong> costs nothing at all: no reservation is created, so probing downwards to find a peer's minimum is free however many times you do it. A probe the peer <strong>accepts</strong> costs one of that peer's pending-channel slots, and <code>shim_cancel</code> does not give it back — <code>CancelFundingIntent</code> deletes an entry in our own wallet's map and sends the peer nothing. Only the peer's own zombie sweeper releases it.
+      <p style="margin-top:.6rem">So a run that probes all <em>n</em> peers and then opens <strong>collides with its own probes</strong>: against a peer running the default, step 2 is refused with <em>"Number of pending channels exceed maximum"</em>, for a reason we created ourselves a minute earlier. Probe as a separate, earlier act, when a peer's minimum is genuinely unknown — then wait out the hold. A successful probe <em>is</em> step 2 with the answer thrown away.</p>
     </div>
-
-    <p>Which changes where the probe belongs. A Phase 0 that probes all <em>n</em> peers and then arms <strong>collides with its own probes</strong>: against a peer running the default, step 2 is refused with <em>"Number of pending channels exceed maximum"</em> — on the clock, with the cold wallet out, for a reason we created ourselves a minute earlier. Three consequences:</p>
-    <ul>
-      <li><strong>Do not probe as part of arming.</strong> A successful probe <em>is</em> step 2 with the answer thrown away: same RPC, same <code>no_publish</code> shim, same reservation, same ten minutes. If the batch is ready to arm, arm it — the open asks the same question and keeps what comes back.</li>
-      <li><strong>Probe as a separate, earlier act</strong>, when a peer's minimum is genuinely unknown and the graph's capacity evidence is not good enough. Then wait out the hold before arming; the app gates on it rather than trusting the operator to remember.</li>
-      <li><strong>The probe therefore starts a clock</strong> — the one property Phase 0 was defined by not having. Worth saying out loud in the UI rather than discovering.</li>
-    </ul>
-
-    <p>One thing to know about reading the refusal: the peer's own words do survive, because <code>failFundingFlow</code> forwards the real text for a reservation error, a funding error or a channel-acceptor error. They arrive under a claim that is not true, though. <code>handleErrorMsg</code> wraps <em>every</em> peer error in <code>chanfunding.ErrRemoteCanceled</code> when the reservation is a PSBT one, so a peer that refused in thirty milliseconds because the channel was too small arrives saying it <em>"possibly timed out"</em>. Strip the wrapper and report what the peer actually said, alongside how long it actually took.</p>
+    <p>One thing to know about reading the refusal: the peer's own words do survive, because <code>failFundingFlow</code> forwards the real text. They arrive under a claim that is not true, though. <code>handleErrorMsg</code> wraps <em>every</em> peer error in <code>chanfunding.ErrRemoteCanceled</code> when the reservation is a PSBT one, so a peer that refused in thirty milliseconds because the channel was too small arrives saying it <em>"possibly timed out"</em>. Strip the wrapper and report what the peer actually said, alongside how long it actually took.</p>
   </div>
 </section>
 
 <section>
   <div class="band">
     <div class="gut eyebrow"><b>Hosting</b>and configuration</div>
-    <h2>One binary, two sockets, no internet</h2>
-    <p>A single static binary plus a SQLite file. It serves the UI, talks to LND over gRPC and to Core over JSON-RPC, and has no other dependencies and no cloud component. Three deployment shapes, in descending order of how much I would recommend them:</p>
-    <div class="split wide">
-      <div class="card">
-        <span class="lbl">On the node — preferred</span>
-        <p>Runs on the LND box, bound to loopback. Both credentials stay on the machine that already holds them; reach the UI through an SSH tunnel. Nothing new is exposed and no secret is copied anywhere.</p>
-      </div>
-      <div class="card">
-        <span class="lbl">Coordinator over a tailnet</span>
-        <p>Runs on the laptop the signers plug into, reaching LND and Core over Tailscale. More convenient for SD-card and QR work, at the cost of copying <code>tls.cert</code> and the baked macaroon onto a second machine.</p>
-      </div>
-      <div class="card">
-        <span class="lbl">Anything public</span>
-        <p>No. There is no authentication model that makes a channel-opening UI worth exposing, and the tool refuses to bind a non-loopback address unless a config key explicitly names the interface.</p>
-      </div>
-    </div>
-    <h3 style="margin-top:1.2rem">Two rules the server keeps</h3>
-    <p><strong>A localhost bind is not an authentication boundary.</strong> Any process on the machine can reach it, and any web page the operator visits can attempt DNS rebinding against it. So: a token printed to the terminal at startup and required on every request, plus strict <code>Origin</code> and <code>Host</code> validation, and no CORS at all.</p>
-    <p><strong>No sockets of its own.</strong> The rule is about who opens connections, not about keeping the batch hermetic — LND is a network node and will talk to peers, which is the point. What the app must never do is contact a <em>third party</em>: fee estimates come from Core's <code>estimatesmartfee</code> and peer facts come from LND's local graph, never from a block explorer, a fee API, or a Lightning explorer. Amounts, peer sets and timing are exactly the things those services log. Anything the app needs from the network, it asks LND for.</p>
+    <h2>One binary, one socket, no internet</h2>
+    <p>A single static binary plus a SQLite file. It talks to LND over gRPC and has no other dependencies, no cloud component, and no listening port of its own. Run it on the LND box, or anywhere that can reach LND's gRPC port; if that means a laptop, the credential is copied there and that is the whole of the deployment question.</p>
+    <p><strong>No sockets of its own.</strong> The rule is about who opens connections, not about keeping the batch hermetic — LND is a network node and will talk to peers, which is the point. What the app must never do is contact a <em>third party</em>: peer facts come from LND's local gossip graph, never from a block explorer, a fee API, or a Lightning explorer. Amounts, peer sets and timing are exactly the things those services log.</p>
     <h3 style="margin-top:1.2rem">Configuration</h3>
-    <p>Two files, deliberately separate. <code>winthistle.toml</code> holds connection details and never contains a secret, only paths to them. The <em>batch file</em> is where the money is: peers, amounts, and what each channel will charge to route. The <em>batch plan</em> is the reviewable artifact built from the two of them plus what only LND and Core can supply — the funding addresses, the coin set, the fee rate and the reserve top-up. It is written and checked during Phase 0, and it is what the armed window executes.</p>
+    <p>Two files, deliberately separate. <code>winthistle.toml</code> holds connection details and never contains a secret, only paths to them. The <em>batch file</em> is where the money is: peers, amounts, and what each channel will charge to route. The <em>plan</em> is the reviewable artifact built from the two of them plus what only LND can supply — the funding addresses and the reserve top-up. It is what step 4 is typed against and what step 5 checks.</p>
     <pre><b>[lnd]</b>
 address      = "127.0.0.1:10009"
 tls_cert     = "~/.lnd/tls.cert"
 macaroon     = "~/.lnd/winthistle.macaroon"   <i># baked, not admin</i>
 
-<b>[bitcoind]</b>
-address      = "127.0.0.1:8332"
-cookie       = "~/.bitcoin/.cookie"
-wallet       = "winthistle-cold"
-
-<b>[server]</b>
-bind         = "127.0.0.1:7420"
-journal      = "~/.winthistle/runs.db"
-
-<b>[limits]</b>
-abort_after_signing_seconds = 300   <i># the 5:00 gate</i>
-require_confirmed_inputs    = true
+<b>[journal]</b>
+path         = "~/.winthistle/runs.db"
 
 <b>[fees]</b>
-floor_sat_per_vb = 2.0              <i># no default, on purpose</i>
-target_blocks    = 6
-mode             = "CONSERVATIVE"
-
-<b>[[signer]]</b>
-label   = "cold1"
-command = "my-signer cold1"         <i># reads a base64 PSBT, writes one back</i>
-
-<b>[[signer]]</b>
-label   = "cold2"                   <i># no command: sign by file handshake</i></pre>
-    <p><strong>There is no <code>allow_rbf</code> key, and writing one is refused rather than ignored.</strong> An earlier revision of this block had it, set to false, described as not operator-adjustable — but a key that appears in a config file and changes nothing is worse than no key at all, because an operator who sets it to true and watches the run proceed will reasonably conclude it was honoured. I·4 is enforced at construction and nothing reads a preference about it, so the reader refuses the line and says why.</p>
-    <p><strong>The fee floor has no default, and that is the point.</strong> <code>estimatesmartfee</code> is entitled to answer "insufficient data" — it does so on every regtest node, on a freshly synced one, and on any node that has been offline for a while — and it answers with a 200 and no rate rather than an error. The batch's rate is the largest of Core's estimate, the node's relay floor, and this figure; a node with no estimate and no configured floor is an error rather than a guess, because I·4 means a rate chosen badly cannot be corrected by replacing the transaction. <code>winthistle doctor</code> says so before the evening rather than during it.</p>
-    <p>Every unknown section and every unknown key is refused, naming the line. That is not pedantry: the file is read once, at the start of a run that may end with a cold wallet on the table, and a misspelled <code>abort_after_signing_seconds</code> that silently defaults has told the operator nothing.</p>
+floor_sat_per_vb = 2.0              <i># no default, on purpose</i></pre>
+    <p><strong>There is no <code>allow_rbf</code> key, and writing one is refused rather than ignored.</strong> A key that appears in a config file and changes nothing is worse than no key at all, because an operator who sets it to true and watches the run proceed will reasonably conclude it was honoured. I·4 is enforced by authorship and nothing reads a preference about it, so the reader refuses the line and says why.</p>
+    <p>Every unknown section and every unknown key is refused, naming the line. That is not pedantry: the file is read once, at the start of a run that may end with a cold wallet on the table, and a misspelled key that silently defaults has told the operator nothing. It also means removing keys is a loud breaking change for anyone with a config file, which is the correct direction to fail in.</p>
+    <div class="note warn">
+      <span class="lbl">An open question this revision does not close</span>The fee rate used to come from Core's <code>estimatesmartfee</code>, and Core is being removed. Sparrow picks the fee at step 4 — but the verifier still needs a number to judge "too low" and "too high" against, and the no-third-party rule forbids the obvious substitute. Asking the operator, deriving it from LND's own relay floor, or dropping the fee finding entirely are all live options and none has been chosen. Stated here rather than papered over, because a fee floor that quietly becomes zero is exactly the kind of default this project should not ship.
+    </div>
     <h3 style="margin-top:1.2rem">Setup the tool checks itself</h3>
-    <p>A written guide is necessary and will rot. So the guide is short and the tool carries the checks: <code>winthistle doctor</code> tests every prerequisite in turn — LND reachable, macaroon sufficient for each method it will call, Core present or absent and pruned or not, descriptors imported and rescanned, peers resolvable in the graph — and for each failure prints the exact command that fixes it rather than prose describing it.</p>
-    <p>The macaroon is the case where that matters most, because the required permission list is a property of the code. So the tool <em>generates</em> the baking command from its own method registry: <code>winthistle print-macaroon-command</code> emits the <code>lncli bakemacaroon</code> line for exactly the methods this build calls. The list in this document is illustrative; the one the tool prints is authoritative, and it cannot drift from what the code does. &ldquo;Cannot&rdquo; is doing work there: the client refuses at dial time to call a method the registry does not list, and a test type-checks the whole module and fails if the registry and the call sites disagree in either direction — a missing entry breaks the app, and a spare one hands the operator a permission for nothing.</p>
+    <p>A written guide is necessary and will rot. So the guide is short and the tool carries the checks: <code>winthistle doctor</code> tests every prerequisite in turn — LND reachable, the macaroon sufficient for each method it will call, peers resolvable in the graph, the run journal readable — and for each failure prints the exact command that fixes it rather than prose describing it.</p>
+    <p>The macaroon is the case where that matters most, because the required permission list is a property of the code. So the tool <em>generates</em> the baking command from its own method registry. The list printed on this page is illustrative; the one the tool prints is authoritative, and it cannot drift from what the code does. "Cannot" is doing work there: the client refuses at dial time to call a method the registry does not list, and a test type-checks the whole module and fails if the registry and the call sites disagree in either direction.</p>
     <p><strong>The credential is checked by asking, not by calling.</strong> The obvious way to find out whether a macaroon authorises a method is to invoke it, and for most of this list that is a bad idea: the interceptor runs before the handler, so a <em>refused</em> method costs nothing, but an <em>allowed</em> one runs, and <code>AbandonChannel</code> and <code>PublishTransaction</code> are not things to try with junk arguments to see what happens. <code>CheckMacaroonPermissions</code> answers directly — it examines the macaroon in the request rather than the caller's, runs the same check the interceptor would, and reaches no handler.</p>
-    <p>That also checks the half nothing else could: the never-list. The registry promises the credential cannot send coins, close a channel, sign a message or widen itself, and that is a promise about the file in the operator's config rather than about this build's intentions. An operator who points the tool at <code>admin.macaroon</code> has broken every part of it while everything still works, so <code>doctor</code> asks LND whether the credential holds <code>onchain:write</code> and the rest, and fails if it does. One warning about the two refusals that look alike: a credential that does not authorise a method is reported as <code>InvalidArgument</code>, while the interceptor refusing the caller arrives as an <em>untyped</em> error — <code>bakery.ErrPermissionDenied</code> is a plain <code>errgo</code> error with no gRPC status attached, so it is <code>codes.Unknown</code> carrying the text "permission denied". Matching on the code alone confuses them; so does matching on the text alone.</p>
-    <p>What stays in prose is the part no program can do for you: exporting descriptors from your own wallet, registering the multisig on each device, and choosing peers and channel sizes. That is a page, not a manual.</p>
-    <p>The journal is the one piece of state worth backing up — it holds each run's pending channel IDs, funding outpoints and the finalized raw transaction, which is what makes a crashed run recoverable rather than mysterious. It contains no key material.</p>
+    <p>That also checks the half nothing else could: the never-list. The registry promises the credential cannot send coins, close a channel, sign a message or widen itself, and that is a promise about the file in the operator's config rather than about this build's intentions. An operator who points the tool at <code>admin.macaroon</code> has broken every part of it while everything still works, so <code>doctor</code> asks LND whether the credential holds <code>onchain:write</code> and the rest, and fails if it does. One warning about the two refusals that look alike: a credential that does not authorise a method is reported as <code>InvalidArgument</code>, while the interceptor refusing the caller arrives as an <em>untyped</em> error — a plain <code>errgo</code> error with no gRPC status attached, so it is <code>codes.Unknown</code> carrying the text "permission denied". Matching on the code alone confuses them; so does matching on the text alone.</p>
+    <p>The journal is the one piece of state worth backing up — it holds each run's pending channel IDs, funding outpoints and the raw transaction, which is what makes a crashed run recoverable rather than mysterious. It contains no key material. There is no version table and no migration machinery: the schema is one <code>CREATE TABLE IF NOT EXISTS</code> block, and it grows by new tables rather than new columns.</p>
   </div>
 </section>
 
@@ -669,25 +609,23 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
   <div class="band">
     <div class="gut eyebrow"><b>Register</b>hazards</div>
     <h2>Every pitfall as a gate</h2>
-    <p>These are enforced, not documented. Where a hazard has no automated detection, the app blocks progress until the user resolves it explicitly.</p>
+    <p>These are enforced, not documented. Where a hazard has no automated detection, the app blocks progress until the operator resolves it explicitly.</p>
     <div class="tblwrap wide">
       <table>
         <thead><tr><th>Hazard</th><th>Cost</th><th>Detection &amp; gate</th></tr></thead>
         <tbody>
-          <tr><td>Published before a channel is recoverable</td><td><span class="sev s-loss">funds lost</span></td><td><strong>Unreachable.</strong> <code>no_publish</code> on all <em>n</em>; the funding transaction's publish call is gated on <em>n</em> of <em>n</em> <code>chan_pending</code> (I·1). The binary makes exactly <strong>two</strong> calls to <code>WalletKit.PublishTransaction</code> — that one, and the CPFP child of a batch that is already public — and the count is enforced by the method registry rather than asserted in a comment. Each takes a distinct type whose raw transaction is in an unexported field one constructor fills, so neither line can be handed the other's bytes.</td></tr>
-          <tr><td>A signer or wallet broadcasts for us</td><td><span class="sev s-loss">funds lost</span></td><td><strong>Unreachable.</strong> Signers return partial signatures; finalization is in-app, so no external party holds a publishable transaction (I·2).</td></tr>
-          <tr><td>TXID changed by a signer</td><td><span class="sev s-loss">funds in limbo</span></td><td>Hash the unsigned transaction at verify; reject any returned PSBT whose unsigned TXID differs, naming the offending device.</td></tr>
-          <tr><td>A peer times out before the gate</td><td><span class="sev s-cost">one signing round</span></td><td>Nothing has been published, so the batch is simply cancelled and re-armed. This was the expensive failure; now it is a retry.</td></tr>
-          <tr><td>RBF attempted on the funding tx</td><td><span class="sev s-loss">all channels void</span></td><td>Replaceability disabled at PSBT construction and refused by the batch verifier at every input. Stalls are handled by a CPFP child on the change output — which <em>is</em> replaceable, so a second lift replaces it rather than chaining onto it, and no code path in the binary can replace the funding transaction.</td></tr>
-          <tr><td>Legacy (non-segwit) inputs</td><td><span class="sev s-stuck">verify rejected</span></td><td>Filtered during coin selection, with the excluded UTXOs listed so the exclusion is visible rather than mysterious.</td></tr>
-          <tr><td>Anchor reserve shortfall</td><td><span class="sev s-stuck">open refused</span></td><td><code>RequiredReserve</code> versus the node's own unlocked default-account balance, in Phase 0 — <code>internal/reserve</code>; a top-up output is added automatically.</td></tr>
-          <tr><td>Ten-minute window lapses</td><td><span class="sev s-cost">one more signing round</span></td><td>Countdown on the earliest stream; <code>shim_cancel</code> then re-arm in a single action.</td></tr>
-          <tr><td>Fee drain at LND default policy</td><td><span class="sev s-cost">sats</span></td><td>Per-peer policy chosen in Phase 0, applied by <code>UpdateChannelPolicy</code> the moment each channel goes active.</td></tr>
+          <tr><td>Published before a channel is recoverable</td><td><span class="sev s-loss">funds lost</span></td><td><strong>Unreachable.</strong> <code>no_publish</code> on all <em>n</em>; the publish call is gated on <em>n</em> of <em>n</em> <code>chan_pending</code> (I·1). The publish call sites are counted by the method registry rather than asserted in a comment, and each takes a distinct type whose raw transaction is in an unexported field one constructor fills.</td></tr>
+          <tr><td>TXID changed between verify and publish</td><td><span class="sev s-loss">funds in limbo</span></td><td>Hash the unsigned transaction at step 5; refuse at step 8 if it differs. With I·2 gone this is the only check on what comes back — see I·3.</td></tr>
+          <tr><td>An output the plan does not name, or the wrong amount</td><td><span class="sev s-loss">funds to a stranger</span></td><td>Refused at step 5, <em>before</em> <code>psbt_verify</code> pins anything, so a mis-paste costs a redo inside clock A rather than a channel.</td></tr>
+          <tr><td>A peer times out before the gate (clock A)</td><td><span class="sev s-cost">a restart</span></td><td>Nothing published and nothing signed, so the batch is cancelled and re-opened. This was the expensive failure; it is now the cheap one.</td></tr>
+          <tr><td>A peer forgets the channel (clock B)</td><td><span class="sev s-loss">force-close only</span></td><td>The countdown is read from <code>funding_expiry_blocks</code> and reported <em>in blocks</em>. The commitment signature stored at step 6 is what makes the force-close possible.</td></tr>
+          <tr><td>RBF attempted on the funding tx</td><td><span class="sev s-loss">all channels void</span></td><td>No code path in the binary replaces a funding transaction. The network does not enforce this and neither does a sequence number — see I·4.</td></tr>
+          <tr><td>Legacy (non-segwit) inputs</td><td><span class="sev s-stuck">verify rejected</span></td><td>Refused at step 5, naming the input. Nothing pre-excludes them any more, so this is the first thing that notices.</td></tr>
+          <tr><td>Anchor reserve shortfall</td><td><span class="sev s-stuck">open refused</span></td><td><code>RequiredReserve</code> versus the node's own unlocked default-account balance, at step 1; a top-up output is added to the plan.</td></tr>
+          <tr><td>Fee drain at LND default policy</td><td><span class="sev s-cost">sats</span></td><td>Per-peer policy chosen with the amounts and applied at step 9 the moment each channel goes active. A channel with no policy is not neutral — it is 1000 msat and 1 ppm.</td></tr>
           <tr><td>Public and private channels batched together</td><td><span class="sev s-cost">privacy</span></td><td>Warn and offer to split into separate batches — a mixed batch correlates the announced and unannounced channels to one node.</td></tr>
-          <tr><td>Unconfirmed or already-spent inputs</td><td><span class="sev s-stuck">stuck batch</span></td><td>Confirmed-only coin selection; Core locks the chosen UTXOs for the duration of the run.</td></tr>
           <tr><td>Abandon removes a channel that is not pending</td><td><span class="sev s-loss">funds lost</span></td><td>LND's safe flag rejects every shim open here, so the blunt flag is the normal route and cannot be the gate. Before escalating, the app re-checks <code>PendingChannels</code> itself and refuses a channel that is not pending — no confirmation is offered, because none would be meaningful.</td></tr>
-          <tr><td>Coin locks outlive a failed run</td><td><span class="sev s-stuck">wallet will not spend</span></td><td>Core validates a whole <code>lockunspent</code> list before applying any of it, so one stale outpoint frees none — and its locks are memory-only, so a Core restart makes every journalled outpoint stale at once. The release filters against the live lock set and reports what it actually freed; <code>doctor</code> lists orphans.</td></tr>
-          <tr><td>Fee rate too low to confirm</td><td><span class="sev s-stuck">channels stay pending</span></td><td>Rate chosen against a live estimate with a floor, and change sized so CPFP remains viable at several multiples of it.</td></tr>
+          <tr><td>Fee rate too low to confirm</td><td><span class="sev s-stuck">channels stay pending</span></td><td><strong>Reported, not refused</strong> — the fee is yours. What the report says is what it costs: see <a href="#frozen">A batch that never confirms</a>.</td></tr>
         </tbody>
       </table>
     </div>
@@ -698,34 +636,36 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
   <div class="band">
     <div class="gut eyebrow"><b>Recovery</b>when it goes wrong</div>
     <h2>One question decides everything</h2>
-    <p>Under pressure the only thing that matters is whether the transaction reached the network. The app answers that from its own journal plus a mempool and chain lookup, and then offers exactly one path.</p>
+    <p>Under pressure the only thing that matters is whether the transaction reached the network. The app answers that from its own journal, and then offers exactly one path.</p>
     <div class="tree wide">
       <div class="q">Has the funding transaction been broadcast?</div>
-      <div class="no"><strong>No</strong> — nothing is at risk, and nothing has cost anything. Cancel every shim with <code>shim_cancel</code>, abandon any channel that reached pending, release the Core UTXO locks, and either re-arm or walk away. No on-chain footprint, no fees. Because of I·1 this covers <em>every</em> failure before the gate, which is every failure the batch is actually likely to have.</div>
+      <div class="no"><strong>No</strong> — nothing is at risk, and nothing has cost anything. Cancel every shim with <code>shim_cancel</code>, abandon any channel that reached pending, and either start again or walk away. No on-chain footprint, no fees. Because of I·1 this covers <em>every</em> failure before the gate, which is every failure the batch is actually likely to have.</div>
       <div class="yes"><strong>Yes</strong> — then all <em>n</em> channels reached <code>chan_pending</code> before it went out, because that is the only condition under which the app will publish. Every channel therefore holds its peer's commitment signature and every outpoint is watched by the ChainArbitrator. Three ways this ends, all of them solvent: the transaction confirms and the channels open; a peer vanishes and a force-close recovers the funds; or our own node is lost and the exported backup plus the peer's data-loss protection recovers them.</div>
     </div>
     <h3>Every state a run can be found in</h3>
-    <p>The question above is answered from the run journal — SQLite, at <code>~/.winthistle/runs.db</code>, written <em>before</em> each call it describes so that a crash leaves artifacts rather than mystery. There is no version table and no migration machinery: the schema is one <code>CREATE TABLE IF NOT EXISTS</code> block, and it grows by new tables rather than new columns. A run is in exactly one of these seven states, and the state is what decides whether <code>winthistle recover</code> will act at all.</p>
+    <p>The question above is answered from the run journal — SQLite, written <em>before</em> each call it describes so that a crash leaves artifacts rather than mystery. A run is in exactly one of these seven states, and the state is what decides whether <code>winthistle recover</code> will act at all.</p>
     <div class="tblwrap wide">
       <table>
         <thead><tr><th>State</th><th>What it means</th><th>What <code>recover</code> does</th></tr></thead>
         <tbody>
-          <tr><td><code>arming</code></td><td>Funding streams are open. Nothing has been shown to LND.</td><td>Cancels every shim. Nothing was signed and nothing is at risk.</td></tr>
-          <tr><td><code>signing</code></td><td>Every stream verified the unsigned transaction, so LND has committed to all <em>n</em> funding outpoints and only signatures may be added (I·3).</td><td>Cancels every shim. <code>shim_cancel</code> still works after a successful <code>psbt_verify</code> — proven on regtest — so re-arming later is free.</td></tr>
-          <tr><td><code>armed</code></td><td>Every channel reached <code>chan_pending</code>. This is the I·1 gate, and the only state from which a publish is permitted.</td><td>Abandons each pending channel by outpoint, releases Core's coin locks. Costs the ceremony, nothing else.</td></tr>
-          <tr><td><code>publishing</code></td><td>Written <strong>before</strong> <code>PublishTransaction</code> is called. The bytes may be in a mempool.</td><td><span class="sev s-loss">refuses</span> <code>ErrMayBePublished</code>. Abandoning a pending channel whose funding transaction later confirms strands its funds with no force-close path.</td></tr>
+          <tr><td><code>arming</code></td><td>Funding streams are open. Nothing has been shown to LND.</td><td>Cancels every shim. Nothing is at risk.</td></tr>
+          <tr><td><code>verified</code></td><td>Every stream verified the unsigned transaction, so LND has committed to all <em>n</em> funding outpoints and only signatures may be added (I·3).</td><td>Cancels every shim. <code>shim_cancel</code> still works after a successful <code>psbt_verify</code> — proven on regtest — so starting again is free.</td></tr>
+          <tr><td><code>pending</code></td><td>Every channel reached <code>chan_pending</code>. <strong>This is the I·1 gate, and nothing has been signed.</strong> Clock B is running.</td><td>Abandons each pending channel by outpoint. Costs the ceremony, nothing else.</td></tr>
+          <tr><td><code>signing</code></td><td>The gate is closed and the wallet has the transaction. No clock but B.</td><td>Same as <code>pending</code>: abandon by outpoint. A signed transaction nobody published is inert.</td></tr>
+          <tr><td><code>publishing</code></td><td>Written <strong>before</strong> <code>PublishTransaction</code> is called. The bytes may be in a mempool.</td><td><span class="sev s-loss">refuses</span> Abandoning a pending channel whose funding transaction later confirms strands its funds with no force-close path.</td></tr>
           <tr><td><code>published</code></td><td>The publish call returned without error.</td><td><span class="sev s-loss">refuses</span> Same reason. Read the run on its own; it begins with looking for the txid, not with touching anything.</td></tr>
-          <tr><td><code>aborting</code></td><td>An abort is in progress, or one was interrupted partway.</td><td>Resumes it. Everything under the abort is idempotent, so running it again is safe as many times as it takes.</td></tr>
-          <tr><td><code>aborted</code></td><td>The abort completed with nothing left behind.</td><td>Nothing to do.</td></tr>
+          <tr><td><code>aborting</code> / <code>aborted</code></td><td>An abort is in progress, was interrupted partway, or finished.</td><td>Resumes it, or reports nothing to do. Everything under the abort is idempotent.</td></tr>
         </tbody>
       </table>
     </div>
-    <p>Within a run, each channel carries its own state, and that is what decides <em>how</em> a teardown removes it rather than whether one happens: <code>shim_registered</code> and <code>verified</code> are cancelled by pending-channel ID, <code>pending</code> is abandoned by funding outpoint, and <code>abandoned</code> or <code>cancelled</code> are left out so a second recovery reports honestly instead of re-listing finished work. A channel journalled as pending with no outpoint is refused rather than guessed at — there would be nothing to abandon.</p>
-    <div class="note">
-      <span class="lbl">Why <code>publishing</code> is written first</span>It is the only ordering that fails safe. Written after the call, a crash mid-publish would leave a run the journal calls <code>armed</code> — abortable, with a transaction that may already be relaying. Written before, the same crash leaves a run nothing will touch, which is the correct answer to "we do not know." The cost is that a publish refused by the node also lands here, and that is accepted: a broadcast that returned an error is not a broadcast that did not happen.
+    <div class="note warn">
+      <span class="lbl">The order in that table is the new one</span><code>pending</code> before <code>signing</code> is the whole inversion, expressed as journal states: a channel at <code>chan_pending</code> with nothing signed becomes the ordinary mid-run state rather than an edge case. <strong>The code still writes the old order</strong> — <code>signing</code> before <code>armed</code> — and reordering it is a scheduled change, along with the split in whether a run has passed the point of no return. Read this table as the specification and the journal as not yet matching it.
     </div>
     <div class="note">
-      <span class="lbl">The branch that used to be here</span>An earlier revision of this document described a third outcome: published, but with a channel that never completed negotiation, whose output is a 2-of-2 with a counterparty who never signed — coins gone. <strong>This design has no path that reaches it.</strong> Two things close it. I·1 means the transaction is not published until every channel is already recoverable, and I·2 means no other party ever holds a transaction it could publish for us. Remove either one and the branch comes back, which is why they are invariants and not preferences.
+      <span class="lbl">Why <code>publishing</code> is written first</span>It is the only ordering that fails safe. Written after the call, a crash mid-publish would leave a run the journal calls abortable, with a transaction that may already be relaying. Written before, the same crash leaves a run nothing will touch, which is the correct answer to "we do not know." The cost is that a publish refused by the node also lands here, and that is accepted: a broadcast that returned an error is not a broadcast that did not happen.
+    </div>
+    <div class="note">
+      <span class="lbl">The branch that used to be here</span>An earlier revision described a third outcome: published, but with a channel that never completed negotiation, whose output is a 2-of-2 with a counterparty who never signed — coins gone. <strong>This design has no path that reaches it,</strong> and it now takes only one invariant to say so rather than two. I·1 means the transaction is not published until every channel is already recoverable. That used to need I·2 beside it, because a signed transaction existed while the gate was still shut and someone else might have held it. Under the new sequence no signature exists until after the gate has closed, so there is no window for a second party to publish into. Remove I·1 and the branch comes back.
     </div>
   </div>
 </section>
@@ -739,35 +679,36 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
       <table>
         <thead><tr><th>Residual</th><th>Why it is not the same class</th><th>Gate</th></tr></thead>
         <tbody>
-          <tr><td>Stall past LND's funding horizon</td><td>Coins stay yours while the transaction is unconfirmed. The danger is narrow and it is <em>asymmetric</em>: after roughly 2016 blocks the <strong>peer</strong> forgets the pending channel and closes its side. We never do — <code>waitForFundingWithTimeout</code> arms the timeout only for the responder — so a transaction that confirms <em>afterwards</em> leaves this node holding a channel the peer has no record of, and only a force-close gets out of it.</td><td>We own broadcast timing, so we never publish at a fee we would not defend. <code>PendingChannels</code> publishes the countdown as <code>funding_expiry_blocks</code>; the app watches it, warns long before it is urgent, and offers CPFP from the change output. Never a replacement.</td></tr>
-          <tr><td>Loss of LND's channel database</td><td>The commitment signature lives in that database, not in the protocol.</td><td>Channel backups exported at step 8, <em>before</em> publish, and stored off-box. Recovery is backup plus the peer's data-loss protection.</td></tr>
-          <tr><td>A bug in LND or Bitcoin Core</td><td>Not addressable by design at this layer.</td><td>The cold probe exercises the real path, and the first live batch is deliberately small.</td></tr>
-          <tr><td>A signer that broadcasts on its own</td><td>Would defeat I·1 from outside the system.</td><td>I·2: partial signatures only, finalized in-app. Single-sig funding requires a genuinely air-gapped device.</td></tr>
-          <tr><td>Assisted mode, single-sig: Sparrow holds a complete transaction</td><td>The only place a design invariant degrades to operator discipline rather than structure.</td><td>Multisig resolves it — Sparrow applies <em>m</em>&minus;1 signatures, the app collects the last. Single-sig cannot be resolved structurally and is <strong>deliberately not gated</strong>: a single-sig wallet that signs at all returns a complete transaction, and no check in a program can establish that a device is air-gapped, that being a fact about a room. So single-sig runs work, nothing refuses one, and this is the one place I·2 rests on the operator's setup rather than on structure. It is a limit on I·2's reach, not a relaxation — nothing may hand a <em>multisig</em> signer enough to broadcast.</td></tr>
+          <tr><td>Stall past the peers' funding horizon</td><td>Coins stay yours while the transaction is unconfirmed. The danger is narrow and it is <em>asymmetric</em>: after roughly 2016 blocks the <strong>peer</strong> forgets the pending channel and closes its side. We never do — the timeout is armed only for the responder — so a transaction that confirms <em>afterwards</em> leaves this node holding a channel the peer has no record of, and only a force-close gets out of it.</td><td>We own broadcast timing, so we never publish at a fee we would not defend. <code>PendingChannels</code> publishes the countdown as <code>funding_expiry_blocks</code>; the app reports it in blocks and warns long before it is urgent. Never a replacement.</td></tr>
+          <tr><td>Loss of LND's channel database</td><td>The commitment signature lives in that database, not in the protocol.</td><td>Channel backups exported at step 6, <em>before</em> publish and before signing, and stored off-box. Recovery is backup plus the peer's data-loss protection.</td></tr>
+          <tr><td>A wallet that signs the wrong thing</td><td>Not the same class, because it is caught rather than absorbed: a transaction that does not match the plan never reaches <code>psbt_verify</code>, and one that moves the TXID never reaches publish.</td><td>I·3, which now carries this alone. It is the only load-bearing check on what comes back, which is why its scope is spelled out at length above.</td></tr>
+          <tr><td>A bug in LND</td><td>Not addressable by design at this layer.</td><td>The cold probe exercises the real path, and the first live batch is deliberately small.</td></tr>
+          <tr><td>A fee too low to confirm</td><td>Nothing is at risk, but the batch cannot be abandoned either — see below. This is the one residual the app deliberately declines to gate.</td><td>Reported, with what it costs stated plainly. Your fee is yours.</td></tr>
         </tbody>
       </table>
     </div>
     <p>None of these is the failure that made the manual process frightening. That one is gone.</p>
 
     <h3 id="frozen" style="margin-top:1.6rem">A batch that never confirms</h3>
-    <p>This is the state the CPFP handle exists for, and it is worth naming exactly, because the earlier drafts of this document described it in language that made it sound like a loss. It is not one.</p>
-    <p><strong>Nothing is at risk while the funding transaction is unconfirmed.</strong> The coins are ours, unspent, in a transaction only we could have signed. Every channel reached <code>chan_pending</code>, which makes it recoverable by force-close <em>once the funding transaction confirms</em> — before that there is no channel yet, only a promise. So the cost of a stuck batch is the <strong>ceremony</strong>: a cold-storage signing round, <em>n</em> peers' cooperation, the ten-minute windows, all to be done again.</p>
+    <p>This is the state the CPFP handle exists for, and it is worth naming exactly, because earlier drafts of this document described it in language that made it sound like a loss. It is not one — and the wrong framing was the dangerous part, because an operator who believes coins are at risk will reach, under pressure, for the one thing I·4 forbids.</p>
+    <p><strong>Nothing is at risk while the funding transaction is unconfirmed.</strong> The coins are ours, unspent, in a transaction only we could have signed. Every channel reached <code>chan_pending</code>, which makes it recoverable by force-close <em>once the funding transaction confirms</em> — before that there is no channel yet, only a promise. So the cost of a stuck batch is the <strong>ceremony</strong>: the peers' cooperation and the run, to be done again. Under the new sequence that is cheaper than it was, because the signing round is no longer inside anybody's window.</p>
     <p><strong>But it cannot be abandoned, either.</strong> An unconfirmed funding transaction never becomes safe to abandon on its own: its inputs stay unspent, so it stays valid indefinitely, and eviction from mempools does not invalidate it. <code>winthistle recover</code> therefore refuses any run that reached the publish call — abandoning a pending channel whose funding transaction <em>later</em> confirms strands its funds with no force-close path, which is precisely LND's "DO NOT PUBLISH … OR THE FUNDS CAN BE LOST". A batch that never confirms leaves its coins <strong>frozen</strong>: not abortable, not safely spendable, waiting on the mempool.</p>
-    <p>That inverts what CPFP is for. It is not a speedup — it is <strong>the exit</strong>. Confirm the batch, then close the <em>n</em> channels normally if you no longer want them; that costs the funding fee plus <em>n</em> cooperative closes and is completely safe. This is the correct way to read the change-output gate: not insurance against slowness, but what keeps a batch from having no way out at all — which is also why the gate is proportionate, since the lever costs a few tens of thousands of satoshis and what it buys is unrecoverable by us.</p>
-    <p>The freeze is a thin tail: it needs the fee market to move further than the CPFP multiple allowed for, while WalletKit re-offers the transaction on every restart. And it is not a state CPFP can rescue after the fact — a child of an absent parent is an orphan, and <code>winthistle bump</code> refuses rather than pretending. The gate protects the case a child <em>can</em> address: a parent sitting in a mempool, confirming too slowly.</p>
+    <p>That inverts what CPFP is for. It is not a speedup — it is <strong>the exit</strong>. Confirm the batch, then close the <em>n</em> channels normally if you no longer want them; that costs the funding fee plus <em>n</em> cooperative closes and is completely safe. Which is the correct way to read the advice about change outputs: not insurance against slowness, but what keeps a batch from having no way out at all.</p>
+    <p>The freeze is a thin tail: it needs the fee market to move further than you allowed for, while WalletKit re-offers the transaction on every restart. And it is not a state CPFP can rescue after the fact — a child of an absent parent is an orphan. What a child <em>can</em> address is a parent sitting in a mempool and confirming too slowly.</p>
+    <p><strong>This is why a change output is worth having, and why it is advice rather than a gate.</strong> Without one there is no lever at all and the only route out is the procedure below. With one, the exit is ordinary. But the app no longer builds your transaction, so it cannot size a change output for you — it can only tell you that yours is small enough to cost you this, and let you decide. A tool that refused your transaction over your own change arrangements would be claiming an authority it gave up at step 4.</p>
 
     <div class="note warn">
       <span class="lbl">The one route out, which this build does not take</span>
-      If a batch is frozen and waiting is unacceptable, the only way to release the coins is to <strong>double-spend one of its inputs</strong> — and this build will not do it for you. Not because the operator cannot be trusted with it, but because building one would put a funding-transaction replacement in the codebase, and I·4 is a statement about what this program contains. The line is authorship, not knowledge: we can say what the only way out is, and still refuse to be the thing that does it.
+      If a batch is frozen and waiting is unacceptable, the only way to release the coins is to <strong>double-spend one of its inputs</strong> — and this build will not do it for you. Not because the operator cannot be trusted with it, but because building one would put a funding-transaction replacement in the codebase, and I·4 is a statement about what this program contains. The line is authorship, not knowledge: we can say what the only way out is, and still refuse to be the thing that does it. What the app <em>does</em> give you is the material: recovery names the inputs and the txid.
       <p style="margin-top:.6rem">The procedure, and the ordering that keeps it from losing funds:</p>
       <ol style="margin:.4rem 0 0 1.2rem">
         <li><strong>Do not abandon anything first.</strong> Every channel's state — including each peer's commitment signature — is what lets you force-close if the original confirms after all. Abandoning before the replacement is settled is the one move that turns a frozen batch into a lost one.</li>
-        <li>Build and broadcast a transaction, with your own tools, spending at least one of the funding transaction's inputs back to cold storage. Full-RBF is unconditional in Core v29, so it will relay despite the original's <code>replaceable: false</code>.</li>
+        <li>Build and broadcast a transaction, with your own tools, spending at least one of the funding transaction's inputs back to your own wallet. Full-RBF is unconditional in Core v29, so it will relay despite the original's <code>replaceable: false</code>.</li>
         <li><strong>Wait for it to be deeply confirmed.</strong> Until then both transactions are live and you cannot know which wins. There is no signal that resolves this faster than confirmation depth.</li>
-        <li>Only once the original is <em>unmineable</em> — every one of its inputs spent by a confirmed transaction — abandon the pending channels and release Core's coin locks.</li>
+        <li>Only once the original is <em>unmineable</em> — every one of its inputs spent by a confirmed transaction — abandon the pending channels.</li>
         <li>If the original confirms instead, you have channels rather than coins. Close them; if a peer has passed its ~2016-block horizon and forgotten, force-close, which works because of step 1.</li>
       </ol>
-      <p style="margin-top:.6rem">The honest summary is that the safe version of this procedure is slow enough that it is rarely better than waiting — which is the argument for the change-output gate being mandatory rather than advisory, and for sizing it against a pessimistic CPFP target rather than a hopeful one.</p>
+      <p style="margin-top:.6rem">The honest summary is that the safe version of this procedure is slow enough that it is rarely better than waiting. Which is the argument for keeping a change output and for sizing it against a pessimistic target rather than a hopeful one — an argument worth making to the operator, in the report, rather than enforcing over their head.</p>
     </div>
   </div>
 </section>
@@ -781,25 +722,24 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
         <span class="lbl">In v1</span>
         <ul class="plain">
           <li>One LND node, <em>n</em> channels, one transaction</li>
-          <li>Single-sig and <em>m</em>-of-<em>n</em> external funding</li>
-          <li>Three-phase model with the rehearsal gate</li>
-          <li>Both engines: directed with Core, assisted with Sparrow</li>
-          <li><code>winthistle doctor</code> and a generated macaroon command</li>
-          <li><code>winthistle bump</code> — the CPFP child of a stalled batch, built, verified twice, signed from cold storage and broadcast</li>
-          <li>Base64 and file transports, on a BIP174 contract</li>
+          <li>The nine-step sequence, with the gate closing before anything is signed</li>
+          <li>Any wallet that round-trips BIP174 — the app is indifferent to which</li>
+          <li>Three commands: <code>doctor</code>, <code>run</code>, <code>recover</code></li>
+          <li>The batch verifier, and a generated macaroon command</li>
           <li>Reserve top-up and post-open policy application</li>
           <li>Cold probe mode, and the recovery paths it depends on</li>
-          <li>A regtest harness, built before the happy path — it has already caught three faults that would otherwise have been paid for in mainnet probe time</li>
-          <li>A signet harness for the two things regtest cannot reach: the descriptor-import rescan, which needs real chain history, and a node pruned past a cold wallet's birthday. Two bitcoinds and no LND — neither path involves one</li>
+          <li>A regtest harness, built before the happy path</li>
         </ul>
       </div>
       <div class="card">
-        <span class="lbl">Deferred</span>
+        <span class="lbl">Deferred, or withdrawn</span>
         <ul class="plain">
+          <li>A second front end. One countdown line does not need a TUI, and a second renderer is a second place for copy to be wrong</li>
+          <li>Building or funding the transaction ourselves — <em>withdrawn</em>, and the removal of Bitcoin Core is what this revision is largely about</li>
+          <li>Automated fee-bumping. A CPFP child is the operator's call and their wallet's signature</li>
+          <li>In-house animated QR — out of scope; the contract is BIP174, so a QR-only signer is reached through a desktop wallet that already does the round trip</li>
           <li>Batching across multiple of your own nodes — it works protocol-wise, but multiplies the state machine</li>
-          <li>Core Lightning — a different flow shape (<code>openchannel_init</code> / <code>_update</code> / <code>_signed</code>), worth a real abstraction rather than a branch</li>
-          <li>Automated fee-bumping. The CPFP child is built, verified, signed and broadcast by <code>winthistle bump</code>, but a human asks for it and a cold wallet signs it — there is nothing to automate that would not need a hot key</li>
-          <li>A third and further lift is the same command again — each one replaces the last — so there is nothing separate here to defer</li>
+          <li>Core Lightning — a different flow shape, worth a real abstraction rather than a branch</li>
           <li>Taproot MuSig2 funding outputs</li>
           <li>Anything resembling a hosted deployment</li>
         </ul>
@@ -811,24 +751,28 @@ label   = "cold2"                   <i># no command: sign by file handshake</i><
 <section>
   <div class="band">
     <div class="gut eyebrow"><b>Claims</b>verify first</div>
-    <h2>Claims the cold probe has to settle</h2>
-    <p>Each of these is load-bearing, and none should be taken on faith from documentation, including this document. Items marked <span class="sev s-cost">settled in source</span> were read out of LND's source — better evidence than prose, but still not a passing test. Items marked <span class="sev s-proven">proven on regtest</span> have one. <strong>All of them are now closed</strong>, which is a smaller claim than it sounds: closed means a test on a regtest node — or, for the descriptor rescan and the prune horizon, on signet — and the one thing neither can stand in for is the mainnet cold probe.</p>
+    <h2>What is evidence, and what is not</h2>
+    <p>Each of these is load-bearing, and none should be taken on faith from documentation, including this document. <span class="sev s-cost">settled in source</span> means read out of LND's source — better evidence than prose, but not a passing test. <span class="sev s-proven">proven on regtest</span> means there is one. <strong>Nothing here has been proven on mainnet</strong>, and that is what the cold probe is for.</p>
     <ul class="plain">
-      <li><span class="sev s-proven">proven on regtest</span> Does <code>shim_cancel</code> still succeed <em>after</em> a successful <code>psbt_verify</code>? Yes. The intent lives in <code>LightningWallet.fundingIntents</code>, and <code>psbt_verify</code> only attaches a verified packet to it, so cancelling still finds and clears it. Re-arming after a lapsed window is therefore free, as the phase model assumes.</li>
-      <li><span class="sev s-proven">proven on regtest</span> Does <code>psbt_finalize</code> with <code>no_publish</code> emit <code>chan_pending</code> without broadcasting? Yes — <code>NoFundingTxBit</code> clears <code>ChanType.HasFundingTx()</code>, which is the condition gating the broadcast block in <code>handleFundingSigned</code>, between <code>CompleteReservation</code> and the update. Observed for <em>n</em> = 3, which is the form the gate actually relies on: three <code>chan_pending</code> receipts against one transaction, and the mempool checked after <em>every</em> <code>psbt_finalize</code> including the last — precisely where LND's own "all but the last" idiom would have broadcast. Then published once, confirmed, and all three channels opened.</li>
-      <li><span class="sev s-cost">settled in source</span> Exactly when does each peer's ten-minute clock start — at <code>OpenChannel</code>, or at the peer's <code>accept_channel</code>? Neither, in the sense the question assumed: <em>we</em> have no clock at all. <code>pruneZombieReservations</code> skips PSBT reservations outright — "these reservations are always initiated by us and the remote peer is likely going to cancel them after some idle time anyway" — so the only clock is the peer's, and on the peer it is <code>resCtx.lastUpdated</code>, set by <code>defer resCtx.updateTimestamp()</code> at the end of <code>handleFundingOpen</code>: the same handler that sends <code>accept_channel</code>. The two candidates are one network round trip apart against a ten-minute budget, so the distinction is not measurable and does not matter. What does: the timeout is <code>DefaultReservationTimeout</code> = 10 minutes, checked by a sweeper on <code>DefaultZombieSweeperInterval</code> = 1 minute, and neither is adjustable in a release build. So start the countdown at our own <code>OpenChannel</code> call and treat 10:00 as an upper bound with up to a minute of slack past it — and remember none of it binds a peer that is not LND. Measured on regtest by <code>TestWhoOwnsTheTenMinuteClock</code>, which is skipped unless <code>WINTHISTLE_SLOW</code> is set because it takes eleven minutes: bob gave up <strong>10m41s</strong> after our <code>OpenChannel</code> call — ten minutes plus the sweeper's granularity, as predicted. LND's wording for it is worth knowing because it is what the operator will see: <em>"remote canceled funding, possibly timed out"</em>, wrapped around a peer error that says only "funding failed due to internal error". The "possibly" is ours, not the peer's.</li>
-      <li><span class="sev s-cost">settled in source</span> What does <code>RequiredReserve</code> return for private channels, given the field is named <code>additional_public_channels</code>? It adds whatever you pass to <code>CurrentNumAnchorChans()</code> and has no idea whether the channels you are naming are public, so the caller must pass the count of announced members only. Private channels are invisible to the check twice over: <code>CurrentNumAnchorChans</code> skips them when counting, and <code>enforceNewReservedValue</code> returns before counting anything at all when the channel being opened is unannounced.</li>
-      <li><span class="sev s-proven">proven on regtest</span> Will <code>UpdateChannelPolicy</code> accept a channel point that is pending but not yet active, or must Phase 2 poll? Neither, and the real answer is worse than both: <strong>the call does not fail.</strong> <code>localchans.Manager.UpdatePolicy</code> walks the graph's outgoing edges, finds no edge, falls through to <code>FetchChannel</code>, sees <code>IsPending</code>, and appends a <code>FailedUpdate</code> with reason <code>UPDATE_FAILURE_PENDING</code> and the text "not yet confirmed" — which <code>rpcserver.go</code> then returns inside a <code>PolicyUpdateResponse</code> <em>with a nil error</em>. So a caller that checked only the error would record a policy it had never applied and go on forwarding at 1000 msat and 1 ppm believing otherwise. Polling was the right instinct for a better reason than the question knew, and it is not sufficient on its own: every attempt has to be judged against <code>failed_updates</code>, and only an empty list is a success. Observed against a live node on an armed-but-unpublished channel. Retry <code>PENDING</code>, <code>NOT_FOUND</code> and <code>INTERNAL_ERR</code>; stop on <code>INVALID_PARAMETER</code>, which is the policy being wrong rather than the channel being early, and on <code>UNKNOWN</code>, which is LND declining to say and therefore gives nothing to wait for.</li>
-      <li><span class="sev s-proven">proven on regtest</span> Does Core's <code>finalizepsbt</code> handle every signer's output for the specific multisig descriptor in use, or is a fallback finalizer needed? Answered by not needing Core. <code>internal/combine</code> merges the partials itself and btcd's <code>MaybeFinalizeAll</code> assembles the witness, which is then executed against each input's script locally before anything else sees the transaction — so Core's finalizer is not in the path in either engine. Corroborated rather than relied on: on the harness's <code>wsh(sortedmulti(2,…))</code> the in-app result is byte-identical to Core's <code>combinepsbt</code> plus <code>finalizepsbt</code>. What btcd's finalizer needs is narrower than Core's, and both limits are checked up front with the counts in hand: a P2WSH witness script must be a bare <em>m</em>-of-<em>n</em> multisig, and it must carry exactly <em>m</em> signatures.</li>
-      <li><span class="sev s-proven">proven on regtest</span> Does the settlement pass behave on a real confirmation — depth tracking, policy application, CPFP offer? Yes, on regtest, one block at a time: the channel opened at three confirmations, which matched the prediction from LND's default policy, and the intended policy landed and read back out of the announced graph. The CPFP child was built against a genuinely unconfirmed parent and lifted the package to the target — and doing that turned up a Core behaviour worth having: <code>walletcreatefundedpsbt</code>'s <code>fee_rate</code> applies to the whole <em>unconfirmed ancestor package</em>, not to the child alone, and the fee it charges is <code>ceil(rate × (parentVsize + childVsize)) − parentFee</code>. That is term for term the expression the change output is sized with, so Core does the arithmetic and this design's job is to check it rather than to repeat it. Verified to the satoshi at 50, 200 and 600 sat/vB — and again at 20, 50 and 200 against a real stalled parent when <code>winthistle bump</code> was built on top of it, with the whole command then signing and broadcasting a child whose package rate Core's own ancestor accounting confirmed. The second lift was then proved the same way: Core builds a replacement spending an outpoint its own mempool already shows as spent (the input is named explicitly, so there is no coin selection to refuse it), the replaced child is evicted, and Core's ancestor accounting for the replacement excludes the transaction it replaced — so the package arithmetic is unchanged. Measured at 60 sat/vB against a standing 20 sat/vB child. That work turned up one refinement to the finding: "the unconfirmed ancestor package" means <em>all</em> of it, so when the parent has unconfirmed ancestors of its own the arithmetic has to use Core's <code>ancestorsize</code> and <code>fees.ancestor</code> rather than the transaction's own figures. A batch funded from confirmed coins makes the two identical, which is the ordinary case and exactly why it is easy to get wrong. <strong>None of that is mainnet.</strong> The first small live batch is still what turns a regtest result into evidence, which is what the commissioning section is for.</li>
+      <li><span class="sev s-proven">proven on regtest</span> <strong>Does <code>skip_finalize</code> with <code>no_publish</code> reach <code>chan_pending</code> over an unsigned transaction?</strong> Yes — this is the finding the whole revision rests on. Two streams, an unsigned batch transaction, <code>psbt_verify</code> with <code>skip_finalize</code>, and both channels reported <code>chan_pending</code> at exactly the outpoints the funding addresses resolve to, with the mempool clear. <code>PendingChannels</code> listed both, which is the same fact by a route that does not depend on the stream: a channel in that list was put there by <code>CompleteReservation</code>, the call that stores the peer's commitment signature. Nothing in the test signs anything, and that absence is the assertion.</li>
+      <li><span class="sev s-proven">proven on regtest</span> <strong>Does the I·1 gate hold for a whole batch?</strong> Yes, observed at <em>n</em> = 3: three <code>chan_pending</code> receipts against one transaction, one shared TXID with three distinct output indices, and the mempool checked after <em>every</em> step including the last — precisely where LND's own "all but the last" idiom would have broadcast. Then published once, confirmed, and all three channels opened.</li>
+      <li><span class="sev s-proven">proven on regtest</span> <strong>Does <code>shim_cancel</code> still succeed after a successful <code>psbt_verify</code>?</strong> Yes. The intent lives in the wallet's funding-intent map and <code>psbt_verify</code> only attaches a verified packet to it, so cancelling still finds and clears it. Starting again after a lapsed clock A is therefore free, which is what makes clock A cheap.</li>
+      <li><span class="sev s-proven">proven on regtest</span> <strong>Is <code>pending_funding_shim_only</code> usable as the abandon flag?</strong> No, and this is settled twice over. It refuses every channel this app opens, on the old sequence and on the new one, because LND infers "shim funded" from a thaw height a plain PSBT open never sets. The blunt flag behind an explicit confirmation is the standard route.</li>
+      <li><span class="sev s-cost">settled in source</span> <strong>Who owns the ten-minute clock?</strong> Not us: <code>pruneZombieReservations</code> skips PSBT reservations outright, so our node never expires one. On the peer it is set at the end of the same handler that sends <code>accept_channel</code>. The timeout is <code>DefaultReservationTimeout</code> = 10 minutes, swept on a 1-minute interval, neither adjustable in a release build. Measured on regtest at <strong>10m41s</strong> — ten minutes plus sweeper granularity, as predicted. What the operator sees is <em>"remote canceled funding, possibly timed out"</em>; the "possibly" is ours, and the peer does not say it timed out.</li>
+      <li><span class="sev s-cost">settled in source</span> <strong>What does <code>RequiredReserve</code> return for private channels, given the field is named <code>additional_public_channels</code>?</strong> It has no idea whether the channels you name are public, so the caller must pass the count of announced members only. Private channels are invisible to the check twice over: the counter skips them, and the enforcement returns early when the channel being opened is unannounced.</li>
+      <li><span class="sev s-proven">proven on regtest</span> <strong>Will <code>UpdateChannelPolicy</code> accept a pending channel point?</strong> Neither yes nor no, and the real answer is worse than both: <strong>the call does not fail.</strong> It returns success with the refusal inside it, as <code>UPDATE_FAILURE_PENDING</code> / <em>"not yet confirmed"</em> in <code>failed_updates</code>, with a nil error. A caller that checked only the error would record a policy it had never applied and go on forwarding at 1000 msat and 1 ppm believing otherwise. Every attempt has to be judged against <code>failed_updates</code>, and only an empty list is a success.</li>
+      <li><span class="sev s-cost">settled in source</span> <strong>Can the initiator read a peer's <code>minimum_depth</code>?</strong> No. It is in <code>accept_channel</code> and in LND's stored channel record, and in no RPC. So step 9 <em>observes</em> it — the number of confirmations a channel has when it first appears is that peer's answer — and the design must not promise "usable after <em>k</em> confirmations" up front. It is authoritative, it arrives far too late to plan with, and it is exactly the right thing to record for the next batch.</li>
     </ul>
+    <div class="note warn">
+      <span class="lbl">What this page is ahead of</span>This revision describes the design after the inversion. The code has proved the inversion and has not yet been reshaped around it: the finalize step, the fee and change refusals, the sequence-number refusal and the journal's state order are all still as the previous revision described them. Each place that matters is flagged in the section it belongs to rather than collected here, so that a reader cannot act on one without seeing the caveat beside it.
+    </div>
   </div>
 </section>
 
 <footer>
   <div class="band">
     <div class="gut eyebrow"><b>Refs</b></div>
-    <p>Derived from <a href="https://blog.dpinkerton.com/posts/lightning-channels-from-external-wallet-psbt/">Lightning channels from an external wallet via PSBT</a>, with RPC semantics taken verbatim from <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/lightning.proto"><code>lnrpc/lightning.proto</code></a>, <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/walletrpc/walletkit.proto"><code>walletkit.proto</code></a>, and <a href="https://github.com/lightningnetwork/lnd/blob/master/docs/psbt.md">lnd/docs/psbt.md</a>.</p>
+    <p>Derived from <a href="https://blog.dpinkerton.com/posts/lightning-channels-from-external-wallet-psbt/">Lightning channels from an external wallet via PSBT</a>, with RPC semantics taken verbatim from <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/lightning.proto"><code>lnrpc/lightning.proto</code></a>, <a href="https://github.com/lightningnetwork/lnd/blob/master/lnrpc/walletrpc/walletkit.proto"><code>walletkit.proto</code></a>, and <a href="https://github.com/lightningnetwork/lnd/blob/master/docs/psbt.md">lnd/docs/psbt.md</a>. Line citations are against <code>lnd@v0.19.3-beta</code>.</p>
     <p>Quoted warnings are LND's own. Where this document and the proto comments disagree, the proto is right.</p>
   </div>
 </footer>
