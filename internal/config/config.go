@@ -180,12 +180,14 @@ func Load(path string) (*Config, error) {
 	if lim.has("allow_rbf") {
 		errs = append(errs, fmt.Sprintf("%s: allow_rbf is not a setting. Replacing "+
 			"the funding transaction changes every outpoint in it, and every peer "+
-			"holds a commitment signature against the old ones, so the funding "+
-			"transaction's replaceability is off at construction and nothing reads "+
-			"a preference about it (I-4). The CPFP child `winthistle bump` builds "+
-			"is replaceable, so that a second lift replaces it — also not a "+
-			"preference. "+
-			"Delete the line.", where(path, lim.lineOf("allow_rbf"))))
+			"holds a commitment signature against the old ones, so there is no "+
+			"preference to express (I-4). This program does not build the "+
+			"transaction and no longer reads its sequence numbers either: Core "+
+			"relays a higher-fee conflict whatever they signal, so replaceable: "+
+			"false is a statement of intent and not a defence. What holds I-4 is "+
+			"that only you can sign your inputs, and no code path here replaces a "+
+			"funding transaction. Delete the line.",
+			where(path, lim.lineOf("allow_rbf"))))
 	}
 	confirmed, err := lim.boolean(path, "require_confirmed_inputs", true)
 	fail(err)

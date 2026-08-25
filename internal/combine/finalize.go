@@ -207,9 +207,13 @@ func (f *Finalized) View() ([]byte, error) {
 // re-run rather than a new check on purpose: the plan verified the *unsigned*
 // PSBT before the signers saw it, and this proves the thing that came back is
 // still that transaction — every funding output present once at the exact
-// amount, no output the plan does not name, the fee rate inside tolerance,
-// change big enough for a CPFP child, every input a SegWit spend, nothing
-// replaceable.
+// amount, no output the plan does not name, every input a SegWit spend.
+//
+// The fee rate and the change size come back as reports rather than refusals,
+// here as at step 5, and they are worth printing here even though they cannot
+// fail: the size is exact rather than an upper bound once every witness is
+// present, so this is the first place the real rate is knowable. See
+// Verification.Reported, and run's step 7, which prints it.
 //
 // It verifies the transaction rather than the packet. The packet that arrived
 // and the bytes that will be broadcast are not the same artifact, and the second

@@ -177,7 +177,8 @@ func runCmd(ctx context.Context, args []string) error {
 		"Needed only by a wallet that writes no key origins at all")
 	feeRate := fs.Float64("fee-rate", 0, "the sat/vB you mean to build this batch "+
 		"at, overriding [fees] target_sat_per_vb. Nothing here estimates it: step 5 "+
-		"checks the transaction you built against this number, a quarter either way")
+		"holds the transaction you built to this number, a quarter either way, and "+
+		"reports the difference rather than refusing over it")
 	settleFor := fs.Duration("settle-for", run.DefaultSettleFor,
 		"how long Phase 2 watches for confirmations and applies policies")
 	yes := fs.Bool("yes", false, "do not ask before arming. The blunt-abandon "+

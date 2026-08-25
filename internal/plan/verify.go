@@ -14,27 +14,6 @@ import (
 	"github.com/btcsuite/btcd/wire"
 )
 
-// MaxNonReplaceableSequence is the largest input sequence that still signals
-// BIP-125 opt-in replaceability. A transaction is replaceable if *any* input is
-// below 0xfffffffe, so every input has to be at or above it.
-//
-// I-4: replacing the funding transaction changes every outpoint and destroys
-// every channel in the batch. This is not adjustable and there is no mode in
-// which the app accepts a replaceable funding transaction.
-//
-// MaxBIP125Sequence stood beside it until item 5 — 0xfffffffd, the sequence the
-// CPFP child was built with, deliberately and unconditionally replaceable so
-// that a second lift was an ordinary RBF rather than a grandchild. Two verifiers
-// enforcing opposite rules was how both rules were expressible at once. The
-// child is deleted, so there is one rule and one verifier, and nothing in this
-// build constructs a replaceable transaction of any kind.
-//
-// The refusal this constant backs is a lint and item 6 removes it: Core 29's
-// full-RBF is unconditional, so a higher-fee conflict relays whatever our
-// sequence numbers signal. What holds I-4 is authorship — no code path here
-// replaces a funding transaction — and that is all that ever held it.
-const MaxNonReplaceableSequence = wire.MaxTxInSequenceNum - 1
-
 // Code identifies a finding, so a UI can react to one without matching prose.
 type Code int
 
@@ -53,7 +32,6 @@ const (
 	MismatchedUTXO
 	InputNotAllowed
 	DuplicateInput
-	Replaceable
 	NoFee
 	FeeTooLow
 	FeeTooHigh
@@ -90,8 +68,6 @@ func (c Code) String() string {
 		return "input is not in the planned coin set"
 	case DuplicateInput:
 		return "input spent twice"
-	case Replaceable:
-		return "replaceable"
 	case NoFee:
 		return "no fee"
 	case FeeTooLow:
@@ -107,10 +83,15 @@ func (c Code) String() string {
 
 // Problem is one reason to refuse the returned transaction.
 //
-// Every problem is a refusal. There is no severity here on purpose: this
-// verifier runs between the operator building a transaction and the app asking
-// n peers to commit to it, and a finding worth printing at that moment is worth
-// stopping for.
+// Every problem is a refusal. There is no severity here on purpose: a verifier
+// that graded its own findings would be a verifier whose refusals could be
+// argued down, and the whole product is the check that every output is
+// accounted for.
+//
+// What the verifier establishes and does not refuse over is a Finding, in a
+// different list and a deliberately different type. The split is which list a
+// thing lands in, never a field somebody reads afterwards, so OK() cannot be
+// made to depend on a grade that was set wrong.
 type Problem struct {
 	Code     Code
 	Where    string // "output 3", "input 0", ""
@@ -123,6 +104,31 @@ func (p Problem) String() string {
 		return p.Headline
 	}
 	return p.Where + ": " + p.Headline
+}
+
+// Finding is something the verifier established and does not refuse over.
+//
+// Four codes live here: ChangeMissing, ChangeTooSmall, FeeTooLow and
+// FeeTooHigh. They are your arrangements, not this app's. It
+// does not build the transaction, does not select the coins and cannot size a
+// change output for you — all it can do is say what yours came out as, and it
+// says so rather than blocking a batch over it.
+//
+// It carries the same fields as a Problem because a report wants the same
+// numbers a refusal did: the Where a finding attaches to, and the Detail that
+// says what the arithmetic was.
+type Finding struct {
+	Code     Code
+	Where    string // "output 3", "input 0", ""
+	Headline string
+	Detail   string
+}
+
+func (f Finding) String() string {
+	if f.Where == "" {
+		return f.Headline
+	}
+	return f.Where + ": " + f.Headline
 }
 
 // Attribution is one output of the returned transaction, and what the plan says
@@ -177,13 +183,35 @@ type Verification struct {
 
 	Problems []Problem
 
+	// Reports is what the verifier established and does not refuse over. It has
+	// no bearing on OK(): a batch whose only findings are here arms with no
+	// further prompt, which is the point of them being here.
+	Reports []Finding
+
 	// Unchecked names what this verification could not establish, so that a
 	// clean result is not read as a broader guarantee than it is.
+	//
+	// Reports is the other list, and the two are not interchangeable. "Your
+	// change is 4,000 sat and the floor is 21,000" is something this verifier
+	// did establish, and filing it under a heading that says otherwise would
+	// cost that heading the only thing it is for.
 	Unchecked []string
 }
 
 // OK reports whether the transaction may go on to psbt_verify.
 func (v *Verification) OK() bool { return len(v.Problems) == 0 }
+
+// refuse records a reason not to proceed. See Problem.
+func (v *Verification) refuse(code Code, where, headline, detail string) {
+	v.Problems = append(v.Problems, Problem{Code: code, Where: where,
+		Headline: headline, Detail: detail})
+}
+
+// note records something established and not refused over. See Finding.
+func (v *Verification) note(code Code, where, headline, detail string) {
+	v.Reports = append(v.Reports, Finding{Code: code, Where: where,
+		Headline: headline, Detail: detail})
+}
 
 // VerifyBase64 verifies a PSBT that is already in base64.
 func (p *Plan) VerifyBase64(s string) (*Verification, error) {
@@ -222,15 +250,10 @@ func (p *Plan) Verify(raw []byte) (*Verification, error) {
 		Chain:        p.Chain,
 		UnsignedTxID: packet.UnsignedTx.TxHash().String(),
 	}
-	add := func(code Code, where, headline, detail string) {
-		v.Problems = append(v.Problems, Problem{Code: code, Where: where,
-			Headline: headline, Detail: detail})
-	}
-
-	prevScripts, inputsKnown := p.checkInputs(packet, v, add)
-	p.checkOutputs(packet, named, params, v, add)
+	prevScripts, inputsKnown := p.checkInputs(packet, v)
+	p.checkOutputs(packet, named, params, v)
 	if inputsKnown {
-		p.checkFee(packet, prevScripts, v, add)
+		p.checkFee(packet, prevScripts, v)
 	} else {
 		// Without every input's value there is no fee, and without every input's
 		// script there is no size. Reporting either from a partial sum would put
@@ -253,19 +276,21 @@ func (p *Plan) Verify(raw []byte) (*Verification, error) {
 	sort.SliceStable(v.Problems, func(i, j int) bool {
 		return v.Problems[i].Code < v.Problems[j].Code
 	})
+	sort.SliceStable(v.Reports, func(i, j int) bool {
+		return v.Reports[i].Code < v.Reports[j].Code
+	})
 	return v, nil
 }
 
 // checkInputs walks the inputs and returns each one's prevout script, which the
 // sizing pass needs.
-func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
-	add func(Code, string, string, string)) ([][]byte, bool) {
+func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification) ([][]byte, bool) {
 
 	tx := packet.UnsignedTx
 	prevScripts := make([][]byte, len(tx.TxIn))
 
 	if len(tx.TxIn) == 0 {
-		add(NoInputs, "", "The transaction spends nothing.",
+		v.refuse(NoInputs, "", "The transaction spends nothing.",
 			"LND refuses this too, at psbt_verify.")
 		return prevScripts, false
 	}
@@ -283,20 +308,29 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 		view := InputView{Index: i, Outpoint: op, Sequence: txIn.Sequence}
 
 		if first, dup := seen[txIn.PreviousOutPoint]; dup {
-			add(DuplicateInput, where,
+			v.refuse(DuplicateInput, where,
 				fmt.Sprintf("%s is already spent by input %d.", op, first), "")
 		}
 		seen[txIn.PreviousOutPoint] = i
 
-		// I-4. A transaction is replaceable if any single input signals it.
-		if txIn.Sequence < MaxNonReplaceableSequence {
-			add(Replaceable, where,
-				fmt.Sprintf("Sequence is %#x, which signals BIP-125 replaceability.", txIn.Sequence),
-				"Replacing the funding transaction changes every outpoint in it and "+
-					"destroys every channel in the batch. Rebuild with replaceability "+
-					"off — in Sparrow that is the RBF toggle on the transaction; in "+
-					"Core it is walletcreatefundedpsbt's \"replaceable\": false.")
-		}
+		// Nothing judges the sequence number, and that is deliberate. A refusal
+		// stood here until item 6: any input below 0xfffffffe signals BIP-125
+		// opt-in replaceability, and I-4 says replacing the funding transaction
+		// moves every outpoint in it and destroys every channel in the batch.
+		//
+		// The refusal was a lint wearing an invariant's clothes. Core 29 relays a
+		// higher-fee conflict whatever the sequence numbers signal — full-RBF is
+		// unconditional there, verified against a running node: mempoolfullrbf
+		// does not exist even as a hidden debug option, and getmempoolinfo
+		// reports "fullrbf": true with no way to turn it off. So a transaction
+		// that signals nothing is no harder to replace than one that does, and
+		// "replaceable": false is a statement of intent rather than a defence.
+		//
+		// What holds I-4 is authorship, which is all that ever held it: only we
+		// can sign our inputs, and there is no code path in this repository that
+		// replaces a funding transaction. Do not put the refusal back — the
+		// sequence is still on InputView, so the fact is recorded and simply not
+		// judged.
 
 		in := packet.Inputs[i]
 		switch {
@@ -309,14 +343,14 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 			// from a different transaction makes the input sum — and therefore
 			// the fee — a fiction.
 			if h := in.NonWitnessUtxo.TxHash(); h != txIn.PreviousOutPoint.Hash {
-				add(MismatchedUTXO, where,
+				v.refuse(MismatchedUTXO, where,
 					fmt.Sprintf("The attached previous transaction is %s, but this "+
 						"input spends %s.", h, txIn.PreviousOutPoint.Hash), "")
 				break
 			}
 			idx := int(txIn.PreviousOutPoint.Index)
 			if idx >= len(in.NonWitnessUtxo.TxOut) {
-				add(MismatchedUTXO, where,
+				v.refuse(MismatchedUTXO, where,
 					fmt.Sprintf("The attached previous transaction has %d outputs, "+
 						"so it has no output %d.", len(in.NonWitnessUtxo.TxOut), idx), "")
 				break
@@ -324,7 +358,7 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 			prevScripts[i] = in.NonWitnessUtxo.TxOut[idx].PkScript
 			view.AmountSat = in.NonWitnessUtxo.TxOut[idx].Value
 		default:
-			add(NoUTXOInfo, where,
+			v.refuse(NoUTXOInfo, where,
 				fmt.Sprintf("%s carries neither a witness UTXO nor the transaction it "+
 					"came from.", op),
 				"Without it neither the amount nor the script is knowable, so the fee "+
@@ -336,7 +370,7 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 			segwit, why := IsSegwitSpend(prevScripts[i], in.RedeemScript)
 			view.Segwit = segwit
 			if !segwit {
-				add(LegacyInput, where,
+				v.refuse(LegacyInput, where,
 					fmt.Sprintf("%s is not a SegWit spend: %s.", op, why),
 					"LND refuses this outright — verifyAllInputsSegWit, \"risk of "+
 						"malleability\" — and I-3 is the same fact from the other side: "+
@@ -346,7 +380,7 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 		}
 
 		if len(allowed) > 0 && !allowed[op] {
-			add(InputNotAllowed, where,
+			v.refuse(InputNotAllowed, where,
 				fmt.Sprintf("%s is not one of the %d coins the plan named.", op, len(allowed)),
 				"The plan locked a coin set during Phase 0. A coin outside it may be "+
 					"unconfirmed, legacy, or reserved for something else.")
@@ -366,7 +400,7 @@ func (p *Plan) checkInputs(packet *psbt.Packet, v *Verification,
 
 // checkOutputs is the part LND does not do.
 func (p *Plan) checkOutputs(packet *psbt.Packet, named []Named,
-	params *chaincfg.Params, v *Verification, add func(Code, string, string, string)) {
+	params *chaincfg.Params, v *Verification) {
 
 	byScript := make(map[string]*Named, len(named))
 	count := make(map[string]int, len(named))
@@ -386,7 +420,7 @@ func (p *Plan) checkOutputs(packet *psbt.Packet, named []Named,
 			count[string(out.PkScript)]++
 			a.Named, a.Kind, a.Label = true, n.Kind, n.Label
 			if n.Exact && out.Value != n.AmountSat {
-				add(WrongAmount, where,
+				v.refuse(WrongAmount, where,
 					fmt.Sprintf("%s pays %d sat; the plan says %d sat.",
 						n.Label, out.Value, n.AmountSat),
 					"LND compares its own funding output with psbt.TxOutsEqual, which "+
@@ -394,7 +428,7 @@ func (p *Plan) checkOutputs(packet *psbt.Packet, named []Named,
 						"not verify.")
 			}
 			if !n.Exact && n.AmountSat > 0 && out.Value < n.AmountSat {
-				add(WrongAmount, where,
+				v.refuse(WrongAmount, where,
 					fmt.Sprintf("%s pays %d sat; the plan asks for at least %d sat.",
 						n.Label, out.Value, n.AmountSat), "")
 			}
@@ -414,7 +448,7 @@ func (p *Plan) checkOutputs(packet *psbt.Packet, named []Named,
 			continue
 		}
 
-		add(UnnamedOutput, where,
+		v.refuse(UnnamedOutput, where,
 			fmt.Sprintf("%s to %s, which the plan does not name.",
 				prose.Sats(out.Value), a.Address),
 			"This is the check nothing else makes. LND's psbt_verify looks for its "+
@@ -429,22 +463,22 @@ func (p *Plan) checkOutputs(packet *psbt.Packet, named []Named,
 		case c == 0 && n.Kind == ChangeOut:
 			// checkChange reports this, in copy that says why it matters.
 		case c == 0:
-			add(MissingOutput, "",
+			v.refuse(MissingOutput, "",
 				fmt.Sprintf("%s is not in the transaction at all (%s, %d sat).",
 					n.Label, n.Address, n.AmountSat), "")
 		case c > 1:
-			add(DuplicateOutput, "",
+			v.refuse(DuplicateOutput, "",
 				fmt.Sprintf("%s appears %d times. The plan names it once.", n.Label, c),
 				"LND would be satisfied — psbt_verify sets a found flag and does not "+
 					"count — but the batch would pay twice.")
 		}
 	}
 
-	p.checkChange(v, add)
+	p.checkChange(v)
 }
 
 // checkChange finds the change output and reports if there is not exactly one.
-func (p *Plan) checkChange(v *Verification, add func(Code, string, string, string)) {
+func (p *Plan) checkChange(v *Verification) {
 	var found []Attribution
 	for _, a := range v.Outputs {
 		if a.Named && a.Kind == ChangeOut {
@@ -453,10 +487,15 @@ func (p *Plan) checkChange(v *Verification, add func(Code, string, string, strin
 	}
 	switch len(found) {
 	case 0:
-		add(ChangeMissing, "", "The transaction has no change output.",
-			"I-4 forbids replacing this transaction, so its change output is the "+
-				"only thing that can ever accelerate it. A batch without one is a "+
-				"batch that can only be waited out.")
+		v.note(ChangeMissing, "", "The transaction has no change output.",
+			"Nothing is at risk in that: the coins are yours, unspent, in a "+
+				"transaction only you can sign. What it costs you is the lever. I-4 "+
+				"forbids replacing this transaction, so a change output is the only "+
+				"thing a CPFP child could ever spend, and a batch without one that "+
+				"goes out too cheap can only be waited out — or double-spent out of "+
+				"band, in your own wallet, which is yours to do and not this app's. "+
+				"Your change arrangements are your own; this is said rather than "+
+				"refused over.")
 	case 1:
 		v.ChangeSat = found[0].AmountSat
 	default:
@@ -464,7 +503,7 @@ func (p *Plan) checkChange(v *Verification, add func(Code, string, string, strin
 		for _, a := range found {
 			idx = append(idx, a.Index)
 		}
-		add(ChangeAmbiguous, "",
+		v.refuse(ChangeAmbiguous, "",
 			fmt.Sprintf("%d outputs look like change (%v).", len(found), idx),
 			"The plan expects one, and which one is the CPFP lever cannot be "+
 				"guessed.")
@@ -473,7 +512,7 @@ func (p *Plan) checkChange(v *Verification, add func(Code, string, string, strin
 
 // checkFee does the arithmetic and the I-4 change sizing.
 func (p *Plan) checkFee(packet *psbt.Packet, prevScripts [][]byte,
-	v *Verification, add func(Code, string, string, string)) {
+	v *Verification) {
 
 	v.FeeSat = v.InputSat - v.OutputSat
 
@@ -481,7 +520,7 @@ func (p *Plan) checkFee(packet *psbt.Packet, prevScripts [][]byte,
 	// than output amount sum". It does no fee estimation beyond that, which is
 	// why the rate check below is ours.
 	if v.InputSat > 0 && v.FeeSat <= 0 {
-		add(NoFee, "",
+		v.refuse(NoFee, "",
 			fmt.Sprintf("The inputs total %d sat and the outputs %d sat, so the fee is %d.",
 				v.InputSat, v.OutputSat, v.FeeSat),
 			"LND refuses this at psbt_verify: the input sum must exceed the output sum.")
@@ -490,7 +529,7 @@ func (p *Plan) checkFee(packet *psbt.Packet, prevScripts [][]byte,
 
 	size, err := estimateSize(packet, prevScripts)
 	if err != nil {
-		add(Unsizable, "", "The transaction's size cannot be estimated: "+err.Error(),
+		v.refuse(Unsizable, "", "The transaction's size cannot be estimated: "+err.Error(),
 			"Without a size there is no fee rate to check, and an input whose spend "+
 				"shape cannot be read is one the plan did not anticipate.")
 		return
@@ -503,26 +542,27 @@ func (p *Plan) checkFee(packet *psbt.Packet, prevScripts [][]byte,
 
 	switch {
 	case v.FeeRate < p.Fee.Low():
-		add(FeeTooLow, "",
+		v.note(FeeTooLow, "",
 			fmt.Sprintf("The fee rate is %.2f sat/vB; the plan targets %.2f.",
 				v.FeeRate, p.Fee.TargetSatPerVB),
 			"There is no RBF available here (I-4), so a batch that goes out too "+
-				"cheap can only be pushed by a CPFP child or waited out.")
+				"cheap can only be pushed by a CPFP child or waited out. The rate is "+
+				"the one you declared and the transaction is the one you built, so "+
+				"this is a disagreement between the two rather than a fault.")
 	case v.FeeRate > p.Fee.High():
-		add(FeeTooHigh, "",
+		v.note(FeeTooHigh, "",
 			fmt.Sprintf("The fee rate is %.2f sat/vB; the plan targets %.2f.",
 				v.FeeRate, p.Fee.TargetSatPerVB),
 			"Not dangerous, but it is not what was approved, and the difference is "+
 				"paid out of the change.")
 	}
 
-	p.checkChangeSize(packet, v, add)
+	p.checkChangeSize(packet, v)
 }
 
 // checkChangeSize is I-4's arithmetic: can the change output still buy a child
 // that lifts this transaction?
-func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
-	add func(Code, string, string, string)) {
+func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification) {
 
 	var change *Attribution
 	for i := range v.Outputs {
@@ -535,9 +575,9 @@ func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
 		return
 	}
 	if p.Change.MinimumSat > 0 && change.AmountSat < p.Change.MinimumSat {
-		add(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
-			fmt.Sprintf("Change is %d sat; the plan set a floor of %d sat.",
-				change.AmountSat, p.Change.MinimumSat), "")
+		v.note(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
+			fmt.Sprintf("Change is %s; the plan's floor is %s.",
+				prose.Sats(change.AmountSat), prose.Sats(p.Change.MinimumSat)), "")
 	}
 
 	// The child's own witness script, when the PSBT carries it. Core and Sparrow
@@ -557,13 +597,14 @@ func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification,
 	floor := ChangeFloor(v.Size.Vsize, v.FeeSat, p.Fee.CPFPTarget(), child)
 	v.ChangeFloorSat = floor
 	if change.AmountSat < floor {
-		add(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
-			fmt.Sprintf("Change is %d sat, which cannot fund a child big enough to "+
-				"lift this batch to %.2f sat/vB.", change.AmountSat, p.Fee.CPFPTarget()),
-			fmt.Sprintf("A %d vB child on top of a %d vB parent needs %d sat of "+
-				"change to leave anything above the %d sat dust limit. Reduce a "+
-				"funding amount or add a coin.",
-				child, v.Size.Vsize, floor, DustSat))
+		v.note(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
+			fmt.Sprintf("Change is %s, which cannot fund a child big enough to "+
+				"lift this batch to %.2f sat/vB.",
+				prose.Sats(change.AmountSat), p.Fee.CPFPTarget()),
+			fmt.Sprintf("A %d vB child on top of a %d vB parent needs %s of change "+
+				"to leave anything above the %s dust limit. If you want that lever, "+
+				"reduce a funding amount or add a coin and build again.",
+				child, v.Size.Vsize, prose.Sats(floor), prose.Sats(DustSat)))
 	}
 }
 

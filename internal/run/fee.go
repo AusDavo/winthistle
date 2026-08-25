@@ -77,8 +77,9 @@ func feeReport(f plan.Fee, o Options) string {
 	b.WriteString(prose.Para(fmt.Sprintf(
 		"There is no RBF on this transaction (I-4), so the rate is not revisable. "+
 			"If it turns out too low the remedy is a CPFP child spending the change "+
-			"output, built in your own wallet, and the change is checked here for "+
-			"being big enough to keep one viable at %.2f sat/vB.",
+			"output, built in your own wallet, and step 5 says whether your change "+
+			"is big enough to keep one viable at %.2f sat/vB — it says so rather "+
+			"than refusing, because the change is yours.",
 		f.CPFPTarget())))
 	return b.String()
 }

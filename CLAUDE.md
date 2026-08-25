@@ -50,7 +50,7 @@ and reads the signed one from `FILE-signed.psbt`. `internal/combine` has twenty
 adversarial tests on inbound PSBTs. `internal/plan` has the batch verifier. None
 of that is broken, and none of it should be described as broken.
 
-**Items 1 to 5 of the replan are done, and item 5 deleted 28,267 lines.** The
+**All six items of the replan are done, and item 5 deleted 28,267 lines.** The
 tree went from 55,670 Go lines to 28,881. Read
 `docs/replan-2026-08.md`'s "Item 3, as built", "Item 4, as built" and "Item 5, as
 built" for the account; the short version:
@@ -79,8 +79,14 @@ built" for the account; the short version:
   `internal/bitcoind` and the simulated multisig cold wallet survive **inside
   `internal/regtestenv`** as the stand-in for Sparrow — the cold wallet is
   literally there now, at `internal/regtestenv/coldwallet`.
-- **Item 6** demotes the fee and change findings to reports, and removes
-  `Replaceable`. **This is the only one left**, and it is small.
+- ~~**Item 6** demotes the fee and change findings to reports, and removes
+  `Replaceable`.~~ **Done, 2026-08-26.** `ChangeMissing`, `ChangeTooSmall`,
+  `FeeTooLow` and `FeeTooHigh` are `plan.Finding`s on `Verification.Reports` —
+  **not** `Unchecked`, which would have made that heading lie — and `OK()` is
+  still `len(v.Problems) == 0`. The `Replaceable` code, its refusal and
+  `MaxNonReplaceableSequence` are gone. See `docs/replan-2026-08.md`'s "Item 6,
+  as built". **All six items are done; the mainnet cold probe is what is left,
+  and it is not a code slice.**
 
 **Three things item 5 decided, which the code now depends on:**
 
@@ -253,15 +259,25 @@ batch. **Enforced by authorship, which is all that ever enforced it:** only we
 can sign our inputs, and there is no code path in this repository that replaces a
 funding transaction.
 
-**The `Replaceable` sequence-number refusal is a lint, and it is slated for
-removal in item 6. It is still there today** (`internal/plan/verify.go`), and
-until item 6 it still refuses. Core 29's full-RBF is unconditional — verified
-live: `mempoolfullrbf` does not exist even as a hidden debug option
-(`bitcoind -help-debug` has no such flag), and `getmempoolinfo` reports
-`"fullrbf": true` with no way to turn it off — so a higher-fee conflict relays
-regardless of what our sequence numbers signal. Refusing a transaction over a
-signal that changes nothing is a lint wearing an invariant's clothes.
-`replaceable: false` is a statement of intent, not a defence.
+**The `Replaceable` sequence-number refusal was a lint, and item 6 removed it.**
+Core 29's full-RBF is unconditional — verified live: `mempoolfullrbf` does not
+exist even as a hidden debug option (`bitcoind -help-debug` has no such flag),
+and `getmempoolinfo` reports `"fullrbf": true` with no way to turn it off — so a
+higher-fee conflict relays regardless of what our sequence numbers signal.
+Refusing a transaction over a signal that changes nothing is a lint wearing an
+invariant's clothes. `replaceable: false` is a statement of intent, not a
+defence.
+
+**Removing it did not relax I-4, and the two are the same diff to a fast
+reader.** Nothing was weakened, because the lint never held anything: it judged a
+signal that Core ignores. `plan.Code` no longer has a `Replaceable` member,
+`MaxNonReplaceableSequence` is gone, and `InputView.Sequence` still records what
+each input said so a report can show it. The comment where the refusal used to
+stand, in `plan.checkInputs`, says all of this at the one place somebody would
+put it back. **What holds I-4 is that only we can sign our inputs**, and I-3's
+txid pin is what catches a signer that edited a sequence number — a changed
+sequence is a changed txid, which is what
+`TestASignerThatChangedASequenceNumberIsRefused` now asserts.
 
 What the invariant covers, and what it does not:
 
@@ -284,18 +300,41 @@ breaking and the answer is to stop, not to edit this section.
 
 ---
 
-## Why the change output is required
+## Why the change output is worth having
 
-The batch verifier refuses a transaction with no change output, or with change
-too small to fund a child that lifts the package to `Fee.CPFPTarget()`.
+The batch verifier **reports** a transaction with no change output, or with
+change too small to fund a child that lifts the package to `Fee.CPFPTarget()`.
+It does not refuse one. Item 6 made that so, and the reasoning below is why the
+fact is worth *saying*: your fee and change arrangements are yours, the app does
+not build the transaction and cannot size a change output for you, and a tool
+that refused a batch over them would be claiming an authority it gave up at step
+4.
 
-**That gate is real today, and item 6 demotes it to a report.** `ChangeMissing`,
-`ChangeTooSmall`, `FeeTooLow` and `FeeTooHigh` move to `Verification.Unchecked`,
-which exists "so that a clean result is not read as a broader guarantee than it
-is". The reasoning below survives the demotion intact — it is why the fact is
-worth *saying*. Your fee and change arrangements are yours, and after the
-inversion the app does not build the transaction and so cannot size a change
-output; it can only tell you yours is too small.
+**They went to `Verification.Reports`, not to `Verification.Unchecked`, and the
+difference was the one real decision in item 6.** `Unchecked` "names what this
+verification could not establish, so that a clean result is not read as a broader
+guarantee than it is", and it renders under the heading **"Not checked here"**.
+"Your change is 600 sat and the floor is 12,350" is something the verifier *did*
+establish. Filing it under that heading would cost the heading the only thing it
+is for. So `Reports []Finding` sits beside `Problems []Problem`, renders under
+**"Reported, not refused"**, and `OK()` is still `len(v.Problems) == 0`.
+
+**`Finding` is a separate type from `Problem` on purpose.** `Problem`'s comment
+says every problem is a refusal and there is no severity on purpose, and item 6
+had to keep that true rather than edit around it. Two types make the split a
+thing the compiler knows: a demoted finding cannot be appended to `Problems` by
+accident, so `OK()` cannot come to depend on a grade somebody set wrong. The
+verifier writes to them through `v.refuse(...)` and `v.note(...)`.
+
+**Four codes stayed refusals, deliberately.** `ChangeAmbiguous` — two outputs
+that look like change is an *attribution* failure, the same family as
+`UnnamedOutput`. `NoFee` — LND refuses it itself at `psbt_verify`, so reporting
+it would arm a batch LND will reject. `Unsizable` — with no size there is no fee
+rate to report *about*. `LegacyInput` — I-3 and LND's own requirement, and
+nothing pre-excludes a legacy coin now that Sparrow picks them.
+
+**And a batch with no change output now arms with no further prompt.** That is
+the item, not a gap in it. Do not add a confirmation gate back.
 
 **Which output is the change, now that the app does not choose it.** Not named —
 recognised. `plan.RecogniseChangeIn` reads the master fingerprints off the
@@ -335,13 +374,26 @@ gate used to be justified in custody language — as though a stuck batch put co
 at risk. It does not, and an operator who believes it does will reach, under
 pressure, for the one thing I-4 forbids.
 
-**That copy is still in the code.** Three strings still say it, two of them
-operator-facing: `internal/plan/plan.go` ("change is the only way a stuck batch
-can be accelerated", an error message), `internal/plan/report.go` (the same claim,
-in a plan-report bullet) and `internal/plan/size.go` ("a batch with nothing to
-rescue it", a doc comment). Fixing them is item 6's business,
-alongside the demotion. Until then this file and that copy disagree, and this
-file is right.
+**That copy is gone, in item 6, along with more of it than the three strings
+this file used to name.** The three were `internal/plan/plan.go`'s error,
+`internal/plan/report.go`'s plan bullet and `internal/plan/size.go`'s doc
+comment. A sweep found the same framing in `internal/plan/verify.go`'s own
+`ChangeMissing` detail — the most operator-facing of the lot — plus two more in
+`size.go`, `report.go`'s "what a rescue child would cost" table label,
+`internal/run/fee.go` and `internal/doctor/doctor.go`. The rule the replacements
+follow: **name what is missing (the lever), never imply what is not (risk).**
+Nothing is at risk in a stuck batch; what is missing is the exit.
+
+`internal/plan/plan.go`'s refusal survives with a different subject. It no longer
+says change is the only way to accelerate a stuck batch; it says the plan has no
+way to *identify* the change output, which is an attribution failure and is the
+check the program exists for. `run --change ADDRESS` is the answer, and
+`TestAPlanWithNoChangeArrangementIsRefused` asserts the wording so the two do not
+drift back together.
+
+**Two strings in `internal/regtestenv/coldwallet/build.go` still carry the old
+framing.** They are harness-only — the stand-in for Sparrow, refusing to build a
+fixture — and item 6 did not falsify them, so they were left alone.
 
 **The escape this build does not implement.** If a batch is frozen anyway, the
 only route out is an out-of-band double-spend of one of its inputs, performed by
@@ -436,8 +488,8 @@ From `docs/replan-2026-08.md`, which is the document that describes the future.
 4. ~~Add the `--psbt` path to `run`, stop calling `coldwallet`.~~ **Done, 2026-08-26.**
 5. ~~Delete the cut packages.~~ **Done, 2026-08-26.** 28,267 lines deleted, 846
    added, five commits. See `docs/replan-2026-08.md`'s "Item 5, as built".
-6. Demote the fee and change findings, remove `Replaceable`. **The only one
-   left, and it is small.**
+6. ~~Demote the fee and change findings, remove `Replaceable`.~~ **Done,
+   2026-08-26.** See `docs/replan-2026-08.md`'s "Item 6, as built".
 
 Modify in place, on a branch, keeping the tool working at every commit. The
 packages that survive are the ones that were expensive to get right and are

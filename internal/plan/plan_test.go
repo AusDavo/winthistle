@@ -267,6 +267,32 @@ func has(v *Verification, want Code) bool {
 	return false
 }
 
+// reportCodes is the other list. Since item 6 four findings are established and
+// not refused over, and they live in Reports rather than Problems — so a test
+// that only ever looked at codes() would read that demotion as a disappearance.
+func reportCodes(v *Verification) []Code {
+	out := make([]Code, 0, len(v.Reports))
+	for _, r := range v.Reports {
+		out = append(out, r.Code)
+	}
+	return out
+}
+
+func reported(v *Verification, want Code) bool {
+	for _, c := range reportCodes(v) {
+		if c == want {
+			return true
+		}
+	}
+	return false
+}
+
+// found looks in both lists, for a test whose subject is whether the verifier
+// noticed something at all rather than what it did about it.
+func found(v *Verification, want Code) bool {
+	return has(v, want) || reported(v, want)
+}
+
 func wantOnly(t *testing.T, v *Verification, want Code) {
 	t.Helper()
 	if !has(v, want) {
@@ -431,39 +457,46 @@ func TestALegacyInputIsRefusedEvenWithAWitnessUtxo(t *testing.T) {
 	}
 }
 
-func TestAReplaceableTransactionIsRefused(t *testing.T) {
-	f := newFixture(t)
-	b := newTx(t).
-		coldIn(0x60, 3_000_000).
-		inSeq(0x70, 0, 2_000_000, mustP2WSH(t, 0x70), 0xfffffffd).
-		out(1_000_000, f.fundingA).
-		out(2_000_000, f.fundingB).
-		out(20_000, f.topUp).
-		out(f.changeValue, f.change)
-	b.witScript[1] = multisig2of2(t)
+// TestTheSequenceNumberIsRecordedAndNotJudged.
+//
+// A refusal stood here until item 6: any input below 0xfffffffe signals BIP-125
+// opt-in replaceability, and I-4 says replacing the funding transaction moves
+// every outpoint in it and destroys every channel in the batch.
+//
+// It was a lint wearing an invariant's clothes. Core 29 relays a higher-fee
+// conflict whatever the sequence numbers signal — full-RBF is unconditional
+// there, verified against a running node — so a transaction that signals nothing
+// is no harder to replace than one that does. What holds I-4 is authorship: only
+// we can sign our inputs, and no code path in this repository replaces a funding
+// transaction.
+//
+// So this asserts the opposite of what it used to, on the same fixtures: the
+// sequence is on InputView, where the report can show it, and nothing refuses
+// over it. 0xfffffffd is BIP-125 opt-in; 0xfffffffe is what a wallet uses when
+// it wants nLockTime honoured without opting in; 0xffffffff is neither.
+func TestTheSequenceNumberIsRecordedAndNotJudged(t *testing.T) {
+	for _, seq := range []uint32{0xfffffffd, 0xfffffffe, 0xffffffff} {
+		f := newFixture(t)
+		b := newTx(t).
+			coldIn(0x60, 3_000_000).
+			inSeq(0x70, 0, 2_000_000, mustP2WSH(t, 0x70), seq).
+			out(1_000_000, f.fundingA).
+			out(2_000_000, f.fundingB).
+			out(20_000, f.topUp).
+			out(f.changeValue, f.change)
+		b.witScript[1] = multisig2of2(t)
 
-	v := verify(t, f.plan, b)
-	if !has(v, Replaceable) {
-		t.Fatalf("an RBF-signalling input passed: %v\n%s", codes(v), v.Report())
-	}
-}
-
-// TestSequenceFFFFFFFEIsNotReplaceable. BIP-125 opt-in is strictly below
-// 0xfffffffe, and 0xfffffffe is the value a wallet uses when it wants nLockTime
-// honoured without opting in to replacement.
-func TestSequenceFFFFFFFEIsNotReplaceable(t *testing.T) {
-	f := newFixture(t)
-	b := newTx(t).
-		coldIn(0x60, 3_000_000).
-		inSeq(0x70, 0, 2_000_000, mustP2WSH(t, 0x70), 0xfffffffe).
-		out(1_000_000, f.fundingA).
-		out(2_000_000, f.fundingB).
-		out(20_000, f.topUp).
-		out(f.changeValue, f.change)
-	b.witScript[1] = multisig2of2(t)
-
-	if v := verify(t, f.plan, b); has(v, Replaceable) {
-		t.Errorf("0xfffffffe was read as replaceable:\n%s", v.Report())
+		v := verify(t, f.plan, b)
+		if !v.OK() {
+			t.Errorf("sequence %#x was refused: %v\n%s", seq, codes(v), v.Report())
+		}
+		if len(v.Reports) > 0 {
+			t.Errorf("sequence %#x was reported on: %v", seq, reportCodes(v))
+		}
+		if got := v.Inputs[1].Sequence; got != seq {
+			t.Errorf("the report records sequence %#x, not the %#x in the "+
+				"transaction", got, seq)
+		}
 	}
 }
 
@@ -473,7 +506,13 @@ func mustP2WSH(t *testing.T, seed byte) []byte {
 	return s
 }
 
-func TestAFeeRateOutsideToleranceIsRefused(t *testing.T) {
+// TestAFeeRateOutsideToleranceIsReportedNotRefused.
+//
+// Since item 6 the rate is the operator's. This app does not build the
+// transaction and does not choose the fee, so all it can do is hold what was
+// built to the rate that was declared and say where the two disagree. The
+// assertion is on both halves: the finding is made, and the batch still arms.
+func TestAFeeRateOutsideToleranceIsReportedNotRefused(t *testing.T) {
 	f := newFixture(t)
 
 	low := newTx(t).
@@ -483,8 +522,12 @@ func TestAFeeRateOutsideToleranceIsRefused(t *testing.T) {
 		out(2_000_000, f.fundingB).
 		out(20_000, f.topUp).
 		out(1_979_800, f.change) // ~1 sat/vB
-	if v := verify(t, f.plan, low); !has(v, FeeTooLow) {
-		t.Errorf("a 1 sat/vB transaction passed a 10 sat/vB plan: %v", codes(v))
+	if v := verify(t, f.plan, low); !reported(v, FeeTooLow) {
+		t.Errorf("a 1 sat/vB transaction went unremarked against a 10 sat/vB plan: "+
+			"%v / %v", codes(v), reportCodes(v))
+	} else if !v.OK() {
+		t.Errorf("an underpaying transaction was refused rather than reported: %v",
+			codes(v))
 	}
 
 	high := newTx(t).
@@ -494,8 +537,12 @@ func TestAFeeRateOutsideToleranceIsRefused(t *testing.T) {
 		out(2_000_000, f.fundingB).
 		out(20_000, f.topUp).
 		out(1_900_000, f.change) // ~200 sat/vB
-	if v := verify(t, f.plan, high); !has(v, FeeTooHigh) {
-		t.Errorf("a wildly overpaying transaction passed: %v", codes(v))
+	if v := verify(t, f.plan, high); !reported(v, FeeTooHigh) {
+		t.Errorf("a wildly overpaying transaction went unremarked: %v / %v",
+			codes(v), reportCodes(v))
+	} else if !v.OK() {
+		t.Errorf("an overpaying transaction was refused rather than reported: %v",
+			codes(v))
 	}
 }
 
@@ -516,7 +563,18 @@ func TestNoFeeAtAllIsRefused(t *testing.T) {
 	}
 }
 
-func TestNoChangeOutputIsRefused(t *testing.T) {
+// TestNoChangeOutputIsReportedAndTheBatchStillArms.
+//
+// Item 6's whole point, and the assertion is on the second half as much as the
+// first. A batch with no change output has no CPFP lever and therefore no exit
+// but an out-of-band double-spend the operator performs themselves — worth
+// saying, and not worth refusing over. Nothing is at risk in it: the coins are
+// theirs, unspent, in a transaction only they can sign.
+//
+// A tool that refused this would be claiming an authority it gave up at step 4,
+// where it stopped building the transaction. So OK() stays true and there is no
+// further prompt.
+func TestNoChangeOutputIsReportedAndTheBatchStillArms(t *testing.T) {
 	f := newFixture(t)
 	b := newTx(t).
 		coldIn(0x60, 3_000_000).
@@ -526,18 +584,31 @@ func TestNoChangeOutputIsRefused(t *testing.T) {
 		out(20_000, f.topUp)
 
 	v := verify(t, f.plan, b)
-	if !has(v, ChangeMissing) {
-		t.Fatalf("a batch with no CPFP lever passed: %v\n%s", codes(v), v.Report())
+	if !reported(v, ChangeMissing) {
+		t.Fatalf("a batch with no CPFP lever went unremarked: %v / %v\n%s",
+			codes(v), reportCodes(v), v.Report())
+	}
+	if !v.OK() {
+		t.Fatalf("a missing change output refused the batch: %v\n%s",
+			codes(v), v.Report())
+	}
+	if !strings.Contains(v.Report(), "Reported, not refused") {
+		t.Errorf("the finding is not under a heading of its own:\n%s", v.Report())
+	}
+	if strings.Contains(v.Report(), "Do not sign this") {
+		t.Errorf("the report tells the operator not to sign over their own change "+
+			"arrangements:\n%s", v.Report())
 	}
 }
 
-// TestChangeTooSmallForACPFPChildIsRefused. I-4 leaves the change output as the
-// only way to accelerate a stuck batch, so change that cannot buy a child is
-// change that is not doing its job.
-func TestChangeTooSmallForACPFPChildIsRefused(t *testing.T) {
+// TestChangeTooSmallForACPFPChildIsReported. I-4 leaves a child spending the
+// change as the only lever there will ever be on this batch, so change that
+// cannot buy one is change that is not doing that job — which is worth saying
+// and is the operator's to decide about.
+func TestChangeTooSmallForACPFPChildIsReported(t *testing.T) {
 	f := newFixture(t)
-	// The fee is left at roughly the plan's 10 sat/vB, so the only thing wrong
-	// with this transaction is that its change output is too small to rescue it.
+	// The fee is left at roughly the plan's 10 sat/vB, so the only thing this
+	// transaction gets remarked on is its change output.
 	b := newTx(t).
 		coldIn(0x60, 3_000_000).
 		coldIn(0x70, 24_360).
@@ -550,8 +621,13 @@ func TestChangeTooSmallForACPFPChildIsRefused(t *testing.T) {
 	b.outMeta[3] = psbt.POutput{WitnessScript: multisig2of2(t)}
 
 	v := verify(t, f.plan, b)
-	if !has(v, ChangeTooSmall) {
-		t.Fatalf("change too small to fund a child passed: %v\n%s", codes(v), v.Report())
+	if !reported(v, ChangeTooSmall) {
+		t.Fatalf("change too small to fund a child went unremarked: %v / %v\n%s",
+			codes(v), reportCodes(v), v.Report())
+	}
+	if !v.OK() {
+		t.Fatalf("a small change output refused the batch: %v\n%s",
+			codes(v), v.Report())
 	}
 	if v.ChangeFloorSat <= 600 {
 		t.Errorf("the CPFP floor came out as %d, which cannot be right", v.ChangeFloorSat)
@@ -643,8 +719,9 @@ func TestAnInputWithNoUTXOInformationIsRefusedAndNoFeeIsGuessed(t *testing.T) {
 		t.Errorf("a fee of %d sat at %.2f sat/vB was reported from a partial input "+
 			"total", v.FeeSat, v.FeeRate)
 	}
-	if has(v, NoFee) || has(v, FeeTooLow) || has(v, FeeTooHigh) {
-		t.Errorf("a fee finding was made up out of a partial input total: %v", codes(v))
+	if found(v, NoFee) || found(v, FeeTooLow) || found(v, FeeTooHigh) {
+		t.Errorf("a fee finding was made up out of a partial input total: %v / %v",
+			codes(v), reportCodes(v))
 	}
 	var said bool
 	for _, u := range v.Unchecked {
@@ -725,8 +802,12 @@ func TestAStrangersOutputIsNotMistakenForChange(t *testing.T) {
 		t.Fatalf("an output with a stranger's fingerprint was taken for change: %v\n%s",
 			codes(v), v.Report())
 	}
-	if !has(v, ChangeMissing) {
-		t.Errorf("the missing change output was not reported: %v", codes(v))
+	// Demoted in item 6, so it is in the other list. The subject of this test is
+	// the fingerprint, not the severity, but a stranger's output that swallowed
+	// the change silently would be exactly the failure worth catching.
+	if !reported(v, ChangeMissing) {
+		t.Errorf("the missing change output was not reported: %v / %v",
+			codes(v), reportCodes(v))
 	}
 }
 
@@ -763,11 +844,22 @@ func TestPartialKeyOriginIsNotEnough(t *testing.T) {
 // The plan itself
 // ---------------------------------------------------------------------------
 
+// TestAPlanWithNoChangeArrangementIsRefused, and it is not the demoted finding.
+//
+// Item 6 made a transaction's change arrangements the operator's business. This
+// is the other thing: a plan that cannot tell change from an output nobody named
+// cannot make the attribution check that the whole program is, so it refuses —
+// the same family as UnnamedOutput, and --change ADDRESS is the answer.
 func TestAPlanWithNoChangeArrangementIsRefused(t *testing.T) {
 	f := newFixture(t)
 	f.plan.Change = Change{}
-	if _, err := f.plan.Outputs(); err == nil {
-		t.Fatal("a plan with no change output was accepted; I-4 has no lever without one")
+	_, err := f.plan.Outputs()
+	if err == nil {
+		t.Fatal("a plan that cannot identify its change output was accepted")
+	}
+	if !strings.Contains(err.Error(), "identify the change output") {
+		t.Errorf("the refusal reads as a judgement about change rather than about "+
+			"attribution: %v", err)
 	}
 }
 
@@ -1030,12 +1122,23 @@ func TestThePolicySitsBesideTheAmount(t *testing.T) {
 func TestTheReportsFitThePane(t *testing.T) {
 	f := newFixture(t)
 
+	// A batch with no change output and a fee well under the plan's, so the
+	// "Reported, not refused" heading and both of its longest findings render.
+	// The demoted copy is the newest in this package and the least measured.
+	reports := newTx(t).
+		coldIn(0x60, 3_000_000).
+		coldIn(0x70, 24_000).
+		out(1_000_000, f.fundingA).
+		out(2_000_000, f.fundingB).
+		out(20_000, f.topUp)
+
 	for _, tc := range []struct {
 		name string
 		text string
 	}{
 		{"the plan document", f.plan.Document()},
 		{"a clean verification", verify(t, f.plan, f.good(t)).Report()},
+		{"a verification with reports", verify(t, f.plan, reports).Report()},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if strings.TrimSpace(tc.text) == "" {

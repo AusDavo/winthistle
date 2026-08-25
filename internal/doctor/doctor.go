@@ -467,9 +467,9 @@ func checkFees(_ context.Context, r *Report, cfg *config.Config) {
 	c := r.add(Check{Name: "the fee rate"})
 	f := plan.Fee{TargetSatPerVB: cfg.Fees.TargetSatPerVB}
 	c.say("%.2f sat/vB, declared in %s", f.TargetSatPerVB, cfg.Path)
-	c.say("a batch paying between %.2f and %.2f sat/vB passes step 5",
-		f.Low(), f.High())
-	c.say("the change output is checked for being able to lift the batch to "+
+	c.say("step 5 says so when the batch lands outside %.2f to %.2f sat/vB, and "+
+		"does not refuse over it", f.Low(), f.High())
+	c.say("it says the same about a change output too small to lift the batch to "+
 		"%.2f sat/vB with a CPFP child", f.CPFPTarget())
 	c.warn("Nothing here estimated this. Bitcoin Core answered it until this " +
 		"build dropped Core, and no fee API replaced it — one is handed the size " +

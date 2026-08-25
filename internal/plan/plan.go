@@ -161,9 +161,15 @@ type TopUp struct {
 
 // Change is the cold wallet's change output.
 //
-// I-4 requires one: a batch that cannot be replaced can only be accelerated by
-// spending its change, so a batch with no change output is a batch with no
-// remedy. Its size is checked against a CPFP child that could actually lift it.
+// A batch that cannot be replaced can only be accelerated by spending its
+// change, so a batch without one has no lever on it at all. That is worth
+// saying and is not worth refusing over — the verifier reports it, and its size
+// against a CPFP child that could actually lift it.
+//
+// What this type is for is telling the verifier which output is the change. That
+// is an attribution question rather than a fee-and-change one, and it is refused
+// when it cannot be answered: an output nobody can account for is the thing this
+// program exists to catch.
 type Change struct {
 	// Address is the exact change script, when it is known. Directed mode always
 	// knows it, because Core derives it. In assisted mode Sparrow chooses its own
@@ -393,9 +399,12 @@ func (p *Plan) Outputs() ([]Named, error) {
 				"origin, but no master key fingerprints were given")
 		}
 	default:
-		return nil, fmt.Errorf("the plan has no change output. I-4 forbids replacing " +
-			"the funding transaction, so change is the only way a stuck batch can be " +
-			"accelerated: name a change address, or say how to recognise one")
+		// Not a judgement about the transaction's change arrangements — those are
+		// reported, not refused. This is the plan being unable to tell change from
+		// an output nobody named, which is the check the program is for.
+		return nil, fmt.Errorf("the plan has no way to identify the change output, " +
+			"so an output your own wallet paid itself cannot be told from one paying " +
+			"a stranger: name a change address, or say how to recognise one")
 	}
 
 	if p.Fee.TargetSatPerVB <= 0 {

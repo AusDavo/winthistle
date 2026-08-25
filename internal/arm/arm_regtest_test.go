@@ -513,7 +513,7 @@ func TestAnArmedValueFromNowhereCarriesNoTransaction(t *testing.T) {
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: wire.OutPoint{Index: 0},
-		Sequence:         plan.MaxNonReplaceableSequence,
+		Sequence:         wire.MaxTxInSequenceNum - 1,
 	})
 	tx.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
 	var raw bytes.Buffer

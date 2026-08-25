@@ -90,22 +90,29 @@ func (p *Plan) Document() string {
 			"proves the change output is yours."))
 	}
 	if p.Change.MinimumSat > 0 {
-		b.WriteString(prose.Bullet(fmt.Sprintf("Change must be at least %s.",
+		b.WriteString(prose.Bullet(fmt.Sprintf("The plan's floor for change is %s.",
 			prose.Sats(p.Change.MinimumSat))))
 	}
 	b.WriteString(prose.Bullet(fmt.Sprintf(
-		"There must be a change output, and it must be big enough to pay for a "+
-			"child transaction that lifts this one to %.0f sat/vB. This batch can "+
-			"never be replaced (I-4) — replacing it moves every outpoint and "+
-			"destroys every channel in it — so the change output is the only way "+
-			"a stuck batch is ever accelerated.", p.Fee.CPFPTarget())))
+		"A change output is worth having, and worth sizing to pay for a child "+
+			"transaction that lifts this one to %.0f sat/vB. This batch can never "+
+			"be replaced (I-4) — replacing it moves every outpoint and destroys "+
+			"every channel in it — so a CPFP child spending the change is the only "+
+			"lever there will ever be on it. Nothing is at risk without one; what "+
+			"is missing is the lever. Step 5 says what your change came out as and "+
+			"does not refuse over it.", p.Fee.CPFPTarget())))
 
 	b.WriteString("\nFee\n")
-	b.WriteString(prose.Bullet(fmt.Sprintf("Target %.2f sat/vB; anything from %.2f to "+
-		"%.2f is accepted.", p.Fee.TargetSatPerVB, p.Fee.Low(), p.Fee.High())))
-	b.WriteString(prose.Bullet("Replace-by-fee off. In Sparrow that is the RBF toggle " +
-		"on the transaction. A transaction with any input below sequence " +
-		"0xfffffffe is refused."))
+	b.WriteString(prose.Bullet(fmt.Sprintf("Target %.2f sat/vB. Step 5 says so when "+
+		"what you built lands outside %.2f to %.2f sat/vB, and does not refuse over "+
+		"it: the rate is yours, and this app neither builds the transaction nor "+
+		"chooses the fee.", p.Fee.TargetSatPerVB, p.Fee.Low(), p.Fee.High())))
+	b.WriteString(prose.Bullet("Replace-by-fee off — in Sparrow, the RBF toggle on " +
+		"the transaction. Nothing here reads the sequence numbers. Core relays a " +
+		"higher-fee conflict whatever they signal, so the flag is a statement of " +
+		"intent rather than a defence; what keeps this transaction from being " +
+		"replaced is that only you can sign its inputs, and no code path in this " +
+		"program replaces one (I-4)."))
 
 	b.WriteString("\nInputs\n")
 	b.WriteString(prose.Bullet("SegWit only. LND rejects a funding transaction with " +
@@ -183,16 +190,27 @@ func policyLines(ch Channel) string {
 func (v *Verification) Report() string {
 	var b strings.Builder
 
+	// Wrapped rather than written straight out: the count and the reported-count
+	// clause together outran the pane the day the second was added.
 	if v.OK() {
-		b.WriteString("The transaction matches the plan.\n\n")
+		head := "The transaction matches the plan."
+		switch n := len(v.Reports); {
+		case n == 1:
+			head += " One thing below is reported and not refused over."
+		case n > 1:
+			head += fmt.Sprintf(" %d things below are reported and not refused over.", n)
+		}
+		b.WriteString(prose.Para(head))
+		b.WriteString("\n")
 	} else {
 		verb := "does not"
 		if len(v.Problems) != 1 {
 			verb = "do not"
 		}
-		b.WriteString(fmt.Sprintf("Do not sign this. %d thing%s about this "+
-			"transaction %s match the plan.\n\n",
-			len(v.Problems), prose.Plural(len(v.Problems)), verb))
+		b.WriteString(prose.Para(fmt.Sprintf("Do not sign this. %d thing%s about "+
+			"this transaction %s match the plan.",
+			len(v.Problems), prose.Plural(len(v.Problems)), verb)))
+		b.WriteString("\n")
 	}
 
 	b.WriteString(fmt.Sprintf("  txid   %s\n", v.UnsignedTxID))
@@ -239,7 +257,7 @@ func (v *Verification) Report() string {
 		b.WriteString("\n")
 		b.WriteString(prose.Table([]prose.Row{
 			prose.Line("change", v.ChangeSat),
-			prose.Note("CPFP floor", v.ChangeFloorSat, "what a rescue child would cost"),
+			prose.Note("CPFP floor", v.ChangeFloorSat, "what a CPFP child would cost"),
 		}))
 	}
 
@@ -257,6 +275,8 @@ func (v *Verification) Report() string {
 		}
 	}
 
+	b.WriteString(v.Reported())
+
 	if len(v.Unchecked) > 0 {
 		b.WriteString("\nNot checked here\n")
 		for _, u := range v.Unchecked {
@@ -266,17 +286,56 @@ func (v *Verification) Report() string {
 	return b.String()
 }
 
+// Reported renders the findings the verifier established and does not refuse
+// over, or "" when there are none.
+//
+// Its own heading, and deliberately not "Not checked here": these were checked,
+// and the answer is on the screen. It is separate from Report() because step 7's
+// recheck prints its findings only on failure — a report that nobody prints is
+// worse than the refusal it replaced, so the caller that stays quiet about
+// problems still has something to print these with.
+func (v *Verification) Reported() string {
+	if len(v.Reports) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("\nReported, not refused\n")
+	for _, r := range v.Reports {
+		head := r.Headline
+		if r.Where != "" {
+			head = r.Where + " — " + r.Headline
+		}
+		b.WriteString(prose.Wrap(head, "  - ", "    "))
+		if r.Detail != "" {
+			b.WriteString(prose.Wrap(r.Detail, "    ", "    "))
+		}
+	}
+	return b.String()
+}
+
 // Summary is the one line a log wants.
 func (v *Verification) Summary() string {
+	// The reported findings ride along on both branches. A log that recorded only
+	// refusals would say "matches the plan" about a batch with no change output,
+	// which is the one thing the demotion must not cost.
+	var reported string
+	if len(v.Reports) > 0 {
+		codes := make([]string, 0, len(v.Reports))
+		for _, r := range v.Reports {
+			codes = append(codes, r.Code.String())
+		}
+		reported = fmt.Sprintf(" (reported, not refused: %s)", strings.Join(codes, "; "))
+	}
+
 	if v.OK() {
 		return fmt.Sprintf("%s matches the plan: %d input(s), %d output(s), %d sat "+
-			"fee at %.2f sat/vB", v.UnsignedTxID, len(v.Inputs), len(v.Outputs),
-			v.FeeSat, v.FeeRate)
+			"fee at %.2f sat/vB%s", v.UnsignedTxID, len(v.Inputs), len(v.Outputs),
+			v.FeeSat, v.FeeRate, reported)
 	}
 	codes := make([]string, 0, len(v.Problems))
 	for _, p := range v.Problems {
 		codes = append(codes, p.Code.String())
 	}
-	return fmt.Sprintf("%s does not match the plan: %s", v.UnsignedTxID,
-		strings.Join(codes, "; "))
+	return fmt.Sprintf("%s does not match the plan: %s%s", v.UnsignedTxID,
+		strings.Join(codes, "; "), reported)
 }

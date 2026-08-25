@@ -12,7 +12,6 @@ import (
 
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
-	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/btcsuite/btcd/wire"
 	"github.com/lightningnetwork/lnd/lnrpc"
 	"github.com/lightningnetwork/lnd/lnrpc/walletrpc"
@@ -50,7 +49,7 @@ func refusedTx(t *testing.T) ([]byte, string) {
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: wire.OutPoint{Index: 0},
-		Sequence:         plan.MaxNonReplaceableSequence,
+		Sequence:         wire.MaxTxInSequenceNum - 1,
 	})
 	tx.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
 	var raw bytes.Buffer
@@ -145,7 +144,7 @@ func TestPublishRefusesATransactionWhoseTxidMoved(t *testing.T) {
 	other := wire.NewMsgTx(2)
 	other.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: wire.OutPoint{Index: 0},
-		Sequence:         plan.MaxNonReplaceableSequence - 1,
+		Sequence:         wire.MaxTxInSequenceNum - 2,
 	})
 	other.AddTxOut(wire.NewTxOut(250_000, bytes.Repeat([]byte{0x51}, 22)))
 	var raw bytes.Buffer

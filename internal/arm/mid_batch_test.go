@@ -230,7 +230,7 @@ func newBatch(t *testing.T, runID string, n int) *batchFixture {
 	tx := wire.NewMsgTx(2)
 	tx.AddTxIn(&wire.TxIn{
 		PreviousOutPoint: wire.OutPoint{Index: 0},
-		Sequence:         plan.MaxNonReplaceableSequence,
+		Sequence:         wire.MaxTxInSequenceNum - 1,
 	})
 
 	s := &Streams{chain: "regtest", Opened: time.Now()}

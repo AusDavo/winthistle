@@ -210,6 +210,11 @@ exist even as a hidden debug option, and `getmempoolinfo` reports
 regardless of what our sequence numbers signal, so `replaceable: false` is a
 statement of intent, not a defence.
 
+The verifier used to refuse a transaction whose inputs signalled replaceability.
+It no longer reads the sequence numbers at all: refusing over a signal the
+network ignores is a lint wearing an invariant's clothes, and removing it took
+nothing away.
+
 What holds is narrower and worth stating plainly: **only you can sign those
 inputs, and nothing here builds a replacement.** Your *other* wallet, with the
 same keys, can. The discipline lives in the human. If you ever do double-spend a
@@ -284,10 +289,13 @@ key origin rather than by address" because the claim is weaker than a script.
 `--change ADDRESS` names the script instead, which is stronger, and is what a
 wallet that writes no key origins needs.
 
-*Today the verifier refuses a batch with no change output, or with change too
-small. That is being changed to a report — your fee and change arrangements are
-yours, and the app no longer builds the transaction, so it cannot size a change
-output for you. It can only tell you yours is too small.*
+**The verifier says so and does not refuse over it.** No change output, change
+too small, a fee rate outside what you declared: all four are reported under
+"Reported, not refused" and the batch still arms. Your fee and change
+arrangements are yours, the app does not build the transaction, and it cannot
+size a change output for you — it can only tell you what yours came out as. What
+it *does* refuse is an output nobody can account for, which is a different
+question and is the one it exists to ask.
 
 ## If something stops halfway
 

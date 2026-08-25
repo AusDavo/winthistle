@@ -355,16 +355,26 @@ func TestADeviceThatChangedTheTransactionIsNamed(t *testing.T) {
 	}
 }
 
-// TestASignerThatMadeTheTransactionReplaceableIsRefused is the case LND would
-// not catch.
+// TestASignerThatChangedASequenceNumberIsRefused is the case LND would not
+// catch.
 //
 // PsbtIntent.FinalizeRawTX compares the outputs and the input previous outpoints
 // and nothing else — "the fields in the PSBT part are allowed to change" —
 // and a sequence number is neither. Then CompileFundingTx takes the channel
-// point from the transaction it was handed. So a returned transaction that is
-// BIP-125 replaceable would be adopted by LND, and I-4 says replacing this
-// transaction destroys every channel in the batch.
-func TestASignerThatMadeTheTransactionReplaceableIsRefused(t *testing.T) {
+// point from the transaction it was handed. So a returned transaction whose
+// sequence numbers were edited would be adopted by LND.
+//
+// The refusal is I-3's, and since item 6 it is I-3's alone. A changed sequence
+// is a changed txid, and LND pinned the funding outpoints at psbt_verify — so
+// what comes back is not the transaction n peers committed to, whatever the new
+// sequence happens to signal.
+//
+// It used to be I-4's as well: the plan refused any input below 0xfffffffe as
+// BIP-125 opt-in. That refusal is gone. Core 29 relays a higher-fee conflict
+// whatever the sequence numbers signal, so it protected nothing, and what holds
+// I-4 is authorship — only we can sign our inputs, and no code path here
+// replaces a funding transaction.
+func TestASignerThatChangedASequenceNumberIsRefused(t *testing.T) {
 	w := newWallet(t, 2, 2)
 	b := newBatch(t, w)
 
@@ -375,27 +385,32 @@ func TestASignerThatMadeTheTransactionReplaceableIsRefused(t *testing.T) {
 
 	_, err := combine.Merge(b.base, []combine.Part{good, bad})
 	if !errors.Is(err, combine.ErrDifferentTransaction) {
-		t.Fatalf("a replaceable transaction was accepted, or refused for another "+
+		t.Fatalf("an edited sequence number was accepted, or refused for another "+
 			"reason: %v", err)
 	}
 
-	// And the second line of defence, in case a future merge ever stopped
-	// comparing the whole transaction: the plan refuses the sequence itself.
-	replaceable := parse(t, b.base)
-	replaceable.UnsignedTx.TxIn[0].Sequence = wire.MaxTxInSequenceNum - 2
-	rebased := serialize(t, replaceable)
+	// And what the refusal actually rests on, now that the plan has no opinion
+	// about sequence numbers: the txid moved. The plan verifies the rebased
+	// transaction happily — it is the same money to the same scripts — and the
+	// pin from psbt_verify is what says it is not the one the peers committed to.
+	edited := parse(t, b.base)
+	edited.UnsignedTx.TxIn[0].Sequence = wire.MaxTxInSequenceNum - 2
+	rebased := serialize(t, edited)
 	v, err := b.plan.Verify(rebased)
 	if err != nil {
 		t.Fatalf("verifying: %v", err)
 	}
-	var sawIt bool
-	for _, p := range v.Problems {
-		if p.Code == plan.Replaceable {
-			sawIt = true
-		}
+	if !v.OK() {
+		t.Errorf("the plan refused an edited sequence number, which is no longer "+
+			"its business: %s", v.Summary())
 	}
-	if !sawIt {
-		t.Errorf("the plan did not object to a replaceable input: %s", v.Summary())
+	original, err := b.plan.Verify(b.base)
+	if err != nil {
+		t.Fatalf("verifying the original: %v", err)
+	}
+	if v.UnsignedTxID == original.UnsignedTxID {
+		t.Fatal("editing a sequence number did not move the txid, so this test " +
+			"proves nothing about I-3")
 	}
 }
 

@@ -13,8 +13,8 @@ import (
 // Sizing constants. Every one of them is an upper bound, deliberately, so the
 // estimated vsize is an upper bound and the fee rate computed from it is a lower
 // bound. The direction matters: I-4 forbids RBF, so a batch that turns out to be
-// paying less than it looks like can only be rescued by CPFP, while one paying
-// more has merely overpaid.
+// paying less than it looks like can only be lifted by a CPFP child, while one
+// paying more has merely overpaid.
 const (
 	// maxDERSignature is a DER-encoded ECDSA signature plus its sighash byte, at
 	// its largest. btcwallet's txsizes uses the same figure.
@@ -235,15 +235,16 @@ func ChildVsize(changeScript []byte, witnessScript []byte) (int64, error) {
 
 // ChangeFloor is the smallest change amount that leaves a viable CPFP child.
 //
-// I-4 says the batch can never be replaced, so the change output is the only
-// lever left if the fee turns out to be too low. To lift the parent and child
-// together to bumpTo sat/vB the child has to pay
+// I-4 says the batch can never be replaced, so a child spending the change is
+// the only lever there will ever be on it. To lift the parent and child together
+// to bumpTo sat/vB the child has to pay
 //
 //	(parentVsize + childVsize) * bumpTo - parentFee
 //
 // and still leave an output above the dust limit. A change output smaller than
-// that is a change output that cannot rescue the batch, which — given no RBF —
-// means a batch with nothing to rescue it.
+// that cannot buy the child, so the batch has no lever on it — which the
+// verifier reports and does not refuse over. Nothing is at risk in that: the
+// coins are the operator's and unspent. What is missing is the lever.
 func ChangeFloor(parentVsize, parentFeeSat int64, bumpTo float64, childVsize int64) int64 {
 	return ChildFeeSat(parentVsize, parentFeeSat, bumpTo, childVsize) + DustSat
 }
@@ -252,7 +253,7 @@ func ChangeFloor(parentVsize, parentFeeSat int64, bumpTo float64, childVsize int
 // signed, or measures it exactly when every input already carries its witness.
 //
 // Exported for the CPFP child: I-4 says the batch can never be replaced, so the
-// only lever left on a stalled batch is a child spending the change output, and
+// only lever on a stalled batch is a child spending the change output, and
 // sizing that child is the whole of the arithmetic behind it. The estimate uses
 // the same upper bounds the verifier does, so a package fee rate computed from
 // it is a floor rather than a hope.

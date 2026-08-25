@@ -551,6 +551,16 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 			"being signed", verified.TxID, final.TxID)
 	}
 
+	// The recheck prints nothing else on success — a clean re-run is not news —
+	// but its reports are printed, deliberately. Two reasons. The size is exact
+	// here rather than an upper bound, because every witness is present, so a fee
+	// rate that sat inside tolerance at step 5 can land outside it now and this is
+	// the first place anybody could know. And since item 6 these findings no
+	// longer stop anything, so a caller that stayed quiet on success would be the
+	// difference between a small change output being said out loud and it being a
+	// surprise on the day it matters.
+	fmt.Fprint(d.Out, recheck.Reported())
+
 	// There is no pre-flight here any more, and its absence is stated rather than
 	// left to be discovered. testmempoolaccept validated the batch without
 	// relaying it, and it was Core's; Core is gone. What survives is narrower and
