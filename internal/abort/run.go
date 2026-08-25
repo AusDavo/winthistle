@@ -4,10 +4,62 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
+
+// CallBudget is how long each LND call in a teardown gets.
+//
+// It bounds the calls and deliberately does not bound the operator. This used to
+// be one deadline around the whole teardown — run.TeardownBudget, five minutes —
+// sized on the reasoning that the slow part of an abort is not the RPCs but the
+// blunt confirmation, which asks a human once per channel. That reasoning was
+// right about where the time goes and wrong about what to do with it, because
+// the confirmation sits *between* two of these calls:
+//
+//	AbandonChannel(safe flag)  →  refused
+//	PendingChannels            →  is it really pending?
+//	confirm(...)               →  the human
+//	AbandonChannel(blunt flag) →  the call that does the work
+//
+// An operator who took longer than the budget over that middle step got the last
+// call refused with a deadline **after they had already answered yes** — the one
+// outcome that leaves somebody believing they authorised something that did not
+// happen. Deliberation is not a hang.
+//
+// So the clock is here, on each call, and there is no clock on the human at all.
+// A teardown still cannot hang against an unresponsive node, which is what the
+// old budget was really protecting; and winthistle recover, which never had the
+// old budget, is bounded now for the first time.
+const CallBudget = 30 * time.Second
+
+// call bounds one LND call. Cancellation still comes from the parent, which is
+// what lets `winthistle recover` be interrupted and what recoverRun deliberately
+// severs with context.WithoutCancel.
+func call(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(ctx, CallBudget)
+}
+
+// callAfterConsent bounds the one LND call that happens *after* a human has
+// authorised it, and it takes neither the parent's deadline nor the parent's
+// cancellation.
+//
+// Both omissions are the same argument. Once the operator has answered yes to
+// i_know_what_i_am_doing, the worst available outcome is not finishing the call
+// — it is leaving them believing they authorised something that did not happen.
+// A deadline inherited from upstream has been running through their
+// deliberation and may already be spent, which is precisely the defect that
+// retired run.TeardownBudget; and a Ctrl-C landing between the answer and the
+// RPC would produce the same ambiguity by another route.
+//
+// It is still bounded, by a fresh CallBudget, so this cannot hang. Anything a
+// caller wants to say about giving up has to be said *before* the confirmation,
+// where the human has not committed to anything yet.
+func callAfterConsent(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), CallBudget)
+}
 
 // Target is what a run left behind, as recorded in the journal.
 //

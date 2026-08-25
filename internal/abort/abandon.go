@@ -82,10 +82,12 @@ func AbandonPending(ctx context.Context, cli lnrpc.LightningClient,
 
 	out := AbandonOutcome{Channel: cp}
 
-	resp, err := cli.AbandonChannel(ctx, &lnrpc.AbandonChannelRequest{
+	safeCtx, doneSafe := call(ctx)
+	resp, err := cli.AbandonChannel(safeCtx, &lnrpc.AbandonChannelRequest{
 		ChannelPoint:           cp.RPC(),
 		PendingFundingShimOnly: true,
 	})
+	doneSafe()
 	if err == nil {
 		out.Status = resp.GetStatus()
 		return out, nil
@@ -111,7 +113,12 @@ func AbandonPending(ctx context.Context, cli lnrpc.LightningClient,
 		return out, fmt.Errorf("abandoning %s: %w (lnd said: %s)",
 			cp, ErrBluntNotConfirmed, rejection)
 	}
-	ok, err := confirm(ctx, BluntRequest{Channel: cp, Rejection: rejection})
+	// No clock on this one, on purpose, and the context says so rather than the
+	// comment alone: CallBudget bounds the calls either side of it and nothing
+	// bounds the operator. A deadline here would refuse the abandon *after* the
+	// answer, which is worse than waiting.
+	ok, err := confirm(context.WithoutCancel(ctx), BluntRequest{
+		Channel: cp, Rejection: rejection})
 	if err != nil {
 		return out, fmt.Errorf("abandoning %s: confirming the blunt flag: %w", cp, err)
 	}
@@ -122,7 +129,9 @@ func AbandonPending(ctx context.Context, cli lnrpc.LightningClient,
 	// PendingFundingShimOnly stays set. LND skips its check as soon as
 	// IKnowWhatIAmDoing is true, so it changes nothing on the wire — but it
 	// records in the call itself that the safe path was the one we wanted.
-	resp, err = cli.AbandonChannel(ctx, &lnrpc.AbandonChannelRequest{
+	bluntCtx, doneBlunt := callAfterConsent(ctx)
+	defer doneBlunt()
+	resp, err = cli.AbandonChannel(bluntCtx, &lnrpc.AbandonChannelRequest{
 		ChannelPoint:           cp.RPC(),
 		PendingFundingShimOnly: true,
 		IKnowWhatIAmDoing:      true,
@@ -141,6 +150,8 @@ func AbandonPending(ctx context.Context, cli lnrpc.LightningClient,
 // pending *close* is not something an abort should be removing, and neither is
 // one that has already vanished.
 func isPendingOpen(ctx context.Context, cli lnrpc.LightningClient, cp lnd.ChannelPoint) (bool, error) {
+	ctx, done := call(ctx)
+	defer done()
 	resp, err := cli.PendingChannels(ctx, &lnrpc.PendingChannelsRequest{})
 	if err != nil {
 		return false, fmt.Errorf("listing pending channels: %w", err)

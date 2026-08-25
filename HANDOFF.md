@@ -161,19 +161,22 @@ so at the moment it happens.
 5. **`--stop-before-publish` exits non-zero if the teardown does not finish.** A
    probe that proved the sequence and then left channels pending is not a
    success. **Check the exit code.**
-6. **You cannot walk away from the teardown, and there is a five-minute clock on
-   it.** Two facts that have to be read together. `--yes` skips the arming
-   prompt and **not** the blunt-abandon confirmation, which `abort.AbandonPending`
-   asks *per channel, at the moment of the rejection*. And `run.recoverRun` wraps
-   the whole teardown — prompts included — in
-   `TeardownBudget = 5 * time.Minute`. `confirmBlunt` discards the context, so
-   the prompt itself waits on stdin indefinitely, but the `PendingChannels` and
-   `AbandonChannel` calls on either side of it do not: **spend more than five
-   minutes cumulatively at those prompts and the abandons start failing with a
-   deadline, after you have already answered yes.** Sit with it, or pipe the
-   answers in — `confirmBlunt` accepts a piped answer deliberately and refuses
-   only end-of-input. This is a live constraint rather than a bug report; whether
-   the prompt belongs outside the budget is a design question nobody has taken.
+6. **You cannot walk away from the teardown, but it will wait for you.** `--yes`
+   skips the arming prompt and **not** the blunt-abandon confirmation, which
+   `abort.AbandonPending` asks *per channel, at the moment of the rejection*. So
+   the probe is attended — plan to sit with it, or pipe the answers in;
+   `confirmBlunt` accepts a piped answer deliberately and refuses only
+   end-of-input.
+
+   **There is no longer a clock on you while you decide.** There was until
+   2026-08-26: `run.TeardownBudget` put five minutes around the whole teardown,
+   prompts included, so an operator who deliberated past it got the abandon
+   refused with a deadline *after* answering yes. The clock is per LND call now
+   — `abort.CallBudget`, 30s — and the call that runs after the confirmation
+   takes neither the parent's deadline nor its cancellation, because once
+   somebody has authorised `i_know_what_i_am_doing` the worst outcome available
+   is not finishing. `TestTheOperatorIsNotOnTheTeardownClock` reproduces the old
+   defect and fails on it.
 7. **Separately, deliberately let one stream lapse without verifying**, to
    observe a real peer's timeout rather than trusting the ten-minute figure.
    Regtest measured 10m41s against a stock LND; a CLN or Eclair peer has its own.

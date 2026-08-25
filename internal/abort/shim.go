@@ -53,6 +53,8 @@ var ErrNoShim = errors.New("lnd holds no funding intent for that pending channel
 //
 // It returns ErrNoShim if there was no intent to cancel.
 func CancelShim(ctx context.Context, cli ShimCanceller, id lnd.PendingChanID) error {
+	ctx, done := call(ctx)
+	defer done()
 	_, err := cli.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
 		Trigger: &lnrpc.FundingTransitionMsg_ShimCancel{
 			ShimCancel: &lnrpc.FundingShimCancel{

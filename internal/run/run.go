@@ -166,20 +166,19 @@ type Options struct {
 // resumed by running the settlement again.
 const DefaultSettleFor = 30 * time.Minute
 
-// TeardownBudget is how long the abort path gets after the run has stopped.
+// TeardownBudget is gone, and abort.CallBudget replaced it.
 //
-// It is one signing gate's worth, and that is the unit deliberately: the slow
-// part of a teardown is not the RPCs — n shim cancels, n abandons and one batch
-// of coin-lock releases, all against a node on the same machine — it is the
-// blunt-abandon confirmation, which asks a human once per channel. Five minutes
-// is what this product already calls "as long as an operator at the machine gets
-// to do a thing".
+// It was five minutes around the whole teardown, sized on the reasoning that the
+// slow part of an abort is the blunt confirmation rather than the RPCs. That was
+// right about where the time goes and wrong about what to do with it: the
+// confirmation sits between two LND calls, so an operator who took longer than
+// the budget deciding got the abandon refused with a deadline *after* saying yes.
+// Its own comment claimed "the seams clamp their own deadlines inside this one,
+// so a confirmation nobody answers declines rather than erroring" — which was
+// never true of confirmBlunt, which discards the context and reads stdin.
 //
-// Running out of it costs nothing that cannot be picked up: `winthistle recover`
-// is safe to run as many times as it takes and everything under it is
-// idempotent. The seams clamp their own deadlines inside this one, so a
-// confirmation nobody answers declines rather than erroring.
-const TeardownBudget = 5 * time.Minute
+// The clock is per LND call now, in internal/abort, and there is none on the
+// operator. See abort.CallBudget, which says the rest.
 
 // Result is what the run did, however far it got.
 type Result struct {
@@ -708,20 +707,25 @@ func members(armed *arm.Armed, p *prepared, o Options) []settle.Member {
 // # The teardown outlives the cancellation that caused it
 //
 // The commonest reason to be here is that the run's context was cancelled —
-// Ctrl-C in the terminal. On a cancelled context every call
-// below fails at once: the journal read is a database/sql query, the shim
-// cancels and the abandons are gRPC, and Core's lock release is JSON-RPC. So an
-// abort triggered by Ctrl-C would have reported "context canceled" and taken
-// nothing apart, which is the exact opposite of what the deferred teardown is
-// for.
+// Ctrl-C in the terminal. On a cancelled context every call below fails at once:
+// the journal read is a database/sql query, and the shim cancels and the
+// abandons are gRPC. So an abort triggered by Ctrl-C would have reported
+// "context canceled" and taken nothing apart, which is the exact opposite of
+// what the deferred teardown is for.
 //
-// A fresh context, then, bounded rather than unbounded: releaseFence already
-// does this for the same reason, and the bound is here because a teardown that
-// hangs holds a terminal the operator has already tried to get out of. What is
-// deliberately *not* inherited is cancellation; the deadline is ours.
+// So cancellation is deliberately not inherited. **The deadline is not ours
+// either, any more.** There used to be a five-minute TeardownBudget here, and it
+// bounded the blunt confirmation along with the calls — see the note where that
+// constant used to be. What bounds a teardown now is abort.CallBudget, per LND
+// call, which is what keeps an unresponsive node from holding a terminal the
+// operator has already tried to get out of. The operator's own deliberation is
+// not a hang and is not on a clock.
+//
+// This comment used to cite releaseFence and Core's JSON-RPC lock release as the
+// precedent and as part of the work. Item 5 deleted both: the app takes no coin
+// locks and dials no Bitcoin node.
 func recoverRun(ctx context.Context, d Deps, o Options, res *Result) error {
-	ctx, done := context.WithTimeout(context.WithoutCancel(ctx), TeardownBudget)
-	defer done()
+	ctx = context.WithoutCancel(ctx)
 
 	run, err := d.Journal.Load(ctx, o.RunID)
 	if errors.Is(err, journal.ErrNoRun) {
