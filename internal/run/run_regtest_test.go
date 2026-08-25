@@ -193,7 +193,7 @@ func TestTheColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T) {
 	}
 	if env.InMempool(t, res.Armed.TxID) {
 		t.Fatalf("%s reached the mempool. The whole claim of this mode is that "+
-			"step 9 is the one call it does not make", res.Armed.TxID)
+			"step 8 is the one call it does not make", res.Armed.TxID)
 	}
 	// ExportAllChannelBackups is node-wide, not batch-scoped: the snapshot
 	// covers every channel this node has, pending ones included. So the

@@ -165,7 +165,8 @@ func runCmd(ctx context.Context, args []string) error {
 	batchPath := fs.String("batch", "", "the batch file: peers, amounts, policy")
 	runID := fs.String("id", "", "the journal's key for this run (default: the time)")
 	stopBefore := fs.Bool("stop-before-publish", false,
-		"the cold probe: run the whole production path and withhold step 9")
+		"the cold probe: run the whole production path and withhold step 8, the "+
+			"publish. Exits non-zero if the teardown does not finish")
 	probe := fs.Bool("probe", false, "shim-probe every peer first. Costs each "+
 		"accepted peer a pending-channel slot for ~11 minutes, and this run then "+
 		"waits that out before arming")

@@ -133,7 +133,7 @@ type Options struct {
 	RunID string
 
 	// StopBeforePublish makes this the cold probe: the whole production path,
-	// with step 9 withheld. See the package comment.
+	// with step 8 withheld. See the package comment.
 	StopBeforePublish bool
 
 	// Probe runs a shim probe against every peer before arming. Off by default,
@@ -246,7 +246,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 			// that will sit pending for 2016 blocks. Say so in the exit status,
 			// because a probe is usually run from a terminal somebody walks away
 			// from.
-			return res, fmt.Errorf("the batch was armed and step 9 withheld, as "+
+			return res, fmt.Errorf("the batch was armed and step 8 withheld, as "+
 				"asked — but taking it apart afterwards did not finish: %w", err)
 		}
 		return res, nil
