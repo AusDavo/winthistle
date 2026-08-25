@@ -17,149 +17,109 @@
 
 ## Where the build actually is
 
-**Items 1 to 4 are done.** The inversion is proved on a running node, the armed
-window is built around it, and `run` no longer builds the transaction or signs it.
-`TestSkipFinalizeReachesChanPendingWithNothingSigned` took *n* = 2 channels to
-`chan_pending` at the outpoints of an **unsigned** transaction, mempool clear, in
-under a second. `TestTheBatchPublishesExactlyOnceAndOnlyAfterEveryChannelIsRecoverable`
-runs the whole inverted sequence at *n* = 3 through app code.
-`TestTheFilePathDrivesTheWholeSequence` drives `run --psbt` end to end through the
-real file transport, with the harness reading the recipients off the printed table
-the way an operator reads them off a terminal.
-`docs/replan-2026-08.md`'s "Item 3, as built" and "Item 4, as built" are the
-account of what moved.
+**Items 1 to 5 are done. Item 6 is the only one left, and it is small.** The
+inversion is proved on a running node, the armed window is built around it, `run`
+neither builds nor signs the transaction, and everything on the replan's cut list
+is deleted. `docs/replan-2026-08.md`'s "Item 3, as built", "Item 4, as built" and
+"Item 5, as built" are the account of what moved.
 
-**What has moved: `internal/arm`, `internal/journal`, `internal/run`,
-`internal/combine`, `internal/plan`'s change recognition, and the copy that
-described any of it.** In one line each:
+**Item 5 removed 28,267 lines and added 846**, in five commits, taking the tree
+from 55,670 Go lines to 28,881. Gone: `internal/server`, `internal/webrun`,
+`prose.Progress` and `winthistle serve`; `internal/bump`, `internal/signers`,
+`internal/settle/cpfp.go` and the three bump tables; `internal/setup`,
+`internal/rehearsal`, the `setups` table and `internal/config/descriptors.go`;
+`internal/fees` and the `testmempoolaccept` pre-flight; `internal/coldwallet`'s
+setup half, `signet/`, `internal/signetenv`, `doctor`'s Core checks, the coin-lock
+machinery and the `[bitcoind]` section.
 
-- `arm.Finalize` is gone, `arm.Verify` returns a `*Verified`, `arm.Receipts` is
-  the gate, `arm.Publish` takes the signed bytes and refuses a txid that is not
-  the pinned one. **There is no `psbt_finalize` call anywhere in the build.**
-- `run.SigningWallet` is the new seam — `Built(ctx, []Recipient)` at step 4,
-  `Signed(ctx, unsigned)` at step 7 — with `run.FileWallet` behind `--psbt FILE`
-  and a two-question page wallet in `internal/webrun`. `internal/run` does not
-  import `internal/coldwallet`.
-- `combine` is *the acceptance check on an inbound PSBT*. `combine.Accept` is the
-  batch's path and takes complete witnesses; `combine.Merge` still refuses them,
-  for the CPFP child, and the reason is mechanical rather than I-2's.
-- `combine.Unsigned` refuses a **signed** packet at step 4. That is I-1 at the
-  last place it can still be defeated from outside.
-- `plan.RecogniseChangeIn` reads the wallet's own key origins off the
-  transaction's inputs, because the app no longer knows the change address and an
-  unnamed output is a refusal. `run --change ADDRESS` is the stronger override.
-- `journal.SignerSigned` joins `SignerPartial`; `prose.signerNote` grew a default
-  branch, because its switch had none and an unrecognised state rendered as
-  "0 returned a partial, 0 still awaited, 0 declined".
+**What is left.** `arm` · `plan` · `combine` · `peers` · `reserve` · `settle` ·
+`journal` · `methods` · `lnd` · `prose` · `config` · `abort` · `doctor` ·
+`policy` · `run`, plus `internal/bitcoind` and `internal/regtestenv/coldwallet`
+**inside the harness only**. Four commands: `run`, `doctor`, `recover`,
+`print-macaroon-command`, and two `example-*` printers.
 
-**Two gates `run` no longer holds, and neither was about the batch.**
-`setup.Check` read back a human's verdict on cold-wallet descriptors the app never
-touches now; `rehearsal.Gate` measured a signing round that is no longer inside
-any window. Both packages still compile and still pass their own tests.
-`TestARejectedWalletStopsTheRunBeforeAnythingIsAsked` was deleted with the
-placement it was about, and a comment in `internal/run/run_regtest_test.go` says
-where the gate went.
+**Three decisions item 5 made that the code now depends on:**
 
-**What has not moved.** Everything item 5 cuts is still present and still works:
-`setup`, `bump`, `serve`, `coldwallet`, `rehearsal`, `server`, `webrun`, `signet/`,
-`internal/bitcoind`. Core is still dialled — `fees.Estimate` for the number the
-verifier judges against, and `testmempoolaccept` for the one pre-flight there is.
-`Method.CallSites` still pins `PublishTransaction` at 2. The fee and change
-findings still refuse and `Replaceable` is still in the verifier.
+1. **The fee rate is declared.** `[fees] target_sat_per_vb`, or `run --fee-rate
+   N`. Nothing estimates it and nothing may be asked to — the no-third-party rule
+   forbids the substitute, and the app does not build the transaction or choose
+   the fee anyway, so what the verifier needs is the rate the operator said they
+   were aiming at. `config.Load` and `plan.Build` each refuse a missing or
+   non-positive one, independently.
+2. **There is no pre-flight.** What survives is `combine.Accept` executing every
+   input's witness against its own script; what is lost is node policy, and
+   `plan.Verify`'s `Verification.Unchecked` names it and says this build does not
+   run `testmempoolaccept`.
+3. **`Method.CallSites` is 1.**
+
+**Two things item 5 changed that were not in the plan.** The config reader grew
+`retiredKeys` and `retiredSections`, so a removed setting gets a sentence saying
+what happened to it rather than "has no key" — eleven keys and three sections
+went in this slice, including `[bitcoind]`, `[[signer]]`,
+`limits.abort_after_signing_seconds` and the three `[fees]` estimator keys, and
+`[server] journal` became `[journal] path`. And the harness owns its coin locks
+now: `Env.BuildPSBTPaying` releases what it locks, because the application's abort
+path used to and no longer can.
 
 ---
 
-## The next slice: item 5, delete the cut packages
+## The next slice: item 6, demote the fee and change findings
 
-Delete `coldwallet`, `setup` and the `setups` table, `bump`, `rehearsal`,
-`signers`' multi-device round, `server`, `webrun`, `signet/`, `doctor`'s Core
-checks, and `internal/bitcoind` **from the application**. `internal/bitcoind` and
-the simulated multisig cold wallet survive **inside `internal/regtestenv`** as the
-stand-in for Sparrow — every regtest fixture that builds or signs a batch goes on
-using them, and `Env.SignLikeSparrow`, `Env.BuildPSBTPaying` and
-`Env.RecipientsIn` are what those fixtures now go through.
+Small, and the last one before the mainnet cold probe is the only thing left.
+Two halves, and they are independent:
 
-Nothing in the application depends on any of them for the batch any more, which is
-what item 4 was for. What is left is genuinely deletion plus three decisions.
+**Demote four codes to reports.** `ChangeMissing`, `ChangeTooSmall`, `FeeTooLow`
+and `FeeTooHigh` move out of `Verification.Problems` and into
+`Verification.Unchecked`, which exists "so that a clean result is not read as a
+broader guarantee than it is". Your fee and change arrangements are yours, the app
+does not build the transaction, and it cannot size a change output — it can only
+tell you yours is too small.
 
-**Decision 1 — what replaces `fees.Estimate`, and it must not be a third party.**
-`plan.Fee.TargetSatPerVB` needs a number to call a fee too low or too high, and
-`estimatesmartfee` is Core's. `internal/fees` is on neither of the replan's lists.
-`docs/design.html` states the options and says none has been chosen: ask the
-operator, derive it from LND's own relay floor, or drop the fee finding entirely.
-Note that dropping it is *nearly* free after item 6, which demotes `FeeTooLow` and
-`FeeTooHigh` to reports anyway — so the real question is whether a report with no
-number is worth printing. **A fee floor that quietly becomes zero is exactly the
-default this project should not ship**, and `internal/fees`' regtest tests already
-prove the floor is what carries a regtest run.
+`plan.Problem`'s comment reads *"Every problem is a refusal. There is no severity
+here on purpose"*, and that sentence is the thing item 6 has to keep true rather
+than edit around: the answer is to move the four out, not to grow a severity
+field. Where they go is a decision — `Unchecked` is a `[]string` today and these
+four carry numbers a report wants to render.
 
-**Decision 2 — after item 5 there is no pre-flight at all.** `testmempoolaccept`
-is Core's and it is the only thing that has ever validated the batch without
-relaying it. Its production caller today is `armWindow`, immediately after
-`combine.Accept`. What survives the deletion is narrower and is not nothing:
-`combine.Finalize` executes every input's witness against its own script, which
-answers "will each input validate" more directly than a mempool test does and
-needs no chain data. What is genuinely lost is node policy — min relay fee,
-standardness, ancestor limits — and `plan.Verify` already lists exactly that in
-`Verification.Unchecked`, naming `testmempoolaccept` as the thing that would answer
-it. Decide whether that sentence is enough, and if it is, say so where somebody
-will read it rather than letting the call site disappear quietly.
+**And the copy that goes with it.** Three strings still frame a stuck batch in
+custody language, which `CLAUDE.md` explains at length is the dangerous framing
+because an operator who believes coins are at risk reaches, under pressure, for
+the one thing I-4 forbids. Two of the three are operator-facing:
+`internal/plan/plan.go` ("change is the only way a stuck batch can be
+accelerated", an error message), `internal/plan/report.go` (the same claim, in a
+plan-report bullet) and `internal/plan/size.go` ("a batch with nothing to rescue
+it", a doc comment). `CLAUDE.md`'s "Why the change output is required" has the
+correct version already written; the code has to catch up to it.
 
-**Decision 3 — `Method.CallSites` goes from 2 to 1.** `bump.Publish` is the second
-call site and it goes with `internal/bump`. Change `CallSites`, `CLAUDE.md`'s
-rejected-list bullet and `docs/design.html` in the same commit as the deletion, or
-do not change it. `TestEveryLNDCallSiteIsRegistered` fails either way round, which
-is the point of it.
+**Remove `Replaceable`.** `internal/plan/verify.go`'s sequence-number refusal.
+Core 29's full-RBF is unconditional — verified live — so refusing a transaction
+over a signal that changes nothing is a lint wearing an invariant's clothes.
+`plan.MaxNonReplaceableSequence` goes with the refusal; `plan.MaxBIP125Sequence`
+already went with the CPFP child in item 5, and the comment above
+`MaxNonReplaceableSequence` records both halves of that.
 
-**Two things that will not simply delete.**
+**What must not change with it.** I-4 is enforced by authorship and always was:
+no code path in this repository replaces a funding transaction. Removing the lint
+is not a relaxation of the invariant and the commit should say so, because the
+two look identical in a diff.
 
-1. **`run.Deps` carries `Node`, `Wallet` and `Signers` for `bump`, not for the
-   batch.** `cmd/winthistle`'s `connect()` returns a `run.Deps` and `bumpCmd`
-   builds `bump.Deps` out of it (`main.go:452-457`); `internal/webrun`'s
-   `StartBump` does the same. Deleting `bump` is what frees those three fields,
-   `run.ConfiguredSigners`, `run.DefaultPSBTDir`, `run.Signers`, the `--psbt-dir`
-   flag and `internal/signers`' whole multi-device round — so do `bump` first and
-   the rest falls out. `run.Connect` is the only place Core is dialled, and
-   `internal/run/recover.go:37` calls `bump.List`, which is the recovery screen's
-   "unfinished CPFP child" line.
-
-   **Six packages on the survive list have an edge into a cut one, and all six
-   are small.** `arm` uses `coldwallet.Output` (two fields; `Streams.FundingOutputs`
-   is the only user and only the harness calls it now). `config` uses
-   `coldwallet.Genesis`, `bitcoind.Config`, and `rehearsal.Gate`,
-   `rehearsal.PeerWindow` and `rehearsal.DefaultAbortAfterSigning` — which is where
-   `limits.abort_after_signing_seconds` is validated, so deleting `rehearsal`
-   means deciding whether that key survives at all. `journal` and `abort` use
-   `bitcoind.Outpoint`, `bitcoind.ListLocks` and `bitcoind.ReleaseLocks` for the
-   coin locks, and a run takes no coin locks any more. `doctor` uses
-   `coldwallet.MinCoreVersion` and `internal/signetenv`. `prose`, `plan` and
-   `combine` have none outside their tests, which is worth knowing: their
-   `coldwallet` imports are all in `_test.go` files and those are harness fixtures
-   that stay.
-2. **`internal/settle` splits in two, and only one half uses Core.**
-   `settle.Options.Chain` is an *interface* — `settle.Chain`, one method,
-   `Confirmations` — and it is optional: without it depth is not reported and
-   nothing else changes. So `settle.Settle` survives Core untouched. What takes a
-   `*bitcoind.Client` is `internal/settle/cpfp.go` (`ChildRequest.Wallet`), and
-   every caller of `settle.BuildChild`, `ChildRequest` and `Parent` outside the
-   package is `internal/bump` — so that file goes with `bump` and the rest of
-   `settle` stays. Its regtest test is the slowest in the repository (~60 s) and it
-   is the one that will notice if the split is wrong.
-
-   **This bullet said `Options.Chain` was a `*bitcoind.Client`.** It is not, and
-   the claim was written without reading `settle.go:139`. Corrected the same day.
-
-**Do not** demote the fee and change findings or remove `Replaceable` — item 6.
-**Do not** re-open `arm` or `combine`; both are done and both are proved on the
-cluster. **Do not** delete `internal/regtestenv`'s Core client or cold wallet.
+**Verification.** `internal/plan`'s unit tests are where most of this lands —
+`TestNoFeeAtAllIsRefused`, `TestChangeTooSmallForACPFPChildIsRefused`,
+`TestChangeFloorCoversTheChildAndTheParentDeficit` and the `FeeTooLow`/`FeeTooHigh`
+cases all assert refusals that become reports. `TestTheReportsFitThePane` is the
+one that will notice if the demoted findings render badly.
 
 ## The three collisions found while rewriting the docs, and where they stand
 
-1. **`combine.ErrAlreadyFinalized` — settled in item 4.** `combine` is the
-   acceptance check now, `combine.Accept` takes the complete witness Sparrow
-   produces, and `Merge`'s refusal survives with a mechanical reason for the CPFP
-   child. The same correction went into `internal/signers` and
-   `journal.SignerState`. Nothing about I-2 is cited as live anywhere.
+1. **`combine.ErrAlreadyFinalized` — settled in item 4, and its last caller went
+   in item 5.** `combine` is the acceptance check now, `combine.Accept` takes the
+   complete witness Sparrow produces, and `Merge`'s refusal survives with a
+   mechanical reason: a merge unions partial signatures, finalization discards
+   them, so a packet that arrives finalized has nothing left to union with. It has
+   **no production caller** — the CPFP child was the last one — and the harness's
+   `Env.SignLikeSparrow` is what still exercises it. That is a fact about the
+   package comment, which says so, not a reason to delete it. Nothing about I-2 is
+   cited as live anywhere.
 
 2. **The receipt buffer — settled, and it fits.** `req.Updates` is
    `make(chan *lnrpc.OpenStatusUpdate, 2)` (`lnd/server.go:5190`), and the
@@ -176,9 +136,9 @@ cluster. **Do not** delete `internal/regtestenv`'s Core client or cold wallet.
 3. **The custody-language change-output copy is still shipping.** `CLAUDE.md`
    explains at length why framing a stuck batch as a custody risk is dangerous,
    in the past tense, while three strings still say it — two of them
-   operator-facing: `internal/plan/plan.go:395`, `internal/plan/report.go:101`,
-   and the comment at `internal/plan/size.go:246`. Item 6's business, alongside
-   demoting the finding.
+   operator-facing: `internal/plan/plan.go`, `internal/plan/report.go` and the
+   comment at `internal/plan/size.go`. **Item 6's business**, alongside demoting
+   the finding, and it is written up at the top of this file.
 
 **Four claims that were wrong**, found by auditing rather than by working:
 `handleFundingSigned` does not exist in LND v0.19.3-beta (it is
@@ -224,16 +184,15 @@ probe is usually run from a terminal somebody walks away from.
 
 ## Two live code gaps, and neither is a safety failure
 
-**Nothing bounds step 4 or step 7 either, and that is deliberate rather than
+**Nothing bounds step 4 or step 7, and that is deliberate rather than
 overlooked.** `run.FileWallet.wait` polls until the context ends, and the two
 waits have different clocks above them that are not the transport's to enforce:
 step 4 is inside the peers' ten minutes, where a deadline of ours would abort a
 batch the peers were still holding, and step 7 has no deadline at all now that the
 gate is open. What ends either is the operator, or the run's own context. The
-browser path *does* bound both, because `server.Run.Ask` requires a deadline and
-holds a one-at-a-time slot: `webrun.buildWindow()` for step 4 and
-`webrun.SigningWindow` (one hour) for step 7, with comments saying why neither is a
-safety bound. **If a countdown is ever added to the CLI, step 4 is the one it is
+browser path used to bound both, because `server.Run.Ask` required a deadline;
+that path is deleted and its bounds went with it, which changes nothing about the
+reasoning. **If a countdown is ever added to the CLI, step 4 is the one it is
 for** — it is the only step inside clock A that takes any time at all.
 
 **Nothing bounds the `chan_pending` wait, and the fallback dies with the context
@@ -279,20 +238,18 @@ adduser $USER docker; sudo snap disable docker && sudo snap enable docker`.
 
 ## Watch out for
 
-**Every bullet below is true of the repository today** — all of them were
-re-checked against `internal/`, `cmd/`, `go.mod`, `.gitignore`, `regtest/` and
-`lnd@v0.19.3-beta` during the docs rewrite. Roughly half are about packages the
-replan deletes in item 5 (`server`, `webrun`, `coldwallet`, `setup`, `bump`,
-`rehearsal`, `signet/`, Core in the application); those stop mattering when the
-package does, and not before. The rest are about Go, LND, Core, the harness and
-this repository's own habits, and they outlive the replan entirely.
+**Every bullet below is true of the repository today.** Twenty went in item 5,
+with the machinery they were about — the browser's `Origin: null`, the startup
+token, the device transports, the CPFP child's replaceability and sequence
+arithmetic, `estimatesmartfee`'s two moods, the server's screens. Git has them:
+`git log --follow HANDOFF.md`. What is left is about Go, LND, Bitcoin Core as the
+harness still uses it, this harness and this repository's own habits.
 
-Three are worth reading again in the new light rather than skipped as moot:
-the legacy-address bullet (after the replan **nothing pre-excludes a legacy
-coin** — Sparrow picks them, and `plan.Verify`'s `LegacyInput` refusal becomes
-the only thing that notices); the stream-buffer bullet (see "Where the build
-actually is"); and the 2-of-3-with-three-signatures bullet, because Sparrow can
-over-sign and `internal/combine` survives.
+Two are worth reading in the new light rather than skimmed. The legacy-address
+bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
+`plan.Verify`'s `LegacyInput` refusal is the only thing that notices. And the
+2-of-3-with-three-signatures bullet, because Sparrow can over-sign and
+`internal/combine` is what meets it.
 
 
 - **`docs/design.html` is published as an artifact, and editing the file does not
@@ -316,65 +273,23 @@ over-sign and `internal/combine` survives.
   the live source against the local file rather than assuming the local one is
   ahead. That diff is what found the five.
 
-- **`Ctrl-C` on `winthistle serve` now cancels a run in flight, and it used to
-  say it did not.** That row of decision 2's table changed in the seams slice and
-  the reasoning is with it: a run left alive while the process exits is killed
-  between two RPCs with *n* shims open. A tab closing is still nothing at all.
-  Whatever else changes, do not let a *transport* event end a run.
-
-- **A browser's same-origin form POST carries `Origin: null`, and a test may not
-  invent that header.** Measured on Chrome 152, both referrer policies, real click
-  and scripted submit. It is the opaque-origin serialisation and it means nothing
-  in either direction, so the guard treats it as absent and leans on
-  `Sec-Fetch-Site: same-origin` — which page JavaScript cannot set. Every test in
-  `internal/server` had chosen a real `Origin`, which is why a `403` on every form
-  in the UI shipped green. The helpers now send the measured headers and say why.
-
-- **A device's transport must not be recomputed between the rounds.** The
-  rehearsal's number predicts the armed window only because the two rounds go
-  through the same transport, so `webrun.newSigners` resolves the choice once, off
-  the configuration, and `Signers.Round` indexes it. If a later change makes that
-  choice depend on anything that can move — a flag on the form, a probe of whether
-  the command still exists, a fallback when it fails — that is the invariant
-  breaking rather than a nicety, and the measurement quietly stops meaning
-  anything. `TestTheTransportIsPerDeviceAndTheSameInBothRounds` is the guard.
-
 - **A browser is installed on this machine.** Two handoffs said there was not,
   and that claim was never checked; `which chromium google-chrome firefox` finds
   three. Render before believing a page works. Three rendering sessions have now
   produced twelve defects between them, most of which no test would have caught,
   and four of which were false statements in operator copy.
 
-- **`estimatesmartfee` can start answering on regtest, and one fees test has no
-  guard for it.** `TestOnRegtestWithNoFloorThereIsNoRate` asserts there is no rate
-  when nothing is configured, which holds only while Core has no estimate. Mine
-  enough blocks carrying fee-paying transactions — a browser render followed by
-  `make -C regtest mine N=2016` did it — and Core produces one for a while (1.11
-  sat/vB, observed once) before its estimator decays back to "Insufficient data".
-  The test then fails with "a rate of 1.11 sat/vB was produced with nothing behind
-  it", which reads exactly like the refusal having been lost. It is harness state:
-  re-run it. Note that its sibling above it,
-  `TestRegtestHasNoFeeEstimateAndTheFloorCarriesIt`, has the `t.Skipf` guard for
-  precisely this state and says so in its message; this one does not, and giving it
-  the same guard is the fix if it recurs.
-
-- **`go test ./...` has a second way to fail now, and it is not regtest.**
-  `internal/webrun`'s `TestTheRoundsDeadlineIsSharedByEveryDevice` races two
-  goroutines against a two-second poll, and under twenty package binaries
-  competing for the CPU it lost once and reported "the seam never asked
-  anything". It passes standalone and under `make check`. Same rule, second
-  reason: `-p 1`, always.
-
 - **`git checkout <file>` discards unstaged work, and this repository is worked
   on with everything unstaged.** One `git checkout internal/prose/recovery.go`,
   used to undo a two-line experiment, threw away six reapplied edits and cost
   fifteen minutes. Copy the file to the scratchpad and copy it back.
 
-- **A `bool` that means "it failed" cannot also mean "we never tried".**
-  `rehearsal.Measurement.Accepted` was both, and the report read the second as the
-  first: a rehearsal that died in the finalizer announced that
-  `testmempoolaccept` had refused it. `Asked` separates them now. When a report
-  renders a verdict, check that the zero value is not a verdict.
+- **A `bool` that means "it failed" cannot also mean "we never tried".** The
+  dress rehearsal's `Accepted` was both, and the report read the second as the
+  first: a rehearsal that died before it asked announced that `testmempoolaccept`
+  had refused it. Both the field and the package are deleted; the rule is not.
+  When a report renders a verdict, check that the zero value is not a verdict.
+  `prose.signerNote`'s missing `default` arm was the same defect in a `switch`.
 
 - **A Core container restart unloads the harness wallets and the tests reload
   nothing.** Symptom: `Requested wallet does not exist or is not loaded`, from
@@ -384,117 +299,41 @@ over-sign and `internal/combine` survives.
   each of the four is the quick fix; `make -C regtest bootstrap` is the blunt
   one. Distinct from the generation mismatch below, which bootstrap cannot fix.
 
-- **The seams' bound is the 5:00 gate and never the peers' ten minutes.** The
-  gate is ours and enforceable; the peers' clock is theirs, because
-  `pruneZombieReservations` skips PSBT reservations. `config.Validate` already
-  refuses a gate greater than or equal to `rehearsal.PeerWindow`, which is what
-  makes a gate-derived deadline inside the peers' window by construction. If a
-  seam ever needs a longer wait, the answer is not to reach for `PeerWindow` —
-  `internal/webrun` is tested for not reading it.
-
-- **The startup-token cookie is not port-scoped, and cookies never are.** Any
-  other server on 127.0.0.1 that the operator's browser visits is sent this
-  cookie, so a second local service can read the token out of its own request
-  logs. That is not a regression on the threat model — `docs/design.html` is
-  explicit that a localhost bind is not an authentication boundary and any
-  process on the machine can reach the socket anyway — but do not describe the
-  token as protecting against local software. It protects against a *web page*:
-  DNS rebinding, a cross-origin form post, a stray `fetch`. `internal/server`'s
-  package comment says so in those words; keep it saying so.
-
-- **Not every question a batch asks is a signing round, and the clock sentence
-  used to assume it was.** `waitingOn` called the blunt-abandon confirmation's
-  deadline "the 5m0s signing gate" and said letting it pass cost "one more signing
-  round" — during a teardown, where the round is over and what it actually costs is
-  an abort finished by hand. It branches on `Question.Reply` now: non-empty means a
-  packet is being asked for. If a fourth kind of question is ever added to a batch,
-  that discriminator is what has to be revisited, not the copy.
-
-- **A report written for a run says things that are false on a screen of its
-  own.** `fees.Rate.Report()` closes on "there is no RBF on this transaction
-  (I-4)", which is exact in Phase 0 and names nothing at `/fees` with nothing
-  going. The cure is a note from the screen saying which transaction it would be,
-  never an edit to the report: the report is right where it is called from, and
-  editing it would break the caller that matters. Same shape as the pane rule
-  below — what the page owes a report is framing, not rewriting.
-
-- **`winthistle serve --connect` makes the doctor screen dial peers, and the
-  report screens still do not.** `doctor.Options.Connect` is the server's, so a
-  server started with that flag has one screen that connects and one that never
-  will. Copy on `/peers` says exactly that, and the earlier draft — which put the
-  connecting version in a terminal — was false about the tab next to it.
-
-- **A served report is regularly wider than the pane, and the page must not fix
-  it.** `internal/doctor`'s own pane test uses a synthetic report, and a real one
-  against a real node contains tokens `prose.Wrap` cannot break: an absolute path
-  to `winthistle.toml`, a 66-character pubkey, a descriptor with its checksum.
-  A width assertion at the HTTP layer therefore measures `$TMPDIR`'s length —
-  `server_regtest_test.go` had one for exactly one commit and it passed only
-  because `t.TempDir()` is short. What the page owes the report is not to reflow
-  it (`TestTheTextIsTheOracle`) and to soft-wrap what it cannot shorten
-  (`TestALongLineSoftWraps`: `white-space: pre-wrap` and a `max-width` in the
-  same column the text was written to). Fixing an overrun by rewrapping in HTML
-  would break decision 3's oracle, which is the point of having one.
-
 - **`getaddressinfo`'s `parent_desc` can name the wrong descriptor, and it is not
   a gate.** A Core wallet can hold two descriptors that derive the same address —
   the state a corrected setup leaves behind — and Core credits the address to the
   key manager created first, active or not. Measured: three of five addresses of a
-  *correct* pair attributed to a rejected one. `AddressCheck.Recognised()` is what
-  the setup question is gated on; `Attributed()` is reported. If you find yourself
-  gating on `Consistent()` again, that is the bug — see "`winthistle setup`".
+  *correct* pair attributed to a rejected one. The app no longer imports
+  descriptors or asks the address question — that went with `winthistle setup` —
+  but the harness's cold wallet does exactly this at `make harness`, so a
+  bootstrap that looks wrong may be this rather than a broken descriptor.
 
 - **Core deactivates the descriptor it replaces and keeps its coins.** One active
   external and one active internal per wallet, no RPC to remove either, and
   `listunspent` still lists a deactivated descriptor's coins. So a corrected setup
   is a new wallet name, not a second import.
 
-- **The CPFP child is replaceable and the funding transaction never is.** Two
-  verifiers enforce opposite rules on purpose: `internal/plan` refuses a funding
-  input below `MaxNonReplaceableSequence`, `internal/bump` requires exactly
-  `MaxBIP125Sequence`. If you find yourself wanting one verifier with a flag,
-  that is the invariant asking to be switched off — see "The second lift".
-
-- **The child's sequence check is equality, not "anything replaceable".** The
-  child is version 2, so a sequence with bit 31 clear is a BIP-68 relative
-  timelock rather than an RBF signal, and a timelocked CPFP child cannot enter a
-  mempool at all.
-
-- **A second lift has to beat an absolute fee.** BIP-125 rule 3 compares totals,
-  not rates, and Core says only `insufficient fee`. `bump.checkReplacement`
-  refuses before a device is asked and names the target that would work.
-
-- **`listunspent` cannot see a change output a mempool transaction has spent**,
-  which is the state every second lift starts in. The change is reconstructed
-  from the parent's outputs plus `getaddressinfo` — whose `hex` field is the
-  witness script behind a P2WSH address, and whose `ismine` is true on a
-  watch-only descriptor wallet while `iswatchonly` is false.
-
-- **A CPFP child has a fee-rate ceiling of 10,000 sat/vB and this build cannot
-  raise it.** btcwallet calls `SendRawTransaction(tx, false)` and rpcclient turns
-  that into `maxfeerate: 0.1` BTC/kvB; no WalletKit parameter reaches it. Because
-  a child concentrates the package's lift into ~150 vB, its own rate is roughly
-  fifty times the package target on a three-channel batch — so a ~210 sat/vB
-  package target is the practical limit, and lower on a bigger batch.
-  `bump.Verify` refuses above it before any device is asked, and names
-  `sendrawtransaction <hex> 0` as the way out. Full detail under
-  "`winthistle bump`".
-
 - **`bitcoind.Client.TestMempoolAccept` passes no `maxfeerate`**, so our own
   pre-flight enforces that same ceiling. Do not "fix" that by passing zero: the
   pre-flight should apply the ceiling the broadcast will, and the earlier,
   better-worded refusal is what an operator should hit first.
 
+- **The harness owns its coin locks now, and a leaked one is invisible.**
+  `walletcreatefundedpsbt` is called with `lockUnspents`, and until item 5 the
+  *application's* abort path released those locks — so every fixture got its coins
+  back as a side effect of the thing it was testing. It does not, so
+  `Env.BuildPSBTPaying` registers the release itself and a test calling
+  `coldwallet.Build` directly has to call `Env.ReleaseLocksAtCleanup`. The symptom
+  names nothing: `walletcreatefundedpsbt: Insufficient funds` from a wallet whose
+  `getbalances` is fine and whose `listunspent` is empty. Check
+  `./bin/bcli -rpcwallet=cold-watch listlockunspent`, and
+  `lockunspent true` frees the lot. **A clean `make check` ends with zero locked
+  outputs**, which is the thing to assert if this recurs.
+
 - **Core hides locked outputs from `listunspent`**, so a change output an
   unfinished bump is holding looks exactly like one that has already been spent —
   and the two call for opposite actions. `bump.Locate` consults the journal to
   tell them apart and names the holding bump. Nothing else can.
-
-- **`getmempoolentry`'s ancestor figures include the transaction itself.** For a
-  batch funded from confirmed coins they equal its own, which is the ordinary
-  case and why the difference is easy to miss. `walletcreatefundedpsbt` charges
-  for the whole ancestor package, so the arithmetic has to use the ancestor
-  figures when `ancestorcount > 1`.
 
 - **`journal.Open` has no migrations.** One `CREATE TABLE IF NOT EXISTS` block, no
   version table. A new column would silently not reach a journal an earlier build
@@ -530,11 +369,6 @@ over-sign and `internal/combine` survives.
   promises "usable after k confirmations" up front — the design asks for it and
   it cannot be delivered.
 
-- **`estimatesmartfee` succeeds when it has nothing to say.** No `feerate` field,
-  an `errors` array, and a 200. Every regtest node is in that state permanently.
-  `-fallbackfee` does not help: it is a wallet setting and `estimatesmartfee`
-  never consults it.
-
 - **`gettransaction` on a client with no wallet scope returns -19, not -5.**
   "Multiple wallets are loaded. Please select which wallet to use...".
   `bitcoind.Client.Confirmations` falls back to `getrawtransaction` on both, plus
@@ -546,12 +380,6 @@ over-sign and `internal/combine` survives.
   is fully synced"* — and one block is enough to trigger it. `regtestenv.Mine`
   now blocks until alice has caught up, which is why it takes a `*testing.T` and
   can fail.
-
-- **Core does the CPFP arithmetic for you, and it is the same arithmetic.**
-  `walletcreatefundedpsbt`'s `fee_rate` applies to the whole unconfirmed ancestor
-  package. Passing "the rate I want the child to pay" would badly overpay; the
-  right value is the package target. Verified to the satoshi against
-  `plan.ChildFeeSat` at three rates.
 
 - **`chan_pending` txids are chainhash bytes**, i.e. reversed relative to every
   txid a human or Core sees. `lnd.ChannelPointFromPending` handles it; hex-encoding
@@ -625,9 +453,12 @@ over-sign and `internal/combine` survives.
   one rule and it used to be I-2: a finalized input is a complete witness, so that
   device held a broadcastable transaction. I-2 is dissolved. What survives is
   mechanical — a merge *unions* partial signatures and finalization discards them,
-  so a device that finalizes on its own leaves the other devices in the round
-  nothing to add to. That is still true of the CPFP child, which is the only
-  multi-device round left. The batch's wallet goes through `Accept`, where a
+  so a packet that finalizes on its own leaves the rest of the round nothing to
+  add to. **No production caller reaches `Merge` any more** — the CPFP child was
+  the last, and item 5 deleted it — and the harness's `Env.SignLikeSparrow` is
+  what exercises it. That is a fact about the package comment, which says so,
+  rather than a reason to delete a rule about merging. The batch's wallet goes
+  through `Accept`, where a
   complete witness is the expected input and the check on it is
   `executeWitnesses` rather than a signature count. **If you find yourself
   re-justifying either in I-2's words, stop**: `CLAUDE.md`'s I-2 section is the
@@ -637,7 +468,8 @@ over-sign and `internal/combine` survives.
   It is the only test that publishes, and it has to, because "the transaction
   reaches the network on exactly one line" is not a claim a dry run can make.
   Nothing can close what it opened — `CloseChannel` is on the never-list — so
-  `make harness` is the reset.
+  `make harness` is the reset. **"Insufficient funds" from the cold wallet is
+  usually this**, and occasionally a leaked coin lock: see the next bullet.
 
 - **A stream must be read promptly, or the funding manager waits — and the new
   sequence spends the buffer.** `funderProcessFundingSigned` sends `chan_pending`
@@ -662,20 +494,6 @@ over-sign and `internal/combine` survives.
 - **`ExportAllChannelBackups` is node-wide.** The snapshot covers every channel
   the node has, not the batch's. A test may assert "at least the batch"; on the
   harness it comes back with 33.
-
-- **"No device added a signature" is a harness fault, not a signing bug, and
-  `bootstrap` does not fix it.** A container restart leaves Core's non-default
-  wallets unloaded, which every wallet call reports as "Requested wallet does not
-  exist" and `make -C regtest bootstrap` cures. A *different* failure looks like a
-  code bug and is not: `internal/settle` failing with "combining the cold wallet's
-  partials: no device added a signature — every device returned the packet it was
-  given", or `internal/run` failing with "the harness combining its own halves"
-  from `Env.SignLikeSparrow`, means `cold1`/`cold2` hold keys from a different
-  generation than the descriptors in `cold-watch`, so
-  `walletprocesspsbt` returns the packet untouched. Only `make -C regtest reset`
-  (~1 min) fixes that, and `winthistle doctor` will report the coins as fine
-  throughout, because they are. Reach for `reset` on that message rather than
-  reading the combine path.
 
 - **`internal/run`'s regtest tests open real channels and abort them.** Four
   tests now: two channels for the cold probe, two for the cancellation test, two
@@ -707,8 +525,12 @@ over-sign and `internal/combine` survives.
 
 - **The config reader refuses unknown keys, which makes it strict about its own
   history too.** Renaming a key is a breaking change to every operator's file,
-  and the failure is loud rather than silent. That is the intent; it is also
-  worth remembering before renaming one.
+  and the failure is loud rather than silent. That is the intent — but "[fees]
+  has no key \"mode\"" reads like a typo rather than like the change it is, so a
+  removed setting goes in `retiredKeys` or `retiredSections` in
+  `internal/config/toml.go` and gets a sentence saying what happened to it.
+  Item 5 retired eleven keys and three sections that way. **Add the entry in the
+  same commit as the removal**, or the refusal is the shrug.
 
 - **Waiting out the peers' window on a batch gives you no receipts, not one.**
   The obvious way to drive "a funding timeout expires with one receipt
