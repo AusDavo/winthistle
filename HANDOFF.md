@@ -119,11 +119,35 @@ is the point of it.
    `StartBump` does the same. Deleting `bump` is what frees those three fields,
    `run.ConfiguredSigners`, `run.DefaultPSBTDir`, `run.Signers`, the `--psbt-dir`
    flag and `internal/signers`' whole multi-device round — so do `bump` first and
-   the rest falls out. `run.Connect` is the only place Core is dialled.
-2. **`internal/settle` uses Core.** `settle.Options.Chain` is a `*bitcoind.Client`
-   and `settle` is on the survive list. Check what it asks Core for before
-   assuming the field goes; `internal/settle`'s regtest test is the slowest in the
-   repository (~60 s) and it is the one that will notice.
+   the rest falls out. `run.Connect` is the only place Core is dialled, and
+   `internal/run/recover.go:37` calls `bump.List`, which is the recovery screen's
+   "unfinished CPFP child" line.
+
+   **Six packages on the survive list have an edge into a cut one, and all six
+   are small.** `arm` uses `coldwallet.Output` (two fields; `Streams.FundingOutputs`
+   is the only user and only the harness calls it now). `config` uses
+   `coldwallet.Genesis`, `bitcoind.Config`, and `rehearsal.Gate`,
+   `rehearsal.PeerWindow` and `rehearsal.DefaultAbortAfterSigning` — which is where
+   `limits.abort_after_signing_seconds` is validated, so deleting `rehearsal`
+   means deciding whether that key survives at all. `journal` and `abort` use
+   `bitcoind.Outpoint`, `bitcoind.ListLocks` and `bitcoind.ReleaseLocks` for the
+   coin locks, and a run takes no coin locks any more. `doctor` uses
+   `coldwallet.MinCoreVersion` and `internal/signetenv`. `prose`, `plan` and
+   `combine` have none outside their tests, which is worth knowing: their
+   `coldwallet` imports are all in `_test.go` files and those are harness fixtures
+   that stay.
+2. **`internal/settle` splits in two, and only one half uses Core.**
+   `settle.Options.Chain` is an *interface* — `settle.Chain`, one method,
+   `Confirmations` — and it is optional: without it depth is not reported and
+   nothing else changes. So `settle.Settle` survives Core untouched. What takes a
+   `*bitcoind.Client` is `internal/settle/cpfp.go` (`ChildRequest.Wallet`), and
+   every caller of `settle.BuildChild`, `ChildRequest` and `Parent` outside the
+   package is `internal/bump` — so that file goes with `bump` and the rest of
+   `settle` stays. Its regtest test is the slowest in the repository (~60 s) and it
+   is the one that will notice if the split is wrong.
+
+   **This bullet said `Options.Chain` was a `*bitcoind.Client`.** It is not, and
+   the claim was written without reading `settle.go:139`. Corrected the same day.
 
 **Do not** demote the fee and change findings or remove `Replaceable` — item 6.
 **Do not** re-open `arm` or `combine`; both are done and both are proved on the
