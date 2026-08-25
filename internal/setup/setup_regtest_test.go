@@ -21,9 +21,14 @@ import (
 // the descriptor lifecycle and the answer that is recorded about it. None of
 // them exercises the rescan: regtest has no chain history, so a wallet imported
 // with the right birthday and one imported with a wrong one find exactly the same
-// nothing. That needs signet, per CLAUDE.md.
-const notProvedHere = "regtest has no chain history, so the rescan is untested " +
-	"here — that needs signet"
+// nothing.
+//
+// That is covered against the signet/ harness, one layer down, in
+// internal/coldwallet/coldwallet_signet_test.go — nothing in this package sits
+// between setup and the rescan, so there is nothing here for a second copy to
+// prove.
+const notProvedHere = "regtest has no chain history, so the rescan is not proved " +
+	"here — it is in internal/coldwallet, against signet/"
 
 func testCtx(t *testing.T) context.Context {
 	t.Helper()

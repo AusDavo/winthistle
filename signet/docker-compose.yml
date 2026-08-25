@@ -1,0 +1,95 @@
+# Winthistle signet harness: two bitcoinds and nothing else.
+#
+# This exists for the two things regtest cannot reach, and both are Core-only:
+# coldwallet.Import's descriptor rescan, which needs a chain with real history,
+# and coldwallet.PrunedPastBirthday, which needs a node that has actually thrown
+# blocks away. setup.Deps has no LND field, so there are no channels, no peers
+# and no lnd here.
+#
+# It is a directory beside regtest/ rather than a service inside it on purpose.
+# A second chain inside regtest/docker-compose.yml would put two networks behind
+# the one thing regtestenv.Start connects to, and `make test`'s -p 1 discipline
+# is written around there being exactly one.
+#
+# Data lives in named volumes, same reasoning as regtest/: it dodges the
+# uid-mismatch trap and keeps this file usable against a remote daemon.
+name: winthistle-signet
+
+x-bitcoind: &bitcoind
+  image: polarlightning/bitcoind:${BITCOIND_VERSION}
+  restart: unless-stopped
+  environment:
+    USERID: ${USERID}
+    GROUPID: ${GROUPID}
+
+services:
+  # The unpruned node. This is the one coldwallet.Import rescans against, so it
+  # must keep every block back to the birthday the tests use.
+  bitcoind:
+    <<: *bitcoind
+    container_name: wt-signet
+    command: >-
+      bitcoind
+      -server=1
+      -signet=1
+      -rpcbind=0.0.0.0
+      -rpcallowip=0.0.0.0/0
+      -rpcport=38332
+      -rpcuser=${RPCUSER}
+      -rpcpassword=${RPCPASS}
+      -listen=1
+      -listenonion=0
+      -upnp=0
+      -dbcache=1000
+      -fallbackfee=0.0002
+    ports:
+      - "38332:38332"
+    volumes:
+      - unpruned:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -signet -rpcuser=${RPCUSER} -rpcpassword=${RPCPASS} getblockchaininfo >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+  # The pruned node. It holds no wallet and needs no coins: all it has to do is
+  # finish its own initial block download and then report a pruneheight, so that
+  # RunPreflight has a real horizon to date and refuse against.
+  #
+  # It peers with the unpruned node as well as with the network. A pruned node
+  # cannot serve historical blocks, but it can be served by one, and having the
+  # two on the same docker network means the second download does not depend on
+  # whichever public signet peers happen to answer.
+  pruned:
+    <<: *bitcoind
+    container_name: wt-signet-pruned
+    command: >-
+      bitcoind
+      -server=1
+      -signet=1
+      -rpcbind=0.0.0.0
+      -rpcallowip=0.0.0.0/0
+      -rpcport=38332
+      -rpcuser=${RPCUSER}
+      -rpcpassword=${RPCPASS}
+      -listen=1
+      -listenonion=0
+      -upnp=0
+      -dbcache=1000
+      -prune=${PRUNE_MB}
+      -addnode=bitcoind:38333
+    ports:
+      - "38352:38332"
+    volumes:
+      - pruned:/home/bitcoin/.bitcoin
+    healthcheck:
+      test: ["CMD-SHELL", "bitcoin-cli -signet -rpcuser=${RPCUSER} -rpcpassword=${RPCPASS} getblockchaininfo >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 5s
+      retries: 60
+      start_period: 10s
+
+volumes:
+  unpruned:
+  pruned:

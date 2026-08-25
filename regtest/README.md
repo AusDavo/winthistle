@@ -96,7 +96,13 @@ Two of these cost real debugging time; both fail in ways that look like your cod
 
 ## What regtest cannot test
 
-The **descriptor-import rescan** — regtest has no history to rescan, and the
-rescan path is precisely what needs an unpruned node. Use signet for that, where
-a full unpruned node is only a few GB. And neither substitutes for the mainnet
-cold probe, which proves your node, your peers, your devices.
+The **descriptor-import rescan** and the **prune-horizon check**. There is no
+history here to rescan, so a right birthday and a wrong one find precisely the
+same nothing, and this node cannot be made meaningfully pruned.
+
+Both live in [`signet/`](../signet/) instead: two bitcoinds, one unpruned and one
+pruned, and no LND at all — neither path involves one. It costs a real block
+download, so its tests are off unless `WINTHISTLE_SIGNET=1` is set.
+
+Neither harness substitutes for the mainnet cold probe, which proves your node,
+your peers, your devices.

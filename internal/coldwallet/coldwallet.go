@@ -30,13 +30,33 @@
 // derivation paths, multi-versus-sortedmulti, transposed keys and truncated
 // xpubs — the whole family, at the only moment when catching them is free.
 //
-// # What regtest cannot prove here
+// # What regtest cannot prove, and what signet settles
 //
 // The rescan. Regtest has no history to rescan, so a wrong birthday on regtest
 // is indistinguishable from a right one, and the pruning check has nothing to
-// fire on. Those need signet — see CLAUDE.md. The regtest tests cover the
-// lifecycle, the round trip, and the refusals; they do not cover the rescan, and
-// they say so.
+// fire on. Both are tested against the signet/ harness instead — two bitcoinds,
+// one unpruned and one pruned, and no LND, because nothing in this package needs
+// one. The regtest tests cover the lifecycle, the round trip and the refusals,
+// and say which of them they are not covering.
+//
+// What signet settles is narrow, and worth stating exactly rather than as "the
+// rescan works". A birthday earlier than the cold wallet's first coin finds it:
+// measured over a real chain, not inferred. The converse — that a birthday later
+// than the coins finds nothing while imports cleanly, derives the correct
+// addresses, passes the address check and reports no error, byte for byte the
+// outcome of a correct setup on a wallet that has never been paid — is written
+// as a test and had not yet been run when it was written, because it needs a
+// coin older than Core's two-hour import-timestamp window. HANDOFF.md's "One
+// test has not run yet" says how to finish it.
+//
+// That second case is not a defect and is not fixable here. Core cannot know a
+// wallet's real birthday; only the operator does. A zero balance is not evidence,
+// because a correct new wallet shows the same zero. Validate refuses a birthday
+// it was not given and one in the future, and warns about one inside the last
+// week, and none of those can tell "too late" from "new". It is precisely why
+// Install ends in the round-trip address check rather than in a success message,
+// and TestATooLateBirthdayFindsNothingAndLooksExactlyTheSame pins it so that a
+// later slice does not turn the birthday into a promise it cannot keep.
 package coldwallet
 
 import (

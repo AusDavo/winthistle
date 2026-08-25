@@ -11,16 +11,20 @@ import (
 	"github.com/AusDavo/winthistle/internal/regtestenv"
 )
 
-// What regtest cannot prove here, said once rather than implied by omission.
+// What regtest cannot prove here, said once rather than implied by omission —
+// and, now, where it is proved instead.
 //
 // Every test in this file exercises the descriptor lifecycle: create, checksum,
 // import, read back, derive, compare. None of them exercises the rescan, because
 // regtest has no history to rescan — a wallet imported with the right birthday
 // and one imported with a wrong one find exactly the same nothing. The pruning
 // pre-flight is in the same position: this node is not pruned and cannot be made
-// meaningfully pruned. Both need signet, per CLAUDE.md.
+// meaningfully pruned.
+//
+// Both are covered in coldwallet_signet_test.go, against the signet/ harness.
 const notProvedHere = "regtest has no chain history, so the rescan and the prune " +
-	"horizon are untested here — that needs signet"
+	"horizon are not proved here — they are in coldwallet_signet_test.go, " +
+	"against signet/"
 
 func testCtx(t *testing.T) context.Context {
 	t.Helper()

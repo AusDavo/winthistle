@@ -36,10 +36,14 @@ every form in the UI unusable.** See "The bug the first render found" below —
 `Origin: null` — and note the correction it carries: a browser *is* installed on
 this machine, and the previous two handoffs said otherwise.
 
-What is missing is transport selection per device — the file transport itself is
-built, both legs — the setup and bump screens, plus signet and the mainnet cold
-probe. **The countdown is built**; see the review
-section below. **In-house animated QR is out of scope as of 2026-08-24**, by the
+What is missing is the **mainnet cold probe**, and at this level only that. This
+sentence used to name four other things, and every one of them had been built by
+the time it was read: transport selection per device
+(`TestTheTransportIsPerDeviceAndTheSameInBothRounds`), the setup screen
+(`GET /setup`), the bump screen (`/bump/<run>`) and the signet harness
+(`signet/`). That is the fourth handoff in a row to carry a "missing" that was
+not — check the code before writing one. **The countdown is built**; see the
+review section below. **In-house animated QR is out of scope as of 2026-08-24**, by the
 owner's decision, and it is out of scope rather than unbuilt: see "The QR decision
 and the file transport" below.
 
@@ -581,15 +585,78 @@ range = [0,1003]"*. The gap limit is therefore a floor, not a setting — and
 state you want to resume. `Import` reads `listdescriptors` first and widens to
 whatever Core has grown to.
 
-### The rescan and the prune horizon are untested
+### The rescan and the prune horizon, and what signet settled
 
 Regtest has no history. A wallet imported with the right birthday and one
 imported with a wrong one find precisely the same nothing, and the node cannot be
 made meaningfully pruned. `RunPreflight` dates Core's `pruneheight` by reading
-that block's header and compares it against the birthday, and
-`Config.Validate` refuses a birthday it was not given — both are written, neither
-is proved. That needs signet, per `CLAUDE.md`. The regtest tests say so in a
-named constant rather than by omission.
+that block's header and compares it against the birthday, and `Config.Validate`
+refuses a birthday it was not given — both were written and neither was proved.
+The regtest tests said so in a named constant rather than by omission, and that
+constant now names the file that proves them instead.
+
+**`signet/` is that file's harness**, and it is two bitcoinds: one unpruned for
+the rescan, one `-prune=550` so `PrunedPastBirthday` has a horizon to fire on.
+No LND — `setup.Deps` has no LND field and `doctor`'s prune warning is
+`getblockchaininfo` — so no channels, no peers and no coins of our own.
+`internal/signetenv` is the wiring, `WINTHISTLE_SIGNET=1` is the switch, and
+`make test` stays green on a machine that has never downloaded signet.
+
+Four tests, in `internal/coldwallet/coldwallet_signet_test.go` and
+`internal/doctor/doctor_signet_test.go`. **Three have passed; the fourth is
+written and has not yet run — see "One test has not run yet" below.**
+
+1. *Passed.* A birthday before the cold wallet's first coin finds it. That is
+   `coldwallet.Import`, blocking for the whole rescan, which is the first thing
+   an operator does on mainnet with their real descriptors. Measured: 17s over a
+   thirty-day span against 2,000 watched scripts.
+2. *Written, not yet run.* **A birthday after it finds nothing, and is otherwise
+   indistinguishable.** Same verdict, same derived addresses, same passing
+   address check, no error and no warning that could be called a refusal. That is
+   not a defect and it is not fixable: Core cannot know a wallet's real birthday,
+   and a zero balance is not evidence because a correct wallet that has never
+   been paid shows the same zero. It is why `Install` ends in the round-trip
+   address check. The test's comment is written for whoever arrives believing
+   they have found a hole — read it before "fixing" anything there.
+3. *Passed.* `PrunedPastBirthday` fires, for the first time ever. Both directions
+   are pinned: the same pruned node is `Ready` for a wallet born after its
+   horizon, so the check is a comparison rather than a refusal of pruning.
+   Measured horizon: block 318,427, dated six days behind a 319,253-block tip.
+4. *Passed.* `doctor` reports a prune horizon, also for the first time.
+
+### One test has not run yet, and the reason is arithmetic
+
+`TestATooLateBirthdayFindsNothingAndLooksExactlyTheSame` needs a birthday that is
+both **later than the coin plus Core's two-hour `TIMESTAMP_WINDOW`** and **still
+in the past** — `Config.Validate` refuses a future birthday, correctly. The
+faucet coin confirmed at 2026-08-25 05:31 UTC, so no such birthday existed during
+the slice that funded it.
+
+`signetenv.RequireClearOfTheTimestampWindow` skips rather than running it early,
+because a margin that is too thin does not make this test *fail* — it makes it
+pass for the wrong reason, which is the worst outcome available for a test whose
+whole subject is an indistinguishability. The threshold is the window plus an
+hour.
+
+**To finish it**, with the harness up and the coin more than three hours old:
+
+```sh
+WINTHISTLE_SIGNET=1 go test -p 1 -count=1 -run TooLate ./internal/coldwallet/
+```
+
+If it skips, read the skip message: it says how old the coin is. If it *fails*,
+that is a real finding and the test's comment says what to suspect. Nothing else
+in the slice depends on it, and `make check` is green without it.
+
+Two things about the harness are easy to get wrong. The coins come from a
+**faucet**, because default signet cannot be self-mined — its blocks need the
+challenge key — so that step has a human in it; a custom signet was considered
+and declined, because a chain we mined ourselves would not test the one thing the
+real one does. And **a coin must be more than three hours old** before a birthday
+can be placed after it: Core winds a rescan back `TIMESTAMP_WINDOW`, two hours,
+from the import timestamp, so a birthday "after" a fresh coin still reaches over
+it and the test would prove the opposite of what it says.
+`signetenv.OldestCoin` skips rather than allowing that.
 
 ## `winthistle setup`, and the four things Core does that the obvious code gets wrong
 
@@ -3301,44 +3368,18 @@ to no peer and pays no fee.
    clock may bound what ("Watch out for"). The `isPending` half is much smaller
    than the deadline half and could be taken on its own: a `context.WithoutCancel`
    plus a short timeout would let the one question that matters still be asked.
-4. **Signet, for the two things regtest cannot reach.** The descriptor-import
-   rescan and the prune-horizon pre-flight both need a chain with history. Both
-   are built and both are untested; see the note in
-   `internal/coldwallet/coldwallet_regtest_test.go`. `winthistle doctor` reports
-   the prune horizon against the birthday and has never had one to report.
-
-   **This does not need hardware this machine lacks, and this file used to imply
-   it did.** Nobody had checked. Both untested paths are **Core-only** —
-   `setup.Deps` has no LND field at all, and the prune check is `doctor` reading
-   `getblockchaininfo` — so there is no signet LND, no channels, no coins and no
-   peers in it. It is one unpruned bitcoind for the rescan and a pruned one so
-   `PrunedPastBirthday` has something to fire on, on the same
-   `polarlightning/bitcoind` image `regtest/` already runs. Put it in a `signet/`
-   directory *beside* `regtest/` rather than as a service inside its compose
-   file: a second chain inside the harness is a second chain inside everything
-   `regtestenv.Start` and `-p 1` are written around. Gate the tests behind an env
-   var that skips cleanly, the way `WINTHISTLE_SLOW=1` gates
-   `TestWhoOwnsTheTenMinuteClock`, so `make test` stays green without a signet
-   node. The only unavoidable cost is wall-clock IBD, and no figure for it should
-   go in this file until one has been measured.
-
-   One of the three tests is worth naming because it is the one most likely to be
-   "fixed": a **too-late birthday finds nothing and is otherwise
-   indistinguishable from a correct one**. That is not a defect — it is exactly
-   the indistinguishability the round-trip address check exists to cover, and
-   pinning it is what stops a later slice turning the birthday into a promise it
-   cannot keep.
-5. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
+4. **The mainnet cold probe.** `winthistle run --stop-before-publish`.
    Everything it needs exists: steps 1 to 8 are the production code path, step 9
    is one call inside one `if` that it does not make, and the abort path it
    terminates through runs on every failure and is tested on both.
-6. **Nothing new at this level.** What remains is items 3, 4 and 5, in that
-   order, and only the last of them needs something this machine does not have —
-   mainnet coins and real peers. Three claims on this list have now been wrong the
-   same way: that no browser was installed, which cost a guard bug a single click
-   would have found; that signet needed absent hardware; and that finding 3 had
-   five missing scenarios, when two of them had shipped a commit later. All three
-   survived several handoffs because nobody checked. Check before writing "we
+5. **Nothing new at this level.** What remains is items 3 and 4, in that order,
+   and only the last of them needs something this machine does not have — mainnet
+   coins and real peers. Four claims on this list have now been wrong the same
+   way: that no browser was installed, which cost a guard bug a single click would
+   have found; that signet needed absent hardware; that finding 3 had five missing
+   scenarios, when two of them had shipped a commit later; and the "what is
+   missing" sentence at the top of this file, which named four built things. All
+   four survived several handoffs because nobody checked. Check before writing "we
    cannot" — and check a worklist before working it.
 
 Done since the last handoff, all from the previous list:

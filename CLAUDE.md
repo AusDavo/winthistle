@@ -35,8 +35,13 @@ the configuration once, per device, so the rehearsal and the batch go through th
 same transport, which is the only thing that makes the rehearsal's measurement a
 prediction. `internal/webrun`'s `Signers` carries the rule; there is no second
 copy of the command transport, only a one-device `signers.Set` per commanded
-device. Still missing are signet and the mainnet cold probe. So the safety model
-below is verified against LND source
+device. **The signet harness is built**, and with it the two things regtest
+cannot reach: `coldwallet.Import`'s rescan over a chain with real history, and
+`PrunedPastBirthday` firing on a node that has genuinely thrown blocks away — a
+refusal that until now had never fired once, which is the same class of unknown
+as a `bool` that meant two things. It is Core-only, two bitcoinds and no LND,
+because neither path involves LND. What is still missing is the **mainnet cold
+probe**. So the safety model below is verified against LND source
 *and* against a running node — but never yet against mainnet, which is what the
 cold probe is for.
 
@@ -324,12 +329,32 @@ abort path*.
   `walletprocesspsbt` in each and `combinepsbt`. No hardware, fully scriptable,
   and it exercises exactly the partial-signature path I-2 depends on. This is
   what CI uses.
-- **signet** — integration realism, and the only cheap way to test the
-  descriptor-import **rescan** (regtest has no history; the rescan path needs an
-  unpruned node, and signet's chain is small). **Core only**: the rescan and the
-  prune-horizon pre-flight are the only two things regtest cannot reach, and
-  neither involves LND — `setup.Deps` has no LND field. So this is one unpruned
-  bitcoind and one pruned one, not a signet deployment.
+- **signet, in `signet/`** — the two things regtest cannot reach, and nothing
+  else. **Core only**, and that is not a simplification: the descriptor-import
+  **rescan** needs a chain with history, and the **prune-horizon** check needs a
+  node that has actually thrown blocks away, and neither involves LND —
+  `setup.Deps` has no LND field. So it is one unpruned bitcoind and one pruned
+  one, no channels, no peers, no coins of our own and no lnd. `make signet`
+  starts it; `make test-signet` runs it. The tests skip unless
+  `WINTHISTLE_SIGNET=1` is set, so `make test` stays green on a machine that has
+  never downloaded signet.
+
+  **It is not cheap, and this file used to say it was.** "Signet's chain is
+  small" was written here and never measured: its early years are near-empty
+  ten-minute blocks but its recent ones are heavily used, so an unpruned node is
+  tens of gigabytes and about an hour rather than a few gigabytes and minutes. The pruned
+  one costs the same time and almost none of the space. `signet/README.md` has
+  the measured figures; do not restate them here, so there is one place to
+  correct.
+
+  Two things about it are worth knowing before touching it. The coins come from
+  a **faucet** — default signet cannot be self-mined, its blocks need the signet
+  challenge key — so that step has a human in it and a custom signet was declined
+  rather than overlooked: a chain we mined ourselves would not test that a rescan
+  over genuine history is survivable. And a coin has to be more than three hours
+  old before a birthday can be placed *after* it, because Core winds a rescan back
+  `TIMESTAMP_WINDOW` (two hours) from the import timestamp. `signet/README.md`
+  carries both.
 - **mainnet cold probe** — commissioning only, per `docs/design.html`. Proves
   this node, these peers, these devices. No signet/regtest substitute for it.
 

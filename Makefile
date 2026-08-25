@@ -1,7 +1,7 @@
 # Winthistle. `make check` is the one you want.
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help build test test-unit check harness fmt vet lint macaroon
+.PHONY: help build test test-unit test-signet check harness signet fmt vet lint macaroon
 
 help:  ## show this help
 > @grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t14
@@ -48,13 +48,30 @@ test-unit:  ## tests that need no harness (includes the macaroon registry check)
 # test processes through the *same* alice, where one test's plain channel open
 # leases the coins another test's psbt_verify is about to be judged against. That
 # fails with lnd's reserved-value error, which says nothing about the real cause.
+#
+# There is a second chain now — signet/ — and the same discipline covers it, so
+# long as it stays -p 1. Those tests are off unless WINTHISTLE_SIGNET is set; see
+# test-signet.
 test:  ## everything; harness-backed tests skip if regtest is down
 > go test -p 1 -count=1 -timeout 20m ./...
+
+# The two things regtest cannot reach: coldwallet.Import's descriptor rescan, and
+# a node pruned past a cold wallet's birthday. Both are Core-only — there is no
+# signet LND — and both need signet/ up, synced, and holding a faucet payment.
+# Everything here skips with a reason if it is not.
+test-signet:  ## the descriptor rescan and the prune horizon; needs `make signet`
+> WINTHISTLE_SIGNET=1 go test -p 1 -count=1 -timeout 60m -v \
+>   ./internal/coldwallet/ ./internal/doctor/
 
 check: lint vet test  ## lint, vet and test
 
 harness:  ## rebuild the regtest cluster from scratch (~1 min)
 > $(MAKE) -C regtest reset
+
+# Not part of `harness`, and not fast: this one downloads signet. See
+# signet/README.md, including the faucet step, which has a human in it.
+signet:  ## start the signet harness (two bitcoinds; a real block download)
+> $(MAKE) -C signet up
 
 # Generated from internal/methods, never written by hand: CLAUDE.md forbids a
 # hardcoded permission list, and the design doc promises the printed one is

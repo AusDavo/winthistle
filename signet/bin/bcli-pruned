@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# bitcoin-cli against the signet harness's *pruned* node — the one
+# coldwallet.PrunedPastBirthday fires on. It holds no wallet.
+#   ./bin/bcli-pruned getblockchaininfo
+set -euo pipefail
+cd "$(dirname "$0")/.."
+U=$(sed -n 's/^RPCUSER=//p' .env); P=$(sed -n 's/^RPCPASS=//p' .env)
+exec docker compose exec -T pruned \
+  bitcoin-cli -signet -rpcuser="$U" -rpcpassword="$P" "$@"
