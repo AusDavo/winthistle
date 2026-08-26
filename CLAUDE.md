@@ -82,6 +82,24 @@ built" for the account; the short version:
   reads the master fingerprints off the transaction's own inputs and accepts an
   output carrying those on branch 1, with `run --change ADDRESS` as the stronger
   override.
+
+  **Step 7 reads two encodings and step 4 reads one, and that gap is
+  load-bearing** — issue #3, found by the cold probe and landed 2026-08-26.
+  `FileWallet.Signed` takes a signed PSBT *or* a finalized raw transaction, hex
+  or binary, because that is what Sparrow's *View Final Transaction* yields and
+  what `lncli` is fed at the equivalent prompt; a mainnet batch was torn down
+  over the wrapper alone, costing both peers ~2016 blocks.
+  `combine.SignedFromTX` lifts the witnesses onto the base and refuses a moved
+  txid (I-3) or a transaction with no witnesses, and `combine.Accept` then runs
+  unchanged, so there is one acceptance path and not two. **The relaxation is at
+  step 7's call site and must never move into `combine.Parse`**, which `Built`
+  still calls alone: a raw *signed* transaction at step 4 is exactly what
+  `combine.Unsigned` exists to refuse, and `combine.Unsigned` refuses by reading
+  a packet's partial signatures — which a raw transaction has none of, so it
+  would be accepted in silence by a check with nothing to look at.
+  `TestStepFourStillRefusesARawSignedTransaction` is the guard, and
+  `TestTheFilePathDrivesTheWholeSequence` now runs the whole sequence once per
+  encoding against the live node.
 - ~~**Item 5** deletes the cut packages.~~ **Done, 2026-08-26.** `coldwallet`'s
   setup half, `setup` and the `setups` table, `bump`, `rehearsal`, `signers`,
   `server`, `webrun`, `signet/` and `signetenv`, `fees`, `doctor`'s Core checks,

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -140,6 +141,33 @@ func (e *Env) ReleaseLocksAtCleanup(t *testing.T, wallet *bitcoind.Client,
 			t.Errorf("releasing %d coin lock(s): %v", len(ops), err)
 		}
 	})
+}
+
+// ViewFinalTransaction returns the batch transaction as Sparrow's *View Final
+// Transaction* hands it over: the finalized transaction, serialized for the
+// network, as hex text with the newline a file gets.
+//
+// This is the other encoding step 7 reads, and it is the one the mainnet cold
+// probe was actually holding when the run refused it. A wallet's signing screen
+// and its final-transaction screen are two menu items apart, and which one the
+// operator exports from decides whether a PSBT or a raw transaction lands in the
+// file — which is why the harness has to be able to play both.
+func (e *Env) ViewFinalTransaction(t *testing.T, unsigned []byte) []byte {
+	t.Helper()
+
+	packet, err := psbt.NewFromRawBytes(bytes.NewReader(e.SignLikeSparrow(t, unsigned)), false)
+	if err != nil {
+		t.Fatalf("reading the harness's own signed packet back: %v", err)
+	}
+	tx, err := psbt.Extract(packet)
+	if err != nil {
+		t.Fatalf("extracting the final transaction: %v", err)
+	}
+	var buf bytes.Buffer
+	if err := tx.Serialize(&buf); err != nil {
+		t.Fatalf("serialising the final transaction: %v", err)
+	}
+	return []byte(hex.EncodeToString(buf.Bytes()) + "\n")
 }
 
 // SignLikeSparrow returns the batch transaction fully signed, the way the wallet

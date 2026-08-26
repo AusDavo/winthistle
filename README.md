@@ -107,6 +107,12 @@ The two paths are `--psbt FILE`, which is where you save that transaction, and
 `FILE-signed.psbt` beside it, which is where the signed one goes at step 7. The
 second name is derived rather than asked for, so the two cannot be the same file.
 
+**Step 7 takes a signed PSBT or a raw transaction**, hex or binary — whichever
+your wallet hands you, including the hex from Sparrow's *View Final
+Transaction*. Step 4 takes a PSBT and only a PSBT, and that is the refusal above
+rather than an inconsistency: what proves a step-4 packet is unsigned is reading
+its partial signatures, and a raw transaction has none to read.
+
 ## The load-bearing property
 
 `no_publish` and `skip_finalize` are set on **every** channel in the batch — not

@@ -146,9 +146,20 @@ func (w *FileWallet) Built(ctx context.Context, _ []Recipient) ([]byte, error) {
 		"either is read:"))
 	fmt.Fprintf(w.Out, "      %s\n", w.Unsigned)
 
-	raw, err := w.wait(ctx, w.Unsigned, "the transaction you built")
+	body, err := w.wait(ctx, w.Unsigned, "the transaction you built")
 	if err != nil {
 		return nil, err
+	}
+	// combine.Parse, and nothing else. A raw transaction is refused here even
+	// though step 7 reads one, and that is the point rather than an oversight: a
+	// raw signed transaction at step 4 is the packet the refusal below exists to
+	// catch, and combine.Unsigned cannot read one. A raw transaction is also
+	// useless here on its own terms — no witness UTXOs and no key origins, so the
+	// verifier could neither check the inputs nor account for the change output.
+	raw, perr := combine.Parse(body)
+	if perr != nil {
+		return nil, fmt.Errorf("%s is not a PSBT this build can read: %w",
+			w.Unsigned, perr)
 	}
 	if err := combine.Unsigned(raw); err != nil {
 		return nil, fmt.Errorf("%s carries signatures already: %w.\n\nNothing is "+
@@ -161,7 +172,26 @@ func (w *FileWallet) Built(ctx context.Context, _ []Recipient) ([]byte, error) {
 	return raw, nil
 }
 
-// Signed waits for the signed transaction.
+// Signed waits for the signed transaction, in either encoding a signing wallet
+// writes: a PSBT, or the finalized raw transaction.
+//
+// # Why two encodings here and one at step 4
+//
+// A finished transaction is the natural thing to have in hand at this moment.
+// Sparrow's View Final Transaction produces the raw hex, lncli is fed exactly
+// that at the equivalent prompt in the manual workflow this tool replaces, and a
+// mainnet cold probe lost a batch — two peers' pending-channel slots, ~2016
+// blocks each — to this build refusing the wrapper and nothing else. See issue
+// #3.
+//
+// It is safe here and would not be at step 4. Step 4 is before the gate, where a
+// signed packet is the one thing that can still defeat I-1 from outside, and
+// combine.Unsigned refuses it by reading a PSBT's partial signatures — which a
+// raw transaction does not have. Step 7 is after the gate: every channel is
+// already recoverable, so what arrives is checked for being the transaction LND
+// pinned rather than for being unsigned, and a raw transaction answers that
+// question more directly than a PSBT does. So Built keeps calling combine.Parse
+// alone, and the second encoding lives here, at this call site only.
 func (w *FileWallet) Signed(ctx context.Context, unsigned []byte) ([]byte, error) {
 	got := w.SignedPath()
 
@@ -178,11 +208,52 @@ func (w *FileWallet) Signed(ctx context.Context, unsigned []byte) ([]byte, error
 	fmt.Fprint(w.Out, prose.Bullet("Let the wallet finalize it. A complete "+
 		"transaction is what this step wants now: every channel in the batch is "+
 		"already recoverable, so a wallet holding signed bytes front-runs nothing."))
+	fmt.Fprint(w.Out, prose.Bullet("A signed PSBT or a raw transaction, either is "+
+		"read — Sparrow's View Final Transaction hex is a raw transaction, and so "+
+		"is what a wallet writes when it offers to export the finished bytes."))
 
-	return w.wait(ctx, got, "the signed transaction")
+	body, err := w.wait(ctx, got, "the signed transaction")
+	if err != nil {
+		return nil, err
+	}
+	return w.decodeSigned(body, unsigned, got)
 }
 
-// wait polls for a file and reads it through the one sniffer.
+// decodeSigned turns what the wallet wrote into the packet combine.Accept takes.
+//
+// PSBT first, raw transaction second, and the order is not a preference: a PSBT
+// is settled by BIP174's magic bytes rather than guessed at, so trying it first
+// means the fallback is only ever reached by something that is definitely not
+// one. combine.SignedFromTX does the rest, against the base — which is where
+// every fact the verifier needs already lives, the raw transaction contributing
+// only the completed witnesses.
+func (w *FileWallet) decodeSigned(body, unsigned []byte, path string) ([]byte, error) {
+	raw, perr := combine.Parse(body)
+	if perr == nil {
+		return raw, nil
+	}
+	signed, terr := combine.SignedFromTX(unsigned, body)
+	if terr == nil {
+		return signed, nil
+	}
+	if errors.Is(terr, combine.ErrNotATransaction) {
+		// Neither, so neither diagnosis is the answer on its own and printing one
+		// would send the operator to check the wrong half of their export.
+		return nil, fmt.Errorf("%s is neither a PSBT nor a raw transaction this "+
+			"build can read. As a PSBT: %v. As a raw transaction: %v", path, perr, terr)
+	}
+	// It is a transaction and there is something wrong with it. That is the
+	// answer; the PSBT sniffer's complaint about magic bytes is noise beside it.
+	return nil, fmt.Errorf("%s: %w", path, terr)
+}
+
+// wait polls for a file and hands back what was in it, undecoded.
+//
+// Decoding is the caller's, because the two callers do not want the same answer:
+// Built takes a PSBT and only a PSBT, which is I-1, and Signed takes either
+// encoding. It used to decode here, through combine.Parse, and that shared
+// sniffer is exactly what must not learn about raw transactions — teaching it
+// would teach step 4 about them too.
 //
 // Nothing bounds it but the context. The two waits have different clocks above
 // them and neither is this transport's to enforce: step 4 is inside the peers'
@@ -201,12 +272,7 @@ func (w *FileWallet) wait(ctx context.Context, path, what string) ([]byte, error
 		body, err := os.ReadFile(path)
 		switch {
 		case err == nil:
-			raw, perr := combine.Parse(body)
-			if perr != nil {
-				return nil, fmt.Errorf("%s is not a PSBT this build can read: %w",
-					path, perr)
-			}
-			return raw, nil
+			return body, nil
 		case !os.IsNotExist(err):
 			return nil, fmt.Errorf("reading %s: %w", path, err)
 		}

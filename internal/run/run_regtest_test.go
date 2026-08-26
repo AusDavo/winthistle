@@ -472,9 +472,36 @@ func waitFor(t *testing.T, out *syncWriter, want string) {
 // *outside* the app for a complete witness, which is the input combine.Accept
 // exists for and the one a partial-signature fixture would never produce.
 //
-// The publish is withheld, so this costs one peer a pending-channel slot and
-// nothing else.
+// It runs once per encoding a signing wallet writes at step 7, and the second
+// one is issue #3. A mainnet cold probe reached the gate — n of n chan_pending
+// with nothing signed — and then died because the operator had exported through
+// Sparrow's View Final Transaction, which yields the raw hex that lncli is fed
+// at the equivalent prompt. Both peers lost a pending-channel slot for ~2016
+// blocks to a wrapper. Whatever the unit tests say about SignedFromTX, this is
+// the test that says the whole sequence takes it.
+//
+// The publish is withheld, so each case costs one peer a pending-channel slot
+// and nothing else.
 func TestTheFilePathDrivesTheWholeSequence(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// export is the operator's last click: which screen they saved from.
+		export func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte
+	}{
+		{"a signed psbt", func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte {
+			return env.SignLikeSparrow(t, unsigned)
+		}},
+		{"view final transaction", func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte {
+			return env.ViewFinalTransaction(t, unsigned)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) { runTheFilePath(t, tc.export) })
+	}
+}
+
+func runTheFilePath(t *testing.T,
+	export func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte) {
+
 	env := regtestenv.Start(t)
 	peers := env.Peers(t)
 	if len(peers) < 1 {
@@ -523,8 +550,8 @@ func TestTheFilePathDrivesTheWholeSequence(t *testing.T) {
 		t.Errorf("the transcript does not say the gate opened over an unsigned "+
 			"transaction:\n%s", out.String())
 	}
-	signed := env.SignLikeSparrow(t, funded.Raw)
-	if err := os.WriteFile(wallet.SignedPath(), signed, 0o600); err != nil {
+	if err := os.WriteFile(wallet.SignedPath(), export(t, env, funded.Raw),
+		0o600); err != nil {
 		t.Fatalf("saving the signed transaction: %v", err)
 	}
 

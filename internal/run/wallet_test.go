@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -215,5 +216,213 @@ func TestStepSevenClearsTheAnswerBeforeAskingTheQuestion(t *testing.T) {
 	}
 	if !strings.Contains(out.String(), w.SignedPath()) {
 		t.Error("the instructions do not say where to put the signed transaction")
+	}
+}
+
+// signedRawTX is the finished transaction an operator has in hand at step 7: the
+// packet's own transaction with a witness on it. Sparrow's View Final
+// Transaction shows this as hex, and lncli is fed exactly that at the equivalent
+// prompt in the manual workflow this tool replaces.
+//
+// The witness is not a real signature. Nothing on this path executes one — the
+// transport lifts witnesses and combine.Accept is what runs them against their
+// scripts, and internal/combine's own tests do that with real keys.
+func signedRawTX(t *testing.T, p *psbt.Packet) []byte {
+	t.Helper()
+	tx := p.UnsignedTx.Copy()
+	tx.TxIn[0].Witness = wire.TxWitness{{0x30, 0x44, 0x01}, {0x02, 0x03}}
+	var buf bytes.Buffer
+	if err := tx.Serialize(&buf); err != nil {
+		t.Fatalf("serialising the signed transaction: %v", err)
+	}
+	return buf.Bytes()
+}
+
+// TestStepFourStillRefusesARawSignedTransaction is the regression guard for
+// issue #3's design caution, and it is the important one.
+//
+// Step 7 reads a raw transaction now. combine.Parse is the sniffer step 4 and
+// step 7 used to share, so teaching *it* about raw transactions would have
+// taught step 4 about them too — and step 4 is before the gate. A raw signed
+// transaction landing there is precisely the packet combine.Unsigned exists to
+// refuse, and combine.Unsigned reads a PSBT's partial signatures, which a raw
+// transaction does not have: it would have been accepted in silence, by a check
+// that had nothing to look at.
+//
+// So the acceptance lives at step 7's call site and this asserts the other half:
+// whatever step 7 learns, step 4 does not.
+func TestStepFourStillRefusesARawSignedTransaction(t *testing.T) {
+	p := unsignedPacket(t)
+	raw := signedRawTX(t, p)
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"binary", raw},
+		{"hex", []byte(hex.EncodeToString(raw) + "\n")},
+		// The unsigned transaction too. It is just as useless at step 4 — no
+		// witness UTXOs and no key origins, so the verifier could neither check the
+		// inputs nor account for the change output — and if this one were read, the
+		// signed one two lines above would have been read as well.
+		{"unsigned", func() []byte {
+			var buf bytes.Buffer
+			if err := p.UnsignedTx.Serialize(&buf); err != nil {
+				t.Fatal(err)
+			}
+			return buf.Bytes()
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"),
+				new(bytes.Buffer))
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.Poll = 5 * time.Millisecond
+			if err := os.WriteFile(w.Unsigned, tc.body, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			got, err := w.Built(ctx, nil)
+			if err == nil {
+				t.Fatalf("step 4 accepted a raw transaction (%d bytes). The gate is "+
+					"not open yet, so a wallet that signed here leaves the operator "+
+					"holding broadcastable bytes with no channel recoverable", len(got))
+			}
+			if !strings.Contains(err.Error(), "not a PSBT") {
+				t.Errorf("the refusal does not say what step 4 wanted: %v", err)
+			}
+		})
+	}
+}
+
+// writeAfterClear puts the signed file in place once Signed has cleared the
+// path, which Signed does before it starts polling. Racing that clear would let
+// the run read the file and then delete it, or delete the file it was about to
+// read; waiting for the path to be gone makes the order a fact rather than a
+// timing.
+func writeAfterClear(t *testing.T, w *run.FileWallet, body []byte) {
+	t.Helper()
+	if err := os.WriteFile(w.SignedPath(), []byte("cleared before this is read"),
+		0o600); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		// Written aside and renamed into place, so the poller cannot catch the
+		// file between create-and-truncate and the bytes landing in it and read a
+		// wallet's export as an empty one.
+		staged := w.SignedPath() + ".staging"
+		if err := os.WriteFile(staged, body, 0o600); err != nil {
+			return
+		}
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			if _, err := os.Stat(w.SignedPath()); os.IsNotExist(err) {
+				_ = os.Rename(staged, w.SignedPath())
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	}()
+	t.Cleanup(func() { <-done })
+}
+
+// TestStepSevenReadsARawTransaction is issue #3 at the transport, which is where
+// the mainnet cold probe hit it: the operator had signed correctly, exported via
+// Sparrow's View Final Transaction, and the run died on the wrapper.
+//
+// What comes back is the packet combine.Accept takes — the base's own
+// transaction with the witnesses written onto it — so nothing downstream of this
+// call learns a second encoding.
+func TestStepSevenReadsARawTransaction(t *testing.T) {
+	p := unsignedPacket(t)
+	base := packetBytes(t, p)
+	raw := signedRawTX(t, p)
+
+	for _, tc := range []struct {
+		name string
+		body []byte
+	}{
+		{"binary", raw},
+		{"hex", []byte(hex.EncodeToString(raw) + "\n")},
+		{"psbt", func() []byte {
+			signed := unsignedPacket(t)
+			var wit bytes.Buffer
+			if err := psbt.WriteTxWitness(&wit, [][]byte{{0x30, 0x44, 0x01}, {0x02, 0x03}}); err != nil {
+				t.Fatal(err)
+			}
+			signed.Inputs[0].FinalScriptWitness = wit.Bytes()
+			return packetBytes(t, signed)
+		}()},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			out := new(bytes.Buffer)
+			w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+			if err != nil {
+				t.Fatal(err)
+			}
+			w.Poll = 5 * time.Millisecond
+			writeAfterClear(t, w, tc.body)
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			got, err := w.Signed(ctx, base)
+			if err != nil {
+				t.Fatalf("Signed: %v", err)
+			}
+			back, err := psbt.NewFromRawBytes(bytes.NewReader(got), false)
+			if err != nil {
+				t.Fatalf("step 7 returned something that is not a PSBT: %v", err)
+			}
+			if back.UnsignedTx.TxHash() != p.UnsignedTx.TxHash() {
+				t.Errorf("the txid moved through the transport: %s, want %s",
+					back.UnsignedTx.TxHash(), p.UnsignedTx.TxHash())
+			}
+			if len(back.Inputs[0].FinalScriptWitness) == 0 {
+				t.Error("the witness did not survive the transport, so the one thing " +
+					"the signed file carries was dropped")
+			}
+			if !strings.Contains(out.String(), "raw transaction") {
+				t.Error("the instructions do not say a raw transaction is read, which " +
+					"is the ergonomics half of the fix")
+			}
+		})
+	}
+}
+
+// TestStepSevenRefusesATransactionThatIsNotThePinnedOne. I-3 reaching the
+// operator through the transport, rather than being noticed later by Accept.
+func TestStepSevenRefusesATransactionThatIsNotThePinnedOne(t *testing.T) {
+	p := unsignedPacket(t)
+	base := packetBytes(t, p)
+
+	tx := p.UnsignedTx.Copy()
+	tx.TxIn[0].Witness = wire.TxWitness{{0x30, 0x44, 0x01}}
+	tx.TxIn[0].Sequence = wire.MaxTxInSequenceNum - 2 // a changed txid
+	var buf bytes.Buffer
+	if err := tx.Serialize(&buf); err != nil {
+		t.Fatal(err)
+	}
+
+	dir := t.TempDir()
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 5 * time.Millisecond
+	writeAfterClear(t, w, buf.Bytes())
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	if _, err := w.Signed(ctx, base); !errors.Is(err, combine.ErrTXIDMoved) {
+		t.Fatalf("a transaction that is not the pinned one was accepted at step 7, "+
+			"or refused for another reason: %v", err)
 	}
 }
