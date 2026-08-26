@@ -23,9 +23,16 @@ transaction, everything on the cut list is deleted, and since 2026-08-26 the fee
 and change findings report rather than refuse and the `Replaceable` lint is gone.
 `docs/replan-2026-08.md`'s four "as built" sections are the account.
 
-**There is no code slice waiting.** What is left is the **mainnet cold probe**,
-which is not one: it is a run of the tool against real peers with coins that
-never move, and it is written up below.
+**There is no code slice waiting, and the mainnet cold probe passed on
+2026-08-26** — run `20260826-043441-9a8f28`. That was the last item on the build
+order. What is written up below is now the account of a probe that ran, kept
+because a real batch needs the same operational knowledge: the costs, the pass
+criteria, and how to read the journal afterwards.
+
+**What is outstanding is issues, not milestones.** #2 (remove the declared fee
+rate, and `ChangeTooSmall` with it) and #5 (step 7 waits on one filename
+asserting `.psbt`, so a `.txn` is never seen — and the failure mode is silence,
+not a refusal).
 
 **The tree.** ~29,100 Go lines, down from 55,670 before item 5 (28,881 at the
 end of item 5; item 6 put ~250 back). Packages:
@@ -60,13 +67,30 @@ harness only**. Four commands: `run`, `doctor`, `recover`,
 
 ---
 
-## The next thing: the mainnet cold probe
+## The mainnet cold probe — passed 2026-08-26
 
-**Not a code slice.** Everything it needs exists, and composing it forced exactly
-one branch — an `if` before `arm.Publish`. It is the real run with the final call
-withheld, not a second path to the same place. The specification is
-`docs/design.html`'s **Cold probe** section (phase C); this is what to know
-before running it.
+**Not a code slice.** Everything it needed existed, and composing it forced
+exactly one branch — an `if` before `arm.Publish`. It is the real run with the
+final call withheld, not a second path to the same place. The specification is
+`docs/design.html`'s **Cold probe** section (phase C).
+
+**What it proved,** run `20260826-043441-9a8f28`, two peers at 1,000,000 sat
+each: 2 of 2 `chan_pending` **with nothing signed**; channel backups exported off
+pending channels (7, 4,738 bytes); a signed transaction whose txid had not moved
+and whose every witness executed against its own script; `Step 8 was not made`;
+and a teardown that abandoned both channels via the blunt flag and left nothing
+on the node. Journal: `state=aborted`, txid pinned, **`raw_tx` NULL**.
+
+**Three attempts failed first, none on the safety model.** One died unattended
+before arming and left no journal row. One blew clock A while the operator was in
+Sparrow. One reached the gate and then refused the signed file for being a raw
+transaction rather than a PSBT — issue #3, which landed the same day and made the
+fourth attempt possible. **Funding addresses do not repeat between runs**; every
+run derives fresh ones on both sides, so there is no pre-staging a transaction
+against a previous run's addresses.
+
+The rest of this section is what to know before running it **again** — which a
+first real batch is, in every respect except that step 8 is taken.
 
 ### What it is
 
@@ -204,13 +228,14 @@ calls it step 9 is pre-inversion copy.
   failure of the probe: a change output too small or a fee outside tolerance is
   the operator's business and the run continues past it deliberately.
 
-### After it passes
+### Going public
 
-The repo is **private and intended to go public** once the probe passes on
-mainnet. Assume every commit will eventually be public, and re-read the "Repo
-hygiene" section of `CLAUDE.md` before flipping it — particularly **never commit
-a mainnet xpub**, which `.gitignore` does not protect you from when one is pasted
-inline in a test or a doc example.
+The probe was the stated gate and it passed. **Flipping the repo is now the
+operator's call, not a milestone's** — real channels running in production first,
+then a polish pass. Assume every commit will eventually be public, and re-read
+the "Repo hygiene" section of `CLAUDE.md` before flipping it — particularly
+**never commit a mainnet xpub**, which `.gitignore` does not protect you from
+when one is pasted inline in a test or a doc example.
 
 ---
 
@@ -448,7 +473,8 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
   **On mainnet this bullet is not an annoyance, it is a fortnight**, and there is
   no `mine N=2016` to reach for. The same fact — the peer keeps an abandoned
   channel pending until `fundingTimeout` — is what makes the cold probe cost one
-  pending-channel slot per peer for ~2016 blocks. See "The next thing" above.
+  pending-channel slot per peer for ~2016 blocks. See "The mainnet cold probe"
+  above.
 - **A shim probe that succeeds is not free.** The peer holds a reservation for
   about eleven minutes and `shim_cancel` does not tell it otherwise. Probing all
   *n* peers and then arming collides with itself against any peer running LND's

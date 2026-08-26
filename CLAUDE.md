@@ -113,8 +113,9 @@ built" for the account; the short version:
   **not** `Unchecked`, which would have made that heading lie — and `OK()` is
   still `len(v.Problems) == 0`. The `Replaceable` code, its refusal and
   `MaxNonReplaceableSequence` are gone. See `docs/replan-2026-08.md`'s "Item 6,
-  as built". **All six items are done; the mainnet cold probe is what is left,
-  and it is not a code slice.**
+  as built". **All six items are done, and the mainnet cold probe passed on
+  2026-08-26** — run `20260826-043441-9a8f28`, two channels, both to
+  `chan_pending` with nothing signed.
 
 **Three things item 5 decided, which the code now depends on:**
 
@@ -142,9 +143,19 @@ What survives, and what `internal/run` imports: `arm` · `plan` · `combine` ·
 `config` · `abort`. Plus `doctor` and `policy` outside the run path, and
 `internal/bitcoind` and `internal/regtestenv/coldwallet` inside the harness only.
 
-**What is still missing is the mainnet cold probe.** The safety model below is
-verified against LND source *and* against a running node — but never against
-mainnet, which is what the probe is for.
+**The mainnet cold probe passed on 2026-08-26**, run
+`20260826-043441-9a8f28`. The safety model below is verified against LND source,
+against a running regtest node, **and now against mainnet**: two real peers, two
+of two `chan_pending` over an unsigned transaction, backups exported off pending
+channels (7, 4,738 bytes), a signed transaction whose txid had not moved, step 8
+withheld, and a teardown that left nothing on this node.
+
+**Three attempts failed first, and none of them failed on the safety model.**
+One died unattended before arming; one blew clock A while the operator was in
+Sparrow; one reached the gate and then refused the signed file because it was a
+raw transaction rather than a PSBT — which became issue #3 and landed the same
+day. The model held first time; the ergonomics did not, which is the right way
+round and is what a commissioning probe is for.
 
 ---
 
@@ -611,14 +622,19 @@ abort path*.
 - **mainnet cold probe** — commissioning only, per `docs/design.html`. Proves
   this node, these peers, these devices. **No regtest substitute for it, and the
   replan does not change it:** `winthistle run` stopped before step 8, against
-  real peers, with coins that never move. This is the one thing still missing.
+  real peers, with coins that never move. **Run, and passed, on 2026-08-26.**
+  It is not a thing to repeat casually: every channel in a probe reaches
+  `chan_pending` and is then abandoned, so each probed peer holds one of its
+  pending-channel slots for ~2016 blocks afterwards.
 
 ---
 
 ## Repo hygiene
 
-This repo is **private and intended to go public** once the cold probe passes on
-mainnet. Assume every commit will eventually be public.
+This repo is **private and intended to go public**. The cold probe was the
+stated gate and it passed on 2026-08-26; what remains before flipping it is the
+operator's own call — real channels running in production first, then a polish
+pass. Assume every commit will eventually be public.
 
 - **Never commit a mainnet xpub.** A single one deanonymises the whole cold
   wallet's history, permanently, and git history cannot be un-published. Use
