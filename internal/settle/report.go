@@ -106,30 +106,89 @@ func (s State) line() string {
 }
 
 // policyNote explains why a channel is still on LND's defaults.
+//
+// Five reasons, and they are not interchangeable. Two of them are the loop
+// working — a pending channel and a missing graph edge both resolve themselves —
+// one is a refusal still being retried, and two are members the loop has given
+// up on, for opposite reasons.
+//
+// The copy for the last of those used to say "that is the policy itself, not the
+// channel", which asserted something the app cannot know and was false about the
+// one live batch that reached it: LND had refused with its catch-all while a peer
+// was offline, and the same update applied by hand minutes later. Only
+// INVALID_PARAMETER earns that sentence, so only INVALID_PARAMETER gets it.
 func policyNote(r *Result) string {
-	var pending, missing, stuck int
+	var pending, missing, invalid, silent, retrying int
 	for _, s := range r.States {
 		switch {
 		case s.Policy.Applied:
+		case s.Policy.Terminal():
+			invalid++
 		case s.Stuck():
-			stuck++
+			silent++
+		case s.Policy.Unexplained():
+			retrying++
 		case s.Policy.Reason == lnrpc.UpdateFailure_UPDATE_FAILURE_PENDING:
 			pending++
 		case s.Policy.Reason == lnrpc.UpdateFailure_UPDATE_FAILURE_NOT_FOUND:
 			missing++
 		}
 	}
-	if pending+missing+stuck == 0 {
+	if pending+missing+invalid+silent+retrying == 0 {
 		return ""
 	}
 
 	var b strings.Builder
-	if stuck > 0 {
+	if invalid > 0 {
 		b.WriteString(prose.Para(fmt.Sprintf(
-			"%d channel%s refused the policy for a reason that polling will not "+
-				"fix. That is the policy itself, not the channel: LND checks the "+
-				"CLTV delta and the inbound fees against its own bounds before it "+
-				"looks at anything else.", stuck, prose.Plural(stuck))))
+			"%d channel%s refused the policy itself, and that refusal will not "+
+				"change: LND checks the CLTV delta and the inbound fees against "+
+				"its own bounds before it looks at the channel at all. The figures "+
+				"are what is wrong, not the timing.", invalid, prose.Plural(invalid))))
+		b.WriteString("\n")
+	}
+	if silent > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"%d channel%s %s refused for %s without LND saying why, so the loop has "+
+				"stopped asking about %s and has kept running for everything else. "+
+				"The reason LND gives is its catch-all: not a verdict on the policy, "+
+				"and not a fact about the channel either. A peer that is briefly "+
+				"offline lands here, and the same update often applies by hand a few "+
+				"minutes later.",
+			silent, prose.Plural(silent), prose.WasWere(silent), silence(r),
+			itThem(silent))))
+		b.WriteString("\n")
+	}
+	if stuck := r.Stuck(); len(stuck) > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"Apply %s by hand, and check that failed_updates came back empty — this "+
+				"call reports a refusal inside a success, so a nil error is not "+
+				"evidence. The figures are in the plan above and in the run journal:",
+			itThem(len(stuck)))))
+		b.WriteString("\n")
+		for _, s := range stuck {
+			// The channel point on its own line and never wrapped: it is 66
+			// characters, it is what the next command has to be given, and a
+			// wrapped outpoint is a transcription error waiting to happen.
+			detail := fmt.Sprintf("%s — %s", short(s.Member.Peer), s.Policy)
+			if s.Attempts > 1 {
+				detail += fmt.Sprintf(", after %d attempt%s", s.Attempts,
+					prose.Plural(s.Attempts))
+			}
+			b.WriteString(fmt.Sprintf("  - %s\n", s.Member.Channel))
+			b.WriteString(prose.Wrap(detail, "    ", "    "))
+		}
+		b.WriteString("\n")
+	}
+	if retrying > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"%d channel%s %s being refused without a reason given, and still "+
+				"being retried. LND's catch-all covers the transient as well as the "+
+				"permanent — a peer briefly offline is one — so it is retried for up "+
+				"to %s from the first refusal, and then reported rather than being "+
+				"read as a verdict on arrival.",
+			retrying, prose.Plural(retrying), prose.IsAre(retrying),
+			r.retryWindow())))
 		b.WriteString("\n")
 	}
 	if pending > 0 {
@@ -291,4 +350,37 @@ func horizonNote(r *Result) string {
 		"Never a replacement. Replacing the funding transaction changes every " +
 			"outpoint in it and destroys every channel in the batch (I-4)."))
 	return b.String()
+}
+
+// itThem keeps the instructions grammatical without naming a count twice.
+func itThem(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// silence renders how long the most patiently retried member was refused for.
+//
+// Below a second there is nothing worth naming and "0s" would read as a defect;
+// only a test drives the loop fast enough for that, so the window it was
+// measured against stands in.
+func silence(r *Result) string {
+	if d := longestSilence(r).Round(time.Second); d > 0 {
+		return d.String()
+	}
+	return r.retryWindow().String()
+}
+
+// longestSilence is how long the most patiently retried member was refused for,
+// which is the figure the copy should name: the window is a ceiling, and a
+// member reaches it one poll past it rather than exactly on it.
+func longestSilence(r *Result) time.Duration {
+	var out time.Duration
+	for _, s := range r.States {
+		if s.RefusedFor > out {
+			out = s.RefusedFor
+		}
+	}
+	return out
 }

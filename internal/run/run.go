@@ -655,7 +655,14 @@ func settlePhase(ctx context.Context, d Deps, o Options, armed *arm.Armed,
 	if result != nil {
 		fmt.Fprint(d.Out, result.Report())
 	}
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, settle.ErrStuck):
+		// Not a stop, and it must not read as one. Every other member was
+		// watched to the end; these are the ones the loop could not police, and
+		// the report above says what to do about each of them.
+		fmt.Fprintf(d.Out, "\nThe settlement finished, and %v\n", err)
+	default:
 		fmt.Fprintf(d.Out, "\nThe settlement stopped: %v\n", err)
 	}
 	return result
