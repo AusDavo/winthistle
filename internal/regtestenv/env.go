@@ -394,8 +394,6 @@ path = %q
 [limits]
 require_confirmed_inputs = true
 
-[fees]
-target_sat_per_vb = 1.0
 `,
 		aliceAddr, filepath.Join(e.Root, "regtest", "creds", "alice", "tls.cert"),
 		macPath, filepath.Join(dir, "runs.db"))

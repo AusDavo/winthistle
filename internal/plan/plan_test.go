@@ -218,7 +218,6 @@ func newFixture(t *testing.T) fixture {
 		},
 		TopUp:  &TopUp{Address: topUpAddr, AmountSat: 20_000, Shortfall: 20_000},
 		Change: Change{Address: changeAddr},
-		Fee:    Fee{TargetSatPerVB: 10},
 		Inputs: Inputs{MinConfirmations: 1},
 	}
 	return fixture{
@@ -506,46 +505,6 @@ func mustP2WSH(t *testing.T, seed byte) []byte {
 	return s
 }
 
-// TestAFeeRateOutsideToleranceIsReportedNotRefused.
-//
-// Since item 6 the rate is the operator's. This app does not build the
-// transaction and does not choose the fee, so all it can do is hold what was
-// built to the rate that was declared and say where the two disagree. The
-// assertion is on both halves: the finding is made, and the batch still arms.
-func TestAFeeRateOutsideToleranceIsReportedNotRefused(t *testing.T) {
-	f := newFixture(t)
-
-	low := newTx(t).
-		coldIn(0x60, 3_000_000).
-		coldIn(0x70, 2_000_000).
-		out(1_000_000, f.fundingA).
-		out(2_000_000, f.fundingB).
-		out(20_000, f.topUp).
-		out(1_979_800, f.change) // ~1 sat/vB
-	if v := verify(t, f.plan, low); !reported(v, FeeTooLow) {
-		t.Errorf("a 1 sat/vB transaction went unremarked against a 10 sat/vB plan: "+
-			"%v / %v", codes(v), reportCodes(v))
-	} else if !v.OK() {
-		t.Errorf("an underpaying transaction was refused rather than reported: %v",
-			codes(v))
-	}
-
-	high := newTx(t).
-		coldIn(0x60, 3_000_000).
-		coldIn(0x70, 2_000_000).
-		out(1_000_000, f.fundingA).
-		out(2_000_000, f.fundingB).
-		out(20_000, f.topUp).
-		out(1_900_000, f.change) // ~200 sat/vB
-	if v := verify(t, f.plan, high); !reported(v, FeeTooHigh) {
-		t.Errorf("a wildly overpaying transaction went unremarked: %v / %v",
-			codes(v), reportCodes(v))
-	} else if !v.OK() {
-		t.Errorf("an overpaying transaction was refused rather than reported: %v",
-			codes(v))
-	}
-}
-
 // TestNoFeeAtAllIsRefused reproduces LND's own rule: the input sum must exceed
 // the output sum, strictly.
 func TestNoFeeAtAllIsRefused(t *testing.T) {
@@ -598,39 +557,6 @@ func TestNoChangeOutputIsReportedAndTheBatchStillArms(t *testing.T) {
 	if strings.Contains(v.Report(), "Do not sign this") {
 		t.Errorf("the report tells the operator not to sign over their own change "+
 			"arrangements:\n%s", v.Report())
-	}
-}
-
-// TestChangeTooSmallForACPFPChildIsReported. I-4 leaves a child spending the
-// change as the only lever there will ever be on this batch, so change that
-// cannot buy one is change that is not doing that job — which is worth saying
-// and is the operator's to decide about.
-func TestChangeTooSmallForACPFPChildIsReported(t *testing.T) {
-	f := newFixture(t)
-	// The fee is left at roughly the plan's 10 sat/vB, so the only thing this
-	// transaction gets remarked on is its change output.
-	b := newTx(t).
-		coldIn(0x60, 3_000_000).
-		coldIn(0x70, 24_360).
-		out(1_000_000, f.fundingA).
-		out(2_000_000, f.fundingB).
-		out(20_000, f.topUp).
-		out(600, f.change)
-	// Give the change output the witness script, so the child can be sized the
-	// way Core and Sparrow would let us size it.
-	b.outMeta[3] = psbt.POutput{WitnessScript: multisig2of2(t)}
-
-	v := verify(t, f.plan, b)
-	if !reported(v, ChangeTooSmall) {
-		t.Fatalf("change too small to fund a child went unremarked: %v / %v\n%s",
-			codes(v), reportCodes(v), v.Report())
-	}
-	if !v.OK() {
-		t.Fatalf("a small change output refused the batch: %v\n%s",
-			codes(v), v.Report())
-	}
-	if v.ChangeFloorSat <= 600 {
-		t.Errorf("the CPFP floor came out as %d, which cannot be right", v.ChangeFloorSat)
 	}
 }
 
@@ -719,7 +645,7 @@ func TestAnInputWithNoUTXOInformationIsRefusedAndNoFeeIsGuessed(t *testing.T) {
 		t.Errorf("a fee of %d sat at %.2f sat/vB was reported from a partial input "+
 			"total", v.FeeSat, v.FeeRate)
 	}
-	if found(v, NoFee) || found(v, FeeTooLow) || found(v, FeeTooHigh) {
+	if found(v, NoFee) {
 		t.Errorf("a fee finding was made up out of a partial input total: %v / %v",
 			codes(v), reportCodes(v))
 	}
@@ -963,20 +889,6 @@ func TestAnUnrecognisedInputShapeIsNotGuessedAt(t *testing.T) {
 	if v.FeeRate != 0 {
 		t.Errorf("a fee rate of %.2f was reported for a transaction that cannot be sized",
 			v.FeeRate)
-	}
-}
-
-func TestChangeFloorCoversTheChildAndTheParentDeficit(t *testing.T) {
-	// A 200 vB parent paying 200 sat (1 sat/vB), lifted to 10 sat/vB by a
-	// 150 vB child: the package needs 3,500 sat, the parent has paid 200, so
-	// the child owes 3,300 plus the dust it must leave behind.
-	got := ChangeFloor(200, 200, 10, 150)
-	if want := int64(3_300 + DustSat); got != want {
-		t.Errorf("ChangeFloor = %d, want %d", got, want)
-	}
-	// A parent that already overpays needs nothing from the child but dust.
-	if got := ChangeFloor(200, 100_000, 10, 150); got != DustSat {
-		t.Errorf("ChangeFloor on an overpaying parent = %d, want %d", got, DustSat)
 	}
 }
 

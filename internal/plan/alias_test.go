@@ -15,7 +15,6 @@ func flat(s string) string { return strings.Join(strings.Fields(s), " ") }
 func TestTheSheetNamesThePeerByAliasAndKeyTogether(t *testing.T) {
 	p := &Plan{
 		Chain: "regtest",
-		Fee:   Fee{TargetSatPerVB: 5},
 		Channels: []Channel{{
 			Peer:      "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636",
 			Alias:     "bitrefill",
@@ -49,7 +48,6 @@ func TestTheSheetNamesThePeerByAliasAndKeyTogether(t *testing.T) {
 func TestNoAliasRendersTheKeyAloneAndDropsTheCaveat(t *testing.T) {
 	p := &Plan{
 		Chain: "regtest",
-		Fee:   Fee{TargetSatPerVB: 5},
 		Channels: []Channel{{
 			Peer:      "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636",
 			Address:   "bcrt1qqypqxpq9qcrsszg2pvxq6rs0zqg3yyc5z5tpwxqergd3c8g7rusq7snjn6",
@@ -75,7 +73,6 @@ func TestTheVerifierIgnoresTheAlias(t *testing.T) {
 	base := func(alias string) *Plan {
 		return &Plan{
 			Chain: "regtest",
-			Fee:   Fee{TargetSatPerVB: 5},
 			Channels: []Channel{{
 				Peer:      "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636",
 				Alias:     alias,

@@ -1,7 +1,6 @@
 package plan
 
 import (
-	"bytes"
 	"fmt"
 	"math"
 
@@ -30,12 +29,6 @@ const (
 	// witnessScaleFactor and the marker/flag pair, from BIP-141.
 	witnessScaleFactor = 4
 	segwitMarkerFlag   = 2
-
-	// DustSat is the floor below which an output is not relayed. Core's
-	// dustRelayFee of 3000 sat/kvB puts a P2WSH or P2TR output at 330 sat and a
-	// P2WPKH one at 294; 330 is used throughout because it is the larger, and
-	// the change output on this path is a cold-wallet script.
-	DustSat = 330
 )
 
 // varIntSize is the serialized size of a CompactSize integer.
@@ -207,110 +200,4 @@ func estimateSize(packet *psbt.Packet, prevScripts [][]byte) (Size, error) {
 		Vsize:        int64((weight + witnessScaleFactor - 1) / witnessScaleFactor),
 		Estimated:    estimated,
 	}, nil
-}
-
-// ChildVsize is the size of the CPFP child the change output has to be able to
-// fund: one input spending that script, one output paying it back to the same
-// kind of script.
-//
-// A guess with a reason, rather than a guess. The child's own destination is not
-// known when the parent is planned, and paying back to the same script type is
-// both the likely choice and the conservative one for a multisig cold wallet,
-// whose scripts are the largest of the segwit family.
-// Exported because Phase 2 needs it too: internal/settle uses it when Core
-// refuses to build the child at all, which is the one moment the size cannot be
-// read off a built transaction and is exactly the moment the operator needs the
-// arithmetic.
-func ChildVsize(changeScript []byte, witnessScript []byte) (int64, error) {
-	in := psbt.PInput{WitnessScript: witnessScript}
-	s, err := estimateSpend(in, changeScript)
-	if err != nil {
-		return 0, err
-	}
-	base := 4 + 4 + varIntSize(1) + 36 + 4 + pushSize(s.ScriptSig) +
-		varIntSize(1) + 8 + varIntSize(uint64(len(changeScript))) + len(changeScript)
-	weight := base*witnessScaleFactor + segwitMarkerFlag + s.Witness
-	return int64((weight + witnessScaleFactor - 1) / witnessScaleFactor), nil
-}
-
-// ChangeFloor is the smallest change amount that leaves a viable CPFP child.
-//
-// I-4 says the batch can never be replaced, so a child spending the change is
-// the only lever there will ever be on it. To lift the parent and child together
-// to bumpTo sat/vB the child has to pay
-//
-//	(parentVsize + childVsize) * bumpTo - parentFee
-//
-// and still leave an output above the dust limit. A change output smaller than
-// that cannot buy the child, so the batch has no lever on it — which the
-// verifier reports and does not refuse over. Nothing is at risk in that: the
-// coins are the operator's and unspent. What is missing is the lever.
-func ChangeFloor(parentVsize, parentFeeSat int64, bumpTo float64, childVsize int64) int64 {
-	return ChildFeeSat(parentVsize, parentFeeSat, bumpTo, childVsize) + DustSat
-}
-
-// SizeOf estimates the virtual size a PSBT's transaction will have once it is
-// signed, or measures it exactly when every input already carries its witness.
-//
-// Exported for the CPFP child: I-4 says the batch can never be replaced, so the
-// only lever on a stalled batch is a child spending the change output, and
-// sizing that child is the whole of the arithmetic behind it. The estimate uses
-// the same upper bounds the verifier does, so a package fee rate computed from
-// it is a floor rather than a hope.
-//
-// prevScripts come from the packet itself — WitnessUtxo where it is present, and
-// the named output of NonWitnessUtxo otherwise. An input carrying neither cannot
-// be sized, and this says so rather than guessing at the spend type.
-func SizeOf(raw []byte) (Size, error) {
-	packet, err := psbt.NewFromRawBytes(bytes.NewReader(raw), false)
-	if err != nil {
-		return Size{}, fmt.Errorf("that is not a PSBT: %w", err)
-	}
-	if err := packet.SanityCheck(); err != nil {
-		return Size{}, fmt.Errorf("the PSBT is malformed: %w", err)
-	}
-
-	tx := packet.UnsignedTx
-	prevScripts := make([][]byte, len(tx.TxIn))
-	for i, txIn := range tx.TxIn {
-		in := packet.Inputs[i]
-		switch {
-		case in.WitnessUtxo != nil:
-			prevScripts[i] = in.WitnessUtxo.PkScript
-		case in.NonWitnessUtxo != nil:
-			idx := txIn.PreviousOutPoint.Index
-			if h := in.NonWitnessUtxo.TxHash(); h != txIn.PreviousOutPoint.Hash {
-				return Size{}, fmt.Errorf("input %d: the attached previous "+
-					"transaction is %s, but this input spends %s", i, h,
-					txIn.PreviousOutPoint.Hash)
-			}
-			if int(idx) >= len(in.NonWitnessUtxo.TxOut) {
-				return Size{}, fmt.Errorf("input %d: the attached previous "+
-					"transaction has no output %d", i, idx)
-			}
-			prevScripts[i] = in.NonWitnessUtxo.TxOut[idx].PkScript
-		default:
-			return Size{}, fmt.Errorf("input %d says nothing about what it spends, "+
-				"so its size cannot be worked out", i)
-		}
-	}
-	return estimateSize(packet, prevScripts)
-}
-
-// ChildFeeSat is what a CPFP child has to pay to lift itself and its parent to
-// bumpTo sat/vB together.
-//
-//	(parentVsize + childVsize) * bumpTo - parentFee
-//
-// floored at zero, because a parent that already pays enough needs no child.
-// This is the arithmetic ChangeFloor is built on, exported separately because
-// Phase 2 is where a child actually gets built and it needs the fee rather than
-// the floor.
-func ChildFeeSat(parentVsize, parentFeeSat int64, bumpTo float64, childVsize int64) int64 {
-	packageFee := int64(math.Ceil(bumpTo * float64(parentVsize+childVsize)))
-	need := packageFee - parentFeeSat
-	if need < 0 {
-		return 0
-	}
-	return need
 }

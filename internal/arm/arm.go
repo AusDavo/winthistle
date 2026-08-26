@@ -291,14 +291,12 @@ func (s *Streams) Close() {
 // Blueprint is the plan minus the funding addresses, which do not exist until
 // the streams are open.
 //
-// Everything in it was decided in Phase 0, with no clock running: the fee rate
-// against a live estimate, the coin set after SelectCoins judged it, the change
-// address from the cold wallet, and the reserve top-up from internal/reserve.
+// Everything in it was decided in Phase 0, with no clock running: the change
+// arrangement, the inputs, and the reserve top-up from internal/reserve.
 // Combining it with the streams is the last thing that happens before a
 // transaction is built.
 type Blueprint struct {
 	Chain  string
-	Fee    plan.Fee
 	TopUp  *plan.TopUp
 	Change plan.Change
 	Inputs plan.Inputs
@@ -319,7 +317,6 @@ func (s *Streams) Plan(b Blueprint) (*plan.Plan, error) {
 		Chain:  b.Chain,
 		TopUp:  b.TopUp,
 		Change: b.Change,
-		Fee:    b.Fee,
 		Inputs: b.Inputs,
 	}
 	for _, st := range s.All {

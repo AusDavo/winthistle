@@ -89,24 +89,22 @@ func (p *Plan) Document() string {
 			"returned transaction is checked for the key origin information that " +
 			"proves the change output is yours."))
 	}
-	if p.Change.MinimumSat > 0 {
-		b.WriteString(prose.Bullet(fmt.Sprintf("The plan's floor for change is %s.",
-			prose.Sats(p.Change.MinimumSat))))
-	}
-	b.WriteString(prose.Bullet(fmt.Sprintf(
-		"A change output is worth having, and worth sizing to pay for a child "+
-			"transaction that lifts this one to %.0f sat/vB. This batch can never "+
-			"be replaced (I-4) — replacing it moves every outpoint and destroys "+
-			"every channel in it — so a CPFP child spending the change is the only "+
-			"lever there will ever be on it. Nothing is at risk without one; what "+
-			"is missing is the lever. Step 5 says what your change came out as and "+
-			"does not refuse over it.", p.Fee.CPFPTarget())))
+	b.WriteString(prose.Bullet(
+		"A change output is worth having. This batch can never be replaced " +
+			"(I-4) — replacing it moves every outpoint and destroys every channel " +
+			"in it — so a CPFP child spending the change is the only lever there " +
+			"will ever be on it. Nothing is at risk without one; what is missing " +
+			"is the lever. How big it needs to be is a question about the fee " +
+			"market when you build the child, which is yours and not this " +
+			"program's: step 5 says what your change came out as and nothing " +
+			"grades it."))
 
-	b.WriteString("\nFee\n")
-	b.WriteString(prose.Bullet(fmt.Sprintf("Target %.2f sat/vB. Step 5 says so when "+
-		"what you built lands outside %.2f to %.2f sat/vB, and does not refuse over "+
-		"it: the rate is yours, and this app neither builds the transaction nor "+
-		"chooses the fee.", p.Fee.TargetSatPerVB, p.Fee.Low(), p.Fee.High())))
+	b.WriteString("\nFee and replacement\n")
+	b.WriteString(prose.Bullet("The fee is yours. This app does not build the " +
+		"transaction and does not choose the rate, so it names no target and holds " +
+		"you to none — step 5 reports what the transaction you built came out at, " +
+		"and that is the whole of it. There is no RBF here (I-4), so pick the rate " +
+		"against the mempool you can see when you build."))
 	b.WriteString(prose.Bullet("Replace-by-fee off — in Sparrow, the RBF toggle on " +
 		"the transaction. Nothing here reads the sequence numbers. Core relays a " +
 		"higher-fee conflict whatever they signal, so the flag is a statement of " +
@@ -253,12 +251,9 @@ func (v *Verification) Report() string {
 		}
 	}
 
-	if v.ChangeFloorSat > 0 {
+	if v.ChangeSat > 0 {
 		b.WriteString("\n")
-		b.WriteString(prose.Table([]prose.Row{
-			prose.Line("change", v.ChangeSat),
-			prose.Note("CPFP floor", v.ChangeFloorSat, "what a CPFP child would cost"),
-		}))
+		b.WriteString(prose.Table([]prose.Row{prose.Line("change", v.ChangeSat)}))
 	}
 
 	if len(v.Problems) > 0 {

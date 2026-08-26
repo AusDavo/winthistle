@@ -57,18 +57,6 @@ import (
 	"google.golang.org/grpc"
 )
 
-// DefaultFeeTolerance is how far the returned transaction's fee rate may stray
-// from the plan's target, either way, before the verifier objects.
-const DefaultFeeTolerance = 0.25
-
-// DefaultCPFPMultiple is how much headroom the change output must leave: enough
-// for a child that lifts the package to this multiple of the target rate.
-//
-// Three is a judgement, not a derivation. It is roughly the difference between
-// a quiet mempool and a busy one, and I-4 means it is the only headroom the
-// batch will ever get.
-const DefaultCPFPMultiple = 3.0
-
 // Params resolves a chain name to the parameters address decoding needs.
 //
 // Both LND and Core are asked for their chain name rather than it being
@@ -176,10 +164,6 @@ type Change struct {
 	// change address and this is empty — see Recognise.
 	Address string
 
-	// MinimumSat is an optional explicit floor, checked in addition to the CPFP
-	// floor the verifier computes from the transaction itself.
-	MinimumSat int64
-
 	// Recognise is how an unnamed output is accepted as change when Address is
 	// empty. It is strictly weaker than naming the script and the report says so.
 	Recognise *Recognition
@@ -197,42 +181,6 @@ type Recognition struct {
 	// wallet. A derivation on the receive branch is not change.
 	Branch uint32
 }
-
-// Fee is the target and the tolerance.
-type Fee struct {
-	// TargetSatPerVB comes from Core's estimatesmartfee, never from a third
-	// party — a fee API sees the amounts, peers and timing we are trying not
-	// to leak.
-	TargetSatPerVB float64
-
-	// Tolerance is the fraction either side of the target that passes. Zero
-	// means DefaultFeeTolerance.
-	Tolerance float64
-
-	// CPFPTargetSatPerVB is the rate the change output must be able to lift the
-	// package to. Zero means DefaultCPFPMultiple times the target.
-	CPFPTargetSatPerVB float64
-}
-
-func (f Fee) tolerance() float64 {
-	if f.Tolerance <= 0 {
-		return DefaultFeeTolerance
-	}
-	return f.Tolerance
-}
-
-// CPFPTarget is the rate the change output has to be able to lift the package
-// to, which is what its size is checked against.
-func (f Fee) CPFPTarget() float64 {
-	if f.CPFPTargetSatPerVB > 0 {
-		return f.CPFPTargetSatPerVB
-	}
-	return f.TargetSatPerVB * DefaultCPFPMultiple
-}
-
-// Low and High bound the acceptable fee rate.
-func (f Fee) Low() float64  { return f.TargetSatPerVB * (1 - f.tolerance()) }
-func (f Fee) High() float64 { return f.TargetSatPerVB * (1 + f.tolerance()) }
 
 // Outpoint is a coin, in the byte order humans and Core use.
 type Outpoint struct {
@@ -267,7 +215,6 @@ type Plan struct {
 	Channels []Channel
 	TopUp    *TopUp
 	Change   Change
-	Fee      Fee
 	Inputs   Inputs
 }
 
@@ -390,7 +337,7 @@ func (p *Plan) Outputs() ([]Named, error) {
 			return nil, fmt.Errorf("the change output: %w", err)
 		}
 		if err := add(Named{Kind: ChangeOut, Label: "the change output", Script: script,
-			Address: p.Change.Address, AmountSat: p.Change.MinimumSat}); err != nil {
+			Address: p.Change.Address}); err != nil {
 			return nil, err
 		}
 	case p.Change.Recognise != nil:
@@ -407,10 +354,6 @@ func (p *Plan) Outputs() ([]Named, error) {
 			"a stranger: name a change address, or say how to recognise one")
 	}
 
-	if p.Fee.TargetSatPerVB <= 0 {
-		return nil, fmt.Errorf("a target fee rate of %g sat/vB is not a fee rate",
-			p.Fee.TargetSatPerVB)
-	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Kind < out[j].Kind })
 	return out, nil
 }

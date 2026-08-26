@@ -26,15 +26,6 @@
 // allow_rbf = true and saw the run proceed would reasonably conclude it had
 // been honoured.
 //
-// # The fee rate has no default, on purpose
-//
-// [fees] target_sat_per_vb is the rate the operator intends to pay, and this
-// package will not invent one. It used to come from Core's estimatesmartfee,
-// with a configured floor behind it because the estimator is entitled to answer
-// "insufficient data" and does so on every regtest node, on a freshly synced one
-// and on any node that has been offline. Core is gone from this build and no
-// third party may be asked in its place, so the number is declared.
-//
 // A rate that quietly became zero would be the worst default this tool could
 // ship: it is the one figure in a batch with no right answer, and I-4 means a
 // batch built at the wrong one cannot be corrected by replacing it. So an unset
@@ -66,7 +57,6 @@ type Config struct {
 	LND     lnd.Config
 	Journal Journal
 	Limits  Limits
-	Fees    Fees
 }
 
 // Journal is the [journal] block.
@@ -105,33 +95,8 @@ func (l Limits) MinConfirmations() int {
 	return 0
 }
 
-// Fees is the [fees] block: the rate you intend to pay, declared.
-type Fees struct {
-	// TargetSatPerVB is the fee rate the batch is expected to be built at. It
-	// has no default and zero is refused.
-	//
-	// It is declared rather than fetched, and that is the whole of the change
-	// this key represents. Core's estimatesmartfee used to answer it; Core is
-	// gone from this build, and the no-third-party rule forbids the obvious
-	// substitute — a fee API is handed the size of what is being built and the
-	// moment it is being built, which together are most of what this tool exists
-	// not to leak.
-	//
-	// Declaring it is not a worse answer than fetching it. This program does not
-	// build the transaction and does not choose the fee: Sparrow does, at step 4,
-	// with whatever estimate the operator trusts. What the verifier needs is
-	// something to compare the built transaction against, and "the rate you said
-	// you were aiming at" is a stronger thing to check against than a number this
-	// program went and looked up on the operator's behalf. Everything else in
-	// this tool works that way — you declare the batch, it checks the
-	// transaction.
-	//
-	// plan.DefaultFeeTolerance is how far either side of it passes.
-	TargetSatPerVB float64
-}
-
 var knownSections = map[string]bool{
-	"lnd": true, "journal": true, "limits": true, "fees": true,
+	"lnd": true, "journal": true, "limits": true,
 }
 
 // Load reads winthistle.toml.
@@ -193,11 +158,6 @@ func Load(path string) (*Config, error) {
 	fail(err)
 	c.Limits = Limits{RequireConfirmedInputs: confirmed}
 
-	f := doc.section("fees")
-	target, err := f.number(path, "target_sat_per_vb", 0)
-	fail(err)
-	c.Fees = Fees{TargetSatPerVB: target}
-
 	errs = append(errs, doc.unknown(knownSections)...)
 	errs = append(errs, c.validate(path, doc)...)
 	if len(errs) > 0 {
@@ -234,14 +194,6 @@ func (c *Config) validate(path string, doc *document) []string {
 	need(c.Journal.Path != "", "[journal] path is required: where to keep the "+
 		"run journal. It holds no key material and it is what makes a crashed run "+
 		"recoverable rather than mysterious")
-
-	need(c.Fees.TargetSatPerVB > 0, "[fees] target_sat_per_vb is required: the "+
-		"fee rate you intend to build the batch at, in sat/vB. There is no default "+
-		"and there is not going to be one — this tool asks nothing for a fee "+
-		"estimate, and a floor that quietly became zero would be the worst "+
-		"possible default for the one number in a batch that cannot be corrected "+
-		"afterwards (I-4). Take it from your own wallet or mempool, and "+
-		"`winthistle run --fee-rate` overrides it for one run")
 
 	return out
 }
@@ -292,9 +244,6 @@ path = "~/.winthistle/runs.db"
 
 [limits]
 require_confirmed_inputs = true
-
-[fees]
-target_sat_per_vb = 12.0              # no default: the rate you mean to pay
 
 `
 

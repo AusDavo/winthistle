@@ -262,6 +262,14 @@ func (d *document) unknown(known map[string]bool) []string {
 // enough that anybody with a configuration from before the change gets the
 // sentence rather than the shrug. Nothing reads these but the refusal.
 var retiredSections = map[string]string{
+	"fees": "is gone, and nothing replaced it: this tool no longer holds an " +
+		"opinion about the fee. It does not build the transaction and does not " +
+		"choose the rate — your wallet does, and it shows you the rate while you " +
+		"do it — so a target declared here could only ever have been the same " +
+		"number typed a second time for the verifier to compare against the " +
+		"first. Step 5 reports what the transaction you built came out at and " +
+		"grades nothing. Delete the block. There is still no RBF (I-4), so pick " +
+		"the rate against the mempool you can see when you build.",
 	"server": "is gone, and its one surviving key moved: the run journal's path " +
 		"is [journal] path now. A section named for a component that no longer " +
 		"exists is the same defect as a key that changes nothing.",
@@ -276,16 +284,6 @@ var retiredSections = map[string]string{
 }
 
 var retiredKeys = map[string]string{
-	"fees.floor_sat_per_vb": "is gone: it was the floor under Core's " +
-		"estimatesmartfee, for the nodes that have no estimate. Core is not asked " +
-		"for a fee any more and nothing else is asked either. Set " +
-		"target_sat_per_vb to the rate you mean to pay.",
-	"fees.target_blocks": "is gone: it was estimatesmartfee's confirmation " +
-		"target, and nothing estimates now. Set target_sat_per_vb to the rate you " +
-		"mean to pay.",
-	"fees.mode": "is gone: it was estimatesmartfee's CONSERVATIVE or ECONOMICAL, " +
-		"and nothing estimates now. Set target_sat_per_vb to the rate you mean to " +
-		"pay.",
 	"limits.abort_after_signing_seconds": "is gone: it was the 5:00 gate, and " +
 		"the window it bounded no longer contains a signing round. The batch is " +
 		"signed at step 7, after every channel has reached chan_pending, so a slow " +

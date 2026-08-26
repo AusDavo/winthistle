@@ -26,15 +26,12 @@ const (
 	WrongAmount
 	ChangeMissing
 	ChangeAmbiguous
-	ChangeTooSmall
 	LegacyInput
 	NoUTXOInfo
 	MismatchedUTXO
 	InputNotAllowed
 	DuplicateInput
 	NoFee
-	FeeTooLow
-	FeeTooHigh
 	Unsizable
 )
 
@@ -56,8 +53,6 @@ func (c Code) String() string {
 		return "no change output"
 	case ChangeAmbiguous:
 		return "change output ambiguous"
-	case ChangeTooSmall:
-		return "change too small to fund a CPFP child"
 	case LegacyInput:
 		return "input is not a segwit spend"
 	case NoUTXOInfo:
@@ -70,10 +65,6 @@ func (c Code) String() string {
 		return "input spent twice"
 	case NoFee:
 		return "no fee"
-	case FeeTooLow:
-		return "fee rate below the plan"
-	case FeeTooHigh:
-		return "fee rate above the plan"
 	case Unsizable:
 		return "size cannot be estimated"
 	default:
@@ -108,11 +99,16 @@ func (p Problem) String() string {
 
 // Finding is something the verifier established and does not refuse over.
 //
-// Four codes live here: ChangeMissing, ChangeTooSmall, FeeTooLow and
-// FeeTooHigh. They are your arrangements, not this app's. It
-// does not build the transaction, does not select the coins and cannot size a
-// change output for you — all it can do is say what yours came out as, and it
-// says so rather than blocking a batch over it.
+// One code lives here: ChangeMissing. Your change arrangements are yours. This
+// app does not build the transaction and does not select the coins, so all it
+// can do is say what yours came out as, and it says so rather than blocking a
+// batch over it.
+//
+// There were four. FeeTooLow, FeeTooHigh and ChangeTooSmall left with the
+// declared fee rate, because each of them judged the transaction against a
+// number the operator had typed twice — and the app that does not choose the fee
+// has no standing to hold them to it. The type stays for ChangeMissing, and
+// because the split between refusing and reporting is worth keeping expressible.
 //
 // It carries the same fields as a Problem because a report wants the same
 // numbers a refusal did: the Where a finding attaches to, and the Detail that
@@ -177,9 +173,9 @@ type Verification struct {
 	Size    Size
 	FeeRate float64
 
-	// ChangeSat and ChangeFloorSat are the I-4 arithmetic, when it could be done.
-	ChangeSat      int64
-	ChangeFloorSat int64
+	// ChangeSat is the change output's amount, which is attribution rather than
+	// judgement: the report says what it came out as and nothing grades it.
+	ChangeSat int64
 
 	Problems []Problem
 
@@ -538,74 +534,11 @@ func (p *Plan) checkFee(packet *psbt.Packet, prevScripts [][]byte,
 	if size.Vsize <= 0 || v.FeeSat <= 0 {
 		return
 	}
+	// The rate is computed and reported, and nothing judges it. There is no
+	// target to judge it against: the app does not build the transaction and does
+	// not choose the fee, so the only number it could compare against was one the
+	// operator typed after their wallet had already shown them the real one.
 	v.FeeRate = float64(v.FeeSat) / float64(size.Vsize)
-
-	switch {
-	case v.FeeRate < p.Fee.Low():
-		v.note(FeeTooLow, "",
-			fmt.Sprintf("The fee rate is %.2f sat/vB; the plan targets %.2f.",
-				v.FeeRate, p.Fee.TargetSatPerVB),
-			"There is no RBF available here (I-4), so a batch that goes out too "+
-				"cheap can only be pushed by a CPFP child or waited out. The rate is "+
-				"the one you declared and the transaction is the one you built, so "+
-				"this is a disagreement between the two rather than a fault.")
-	case v.FeeRate > p.Fee.High():
-		v.note(FeeTooHigh, "",
-			fmt.Sprintf("The fee rate is %.2f sat/vB; the plan targets %.2f.",
-				v.FeeRate, p.Fee.TargetSatPerVB),
-			"Not dangerous, but it is not what was approved, and the difference is "+
-				"paid out of the change.")
-	}
-
-	p.checkChangeSize(packet, v)
-}
-
-// checkChangeSize is I-4's arithmetic: can the change output still buy a child
-// that lifts this transaction?
-func (p *Plan) checkChangeSize(packet *psbt.Packet, v *Verification) {
-
-	var change *Attribution
-	for i := range v.Outputs {
-		if v.Outputs[i].Named && v.Outputs[i].Kind == ChangeOut {
-			change = &v.Outputs[i]
-			break
-		}
-	}
-	if change == nil {
-		return
-	}
-	if p.Change.MinimumSat > 0 && change.AmountSat < p.Change.MinimumSat {
-		v.note(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
-			fmt.Sprintf("Change is %s; the plan's floor is %s.",
-				prose.Sats(change.AmountSat), prose.Sats(p.Change.MinimumSat)), "")
-	}
-
-	// The child's own witness script, when the PSBT carries it. Core and Sparrow
-	// both attach it for an output of their own wallet, and without it a
-	// multisig child cannot be sized.
-	witnessScript := packet.Outputs[change.Index].WitnessScript
-	child, err := ChildVsize(change.Script, witnessScript)
-	if err != nil {
-		note := fmt.Sprintf("whether the change output could fund a CPFP child: %s", err)
-		if p.Change.MinimumSat > 0 {
-			note += fmt.Sprintf(". The plan's own floor of %s was still applied",
-				prose.Sats(p.Change.MinimumSat))
-		}
-		v.Unchecked = append(v.Unchecked, note)
-		return
-	}
-	floor := ChangeFloor(v.Size.Vsize, v.FeeSat, p.Fee.CPFPTarget(), child)
-	v.ChangeFloorSat = floor
-	if change.AmountSat < floor {
-		v.note(ChangeTooSmall, fmt.Sprintf("output %d", change.Index),
-			fmt.Sprintf("Change is %s, which cannot fund a child big enough to "+
-				"lift this batch to %.2f sat/vB.",
-				prose.Sats(change.AmountSat), p.Fee.CPFPTarget()),
-			fmt.Sprintf("A %d vB child on top of a %d vB parent needs %s of change "+
-				"to leave anything above the %s dust limit. If you want that lever, "+
-				"reduce a funding amount or add a coin and build again.",
-				child, v.Size.Vsize, prose.Sats(floor), prose.Sats(DustSat)))
-	}
 }
 
 // matches reports whether a PSBT output's key-origin information says it belongs

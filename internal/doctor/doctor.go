@@ -63,7 +63,6 @@ import (
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/methods"
 	"github.com/AusDavo/winthistle/internal/peers"
-	"github.com/AusDavo/winthistle/internal/plan"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"github.com/AusDavo/winthistle/internal/reserve"
 	"github.com/lightningnetwork/lnd/lnrpc"
@@ -190,7 +189,6 @@ func Run(ctx context.Context, cfg *config.Config, opts Options) *Report {
 	}
 
 	checkReserve(ctx, r, cli, opts)
-	checkFees(ctx, r, cfg)
 	checkPeers(ctx, r, cli, opts)
 	checkJournal(ctx, r, cfg, j, journalErr)
 	return r
@@ -452,30 +450,6 @@ func checkReserve(ctx context.Context, r *Report, cli *lnd.Client, opts Options)
 			"run at all: enforceNewReservedValue returns before it counts anything " +
 			"for an unannounced channel.")
 	}
-}
-
-// checkFees reports the rate the operator declared, because there is nothing
-// left to check it against.
-//
-// It used to ask Core for an estimate and compare. Core is gone and no third
-// party may be asked in its place, so what is verifiable here is that a rate was
-// set at all — config.Load already refuses a file without one — and what is
-// worth saying is what the number will be used for. Printing it on this screen
-// is the point: it is the last chance to notice a mis-typed fee before the
-// evening, and I-4 means it cannot be corrected afterwards.
-func checkFees(_ context.Context, r *Report, cfg *config.Config) {
-	c := r.add(Check{Name: "the fee rate"})
-	f := plan.Fee{TargetSatPerVB: cfg.Fees.TargetSatPerVB}
-	c.say("%.2f sat/vB, declared in %s", f.TargetSatPerVB, cfg.Path)
-	c.say("step 5 says so when the batch lands outside %.2f to %.2f sat/vB, and "+
-		"does not refuse over it", f.Low(), f.High())
-	c.say("it says the same about a change output too small to lift the batch to "+
-		"%.2f sat/vB with a CPFP child", f.CPFPTarget())
-	c.warn("Nothing here estimated this. Bitcoin Core answered it until this " +
-		"build dropped Core, and no fee API replaced it — one is handed the size " +
-		"of what you are building and the moment you are building it. Take the " +
-		"number from your own wallet or mempool, and check it today rather than " +
-		"during the run: there is no RBF on a funding transaction (I-4).")
 }
 
 func checkPeers(ctx context.Context, r *Report, cli *lnd.Client, opts Options) {

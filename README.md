@@ -251,24 +251,27 @@ This is why the single-sig question stopped mattering. It used to be the one
 place where a design property rested on your setup rather than on structure. It
 now rests on nothing, because nothing needs it.
 
-## You tell it the fee rate; it does not go and ask
+## The fee is yours, and this tool has no opinion about it
 
-`[fees] target_sat_per_vb` in `winthistle.toml`, or `--fee-rate` for one run.
-There is no default and a missing one is refused at load time.
+You pick the rate in Sparrow, against whatever mempool you trust. There is no fee
+setting in `winthistle.toml`, no `--fee-rate` flag, and nothing to declare. Step 5
+computes what the transaction you built came out at and prints it; nothing grades
+it.
 
-That is deliberate rather than lazy. It used to come from Bitcoin Core's
-`estimatesmartfee`, and this build does not talk to a Bitcoin node at all — and a
-fee API is the one substitute it will not reach for, because a fee API is handed
-the size of what you are building and the moment you are building it, which
-together are most of what this tool exists not to leak.
+It used to ask Bitcoin Core's `estimatesmartfee`, and this build does not talk to
+a Bitcoin node at all. A fee API is the one substitute it will not reach for,
+because such an API is handed the size of what you are building and the moment
+you are building it, which together are most of what this tool exists not to
+leak. So it asked *you* instead, in a config key — and that turned out to be
+theatre. This program does not build the transaction and does not choose the fee,
+so the only number it could have held you to was the same one you had already
+typed into your wallet, entered a second time for a report to compare against the
+first. The key is gone. A config file that still has a `[fees]` block is refused,
+with a sentence saying why rather than a shrug.
 
-It is not a worse answer either. This program does not build the transaction and
-does not choose the fee; Sparrow does, at step 4, with whatever estimate you
-trust. What step 5 needs is something to hold the built transaction to, and the
-rate you said you were aiming at is a stronger thing to check against than a
-number fetched on your behalf. A transaction paying more than a quarter either
-side of it is reported. Everything else here works the same way: you declare the
-batch, it checks the transaction.
+One thing follows from it being yours: **there is no RBF on a funding
+transaction** (I-4), so the rate you pick is the rate you get. Pick it against
+the mempool you can see when you build.
 
 ## Every batch should have a change output
 
@@ -301,13 +304,14 @@ key origin rather than by address" because the claim is weaker than a script.
 `--change ADDRESS` names the script instead, which is stronger, and is what a
 wallet that writes no key origins needs.
 
-**The verifier says so and does not refuse over it.** No change output, change
-too small, a fee rate outside what you declared: all four are reported under
-"Reported, not refused" and the batch still arms. Your fee and change
-arrangements are yours, the app does not build the transaction, and it cannot
-size a change output for you — it can only tell you what yours came out as. What
-it *does* refuse is an output nobody can account for, which is a different
-question and is the one it exists to ask.
+**The verifier says so and does not refuse over it.** A transaction with no
+change output is reported under "Reported, not refused" and the batch still arms.
+It used to grade the size of your change too, against a target for a CPFP child;
+that went when the declared fee rate did, because this build constructs no child
+and had no business computing a floor for one. Your change arrangements are
+yours, and all the report does is say what yours came out as. What it *does*
+refuse is an output nobody can account for, which is a different question and is
+the one it exists to ask.
 
 ## If something stops halfway
 

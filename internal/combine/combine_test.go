@@ -125,7 +125,6 @@ func newBatch(t *testing.T, w *wallet) *batch {
 		// Ten sat/vB, which is what changeSat above was chosen to leave. The
 		// tolerance is wide because the witness script's size — and therefore the
 		// rate — differs between a 2-of-2 and a 2-of-3 fixture.
-		Fee: plan.Fee{TargetSatPerVB: 10, Tolerance: 0.5},
 		// The floor is left at zero and the CPFP arithmetic does the work, the
 		// same way it does on a real batch.
 		Inputs: plan.Inputs{MinConfirmations: 1},
@@ -653,7 +652,6 @@ func TestSingleSigCompletesToo(t *testing.T) {
 			Peer: strings.Repeat("0", 64), Address: destAddr, AmountSat: channelSat,
 		}},
 		Change: plan.Change{Address: addr.EncodeAddress()},
-		Fee:    plan.Fee{TargetSatPerVB: 3, Tolerance: 0.9},
 	}
 
 	final, v, err := combine.Complete(p, base, []combine.Part{

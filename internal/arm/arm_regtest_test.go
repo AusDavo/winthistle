@@ -135,7 +135,6 @@ func drive(t *testing.T, n int) *window {
 
 	w.plan, err = streams.Plan(arm.Blueprint{
 		Chain:  "regtest",
-		Fee:    plan.Fee{TargetSatPerVB: fixtureFeeRate},
 		TopUp:  topUp,
 		Change: plan.Change{Address: change},
 		Inputs: plan.Inputs{MinConfirmations: 1, Allowed: outpointsOf(coins)},

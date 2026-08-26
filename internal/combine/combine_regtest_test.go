@@ -90,7 +90,6 @@ func setUpBatch(t *testing.T, n int) *armed {
 	p := &plan.Plan{
 		Chain:  "regtest",
 		Change: plan.Change{Address: change},
-		Fee:    plan.Fee{TargetSatPerVB: fixtureFeeRate},
 		Inputs: plan.Inputs{MinConfirmations: 1},
 	}
 	for _, s := range streams {

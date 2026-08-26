@@ -122,9 +122,13 @@ built" for the account; the short version:
   literally there now, at `internal/regtestenv/coldwallet`.
 - ~~**Item 6** demotes the fee and change findings to reports, and removes
   `Replaceable`.~~ **Done, 2026-08-26.** `ChangeMissing`, `ChangeTooSmall`,
-  `FeeTooLow` and `FeeTooHigh` are `plan.Finding`s on `Verification.Reports` —
-  **not** `Unchecked`, which would have made that heading lie — and `OK()` is
-  still `len(v.Problems) == 0`. The `Replaceable` code, its refusal and
+  `FeeTooLow` and `FeeTooHigh` became `plan.Finding`s on `Verification.Reports`
+  — **not** `Unchecked`, which would have made that heading lie — and `OK()` is
+  still `len(v.Problems) == 0`. **Three of those four are gone**: issue #2
+  removed the declared fee rate later the same day, and `FeeTooLow`, `FeeTooHigh`
+  and `ChangeTooSmall` went with the number they judged against. `ChangeMissing`
+  is the one that remains, and the `Reports` list it renders under is item 6's
+  real legacy. The `Replaceable` code, its refusal and
   `MaxNonReplaceableSequence` are gone. See `docs/replan-2026-08.md`'s "Item 6,
   as built". **All six items are done, and the mainnet cold probe passed on
   2026-08-26** — run `20260826-043441-9a8f28`, two channels, both to
@@ -132,16 +136,19 @@ built" for the account; the short version:
 
 **Three things item 5 decided, which the code now depends on:**
 
-1. **The fee rate is declared, not fetched.** `[fees] target_sat_per_vb`, with
-   `run --fee-rate N` overriding it. `internal/fees` and Core's
-   `estimatesmartfee` are gone, and nothing replaced them, because the
-   no-third-party rule below forbids the obvious substitute. It is not a worse
-   answer: the app does not build the transaction and does not choose the fee, so
-   what the verifier needs is something to hold the built transaction to, and the
-   rate the operator declared is exactly that. **A rate that quietly becomes zero
-   is the default this project must not ship**, and two independent refusals stand
-   against it — `config.Load` on a missing key, `plan.Build` on a non-positive
-   target.
+1. **There is no fee rate anywhere in this build.** Item 5 made it declared
+   rather than fetched — `[fees] target_sat_per_vb`, with `run --fee-rate N` —
+   and **issue #2 removed it entirely on 2026-08-26**, because the honest
+   conclusion of "the app does not choose the fee" is that it should hold no
+   opinion about it either. Requiring the same number a second time, in a config
+   file, so a report could compare it against the first was theatre.
+   `internal/fees` went with Core in item 5; `internal/run/fee.go`, `plan.Fee`,
+   `--fee-rate` and `doctor`'s fee check went with issue #2. **Step 5 computes the
+   rate and reports it, and nothing grades it.** `[fees]` is a retired *section*
+   in `internal/config/toml.go`, so a config file that still has one is refused
+   with a sentence rather than a shrug. **Do not add a fee target back** — not as
+   a key, not as a flag, and not as an estimate; the no-third-party rule below
+   still forbids the last of those independently.
 2. **There is no pre-flight.** `testmempoolaccept` went with Core. What survives
    is narrower and is not nothing: `combine.Accept` executes every input's witness
    against its own script. What is lost is node policy — min relay fee,
@@ -359,22 +366,32 @@ breaking and the answer is to stop, not to edit this section.
 
 ## Why the change output is worth having
 
-The batch verifier **reports** a transaction with no change output, or with
-change too small to fund a child that lifts the package to `Fee.CPFPTarget()`.
-It does not refuse one. Item 6 made that so, and the reasoning below is why the
-fact is worth *saying*: your fee and change arrangements are yours, the app does
-not build the transaction and cannot size a change output for you, and a tool
-that refused a batch over them would be claiming an authority it gave up at step
-4.
+The batch verifier **reports** a transaction with no change output. It does not
+refuse one, and it no longer says anything about how big yours is. Item 6 made
+the first of those true; **issue #2 made the second**, deleting `ChangeTooSmall`
+along with `ChangeFloor`, `ChildFeeSat` and `Fee.CPFPTarget()`. The argument is
+the same one twice: this build constructs no CPFP child, so computing a floor for
+one was an opinion about the operator's arrangements dressed as arithmetic, and a
+tool that graded a batch over them would be claiming an authority it gave up at
+step 4.
+
+**What survives is the reason the change output is worth having**, which is a
+fact about I-4 rather than a number: replace the batch and every outpoint moves,
+so a child spending the change is the only lever there will ever be on it.
+Saying that is informing. Measuring your change against a target and grading it
+was judging. The plan document says the first and nothing says the second.
 
 **They went to `Verification.Reports`, not to `Verification.Unchecked`, and the
 difference was the one real decision in item 6.** `Unchecked` "names what this
 verification could not establish, so that a clean result is not read as a broader
 guarantee than it is", and it renders under the heading **"Not checked here"**.
-"Your change is 600 sat and the floor is 12,350" is something the verifier *did*
+"This transaction has no change output" is something the verifier *did*
 establish. Filing it under that heading would cost the heading the only thing it
 is for. So `Reports []Finding` sits beside `Problems []Problem`, renders under
-**"Reported, not refused"**, and `OK()` is still `len(v.Problems) == 0`.
+**"Reported, not refused"**, and `OK()` is still `len(v.Problems) == 0`. **That
+structure outlived three of the four findings it was built for** — which is the
+argument for it, not against: the split between refusing and reporting is worth
+having expressible even when only one code uses it.
 
 **`Finding` is a separate type from `Problem` on purpose.** `Problem`'s comment
 says every problem is a refusal and there is no severity on purpose, and item 6
@@ -522,14 +539,15 @@ a relaxation of I-4. No code path here builds one, and none may be added.
   is "no sockets of our own", not "no network": LND talking to peers is the point.
 
   **Fee rates came from Core's `estimatesmartfee`, and item 5 removed Core.**
-  Nothing replaced it, because this rule forbids the obvious substitute. The rate
-  is **declared**: `[fees] target_sat_per_vb`, overridable with
-  `run --fee-rate N`. That is not a weaker answer than fetching one — the app does
-  not build the transaction and does not choose the fee, so what the verifier
-  needs is something to hold the built transaction to, and the rate the operator
-  said they were aiming at is exactly that. **Do not reopen this by adding a fee
-  API**, and do not let the number default to zero: `config.Load` and
-  `plan.Build` each refuse that independently, and both refusals are the point.
+  Nothing replaced it, because this rule forbids the obvious substitute. Item 5
+  made the rate *declared* instead; **issue #2 then removed it altogether**, so
+  there is now no fee target in this build at all — see "There is no fee rate
+  anywhere in this build" above. **This bullet is why the gap must never be
+  filled by asking somebody.** A fee API is handed the size of what is being
+  built and the moment it is being built, which together are most of what this
+  tool exists not to leak. The operator reads a rate from their own wallet, their
+  own node or a block explorer and types it into Sparrow; that is theirs to do
+  and this program never learns the number.
 
 - **Hardcoding the macaroon permission list in docs.** Generate it from the
   method registry (`winthistle print-macaroon-command`) so it cannot drift. It

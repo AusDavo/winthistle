@@ -57,6 +57,12 @@ type sparrow struct {
 	beforeSign func(ctx context.Context) error
 }
 
+// fixtureFeeRate is what the harness builds its fixture transactions at,
+// playing the part of the operator choosing a rate in Sparrow. The app has no
+// opinion about it — that is the point of issue #2 — so it lives here rather
+// than in the config the run reads.
+const fixtureFeeRate = 10.0
+
 func (s *sparrow) Built(_ context.Context, pay []run.Recipient) ([]byte, error) {
 	outputs := make([]coldwallet.Output, 0, len(pay))
 	for _, r := range pay {
@@ -120,7 +126,7 @@ func setup(t *testing.T, peers []string, amounts []int64) (
 	d := run.Deps{
 		LND:     env.Alice,
 		Journal: j,
-		Signing: &sparrow{t: t, env: env, feeRate: cfg.Fees.TargetSatPerVB},
+		Signing: &sparrow{t: t, env: env, feeRate: fixtureFeeRate},
 		Out:     out, Confirm: blunt(t),
 	}
 	o := run.Options{Config: cfg, Batch: batch, RunID: "run-test-" + t.Name()}
@@ -371,7 +377,7 @@ func TestCancellingMidRunStillTakesTheBatchApart(t *testing.T) {
 	defer cancel()
 
 	cancelled := make(chan struct{})
-	d.Signing = cancelDuringSigning(t, env, cancel, o.Config.Fees.TargetSatPerVB,
+	d.Signing = cancelDuringSigning(t, env, cancel, fixtureFeeRate,
 		cancelled)
 
 	res, err := run.Do(ctx, d, o)
@@ -544,7 +550,7 @@ func runTheFilePath(t *testing.T,
 	// save it where the app said.
 	waitFor(t, out, "Step 4")
 	pay := regtestenv.RecipientsIn(t, out.String())
-	funded := env.BuildPSBTPaying(t, env.Cold, pay, o.Config.Fees.TargetSatPerVB)
+	funded := env.BuildPSBTPaying(t, env.Cold, pay, fixtureFeeRate)
 	if err := os.WriteFile(wallet.Unsigned, funded.Raw, 0o600); err != nil {
 		t.Fatalf("saving the unsigned transaction: %v", err)
 	}

@@ -145,10 +145,6 @@ type Options struct {
 	// SettleFor bounds Phase 2. Zero means DefaultSettleFor.
 	SettleFor time.Duration
 
-	// FeeRateSatPerVB overrides [fees] target_sat_per_vb for this run. Zero means
-	// use the configured one. Neither is an estimate: see feeFor.
-	FeeRateSatPerVB float64
-
 	// Change names the wallet's change address, when the operator knows it and
 	// wants the stronger check. Empty is the ordinary case: the app does not build
 	// the transaction, so it does not know where the change goes, and
@@ -271,7 +267,6 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 type prepared struct {
 	chain   string
 	chans   []arm.Channel
-	fee     plan.Fee
 	finding reserve.Finding
 	topUp   *plan.TopUp
 	probes  []peers.Probe
@@ -334,18 +329,6 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 			return p, err
 		}
 	}
-
-	// 3. The fee rate, declared rather than fetched. The app does not choose the
-	//    fee — Sparrow does, at step 4 — and it no longer asks anything what the
-	//    fee should be either. What the verifier needs is something to compare the
-	//    built transaction against, and that is what the operator said they were
-	//    aiming at.
-	section(d.Out, "Phase 0 — the fee rate")
-	p.fee, err = feeFor(o)
-	if err != nil {
-		return p, err
-	}
-	fmt.Fprint(d.Out, feeReport(p.fee, o))
 
 	// 4. The anchor reserve, which is about this node's own hot wallet and is
 	//    the one thing that can refuse step 5 for a reason unrelated to the
@@ -474,7 +457,6 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	}
 	batchPlan, err := streams.Plan(arm.Blueprint{
 		Chain:   p.chain,
-		Fee:     p.fee,
 		TopUp:   p.topUp,
 		Aliases: aliases(p.facts),
 		Change:  change,

@@ -99,7 +99,6 @@ func batchPlan(t *testing.T, streams []*regtestenv.Stream, topUp string,
 	p := &plan.Plan{
 		Chain:  "regtest",
 		Change: plan.Change{Address: change},
-		Fee:    plan.Fee{TargetSatPerVB: feeRate},
 		Inputs: plan.Inputs{MinConfirmations: 1},
 	}
 	for _, s := range streams {

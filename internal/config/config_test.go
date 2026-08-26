@@ -31,9 +31,6 @@ path = "/state/runs.db"   # trailing comment
 [limits]
 require_confirmed_inputs = true
 
-[fees]
-target_sat_per_vb = 2.5
-
 `
 
 func TestATypicalFileReadsBack(t *testing.T) {
@@ -49,9 +46,6 @@ func TestATypicalFileReadsBack(t *testing.T) {
 	}
 	if cfg.Limits.MinConfirmations() != 1 {
 		t.Error("require_confirmed_inputs did not become a confirmation floor")
-	}
-	if cfg.Fees.TargetSatPerVB != 2.5 {
-		t.Errorf("fees read back as %+v", cfg.Fees)
 	}
 }
 
@@ -71,9 +65,6 @@ macaroon = "/creds/m.macaroon"
 
 [journal]
 path = "/state/runs.db"
-
-[fees]
-target_sat_per_vb = 12.0
 `))
 	if err != nil {
 		t.Fatalf("reading a minimal file: %v", err)
@@ -84,32 +75,6 @@ target_sat_per_vb = 12.0
 	}
 	if cfg.Journal.Path != "/state/runs.db" {
 		t.Errorf("the journal path read back as %q", cfg.Journal.Path)
-	}
-}
-
-// TestAMissingFeeRateIsRefusedRatherThanDefaultedToZero.
-//
-// The one key with no default, and the reason is the whole of item 5's first
-// decision. Core's estimatesmartfee answered this until Core was removed, and
-// CLAUDE.md forbids the obvious substitute, so the number is declared. A
-// declared number that quietly becomes zero is the worst default this tool
-// could ship: the fee is the one figure in a batch with no right answer, and
-// I-4 means a batch built at the wrong one cannot be corrected by replacing it.
-//
-// Two independent refusals stand between a missing number and a batch built
-// against nothing — this one, and plan.Build's on a non-positive target. This
-// is the one that fires before LND is dialled.
-func TestAMissingFeeRateIsRefusedRatherThanDefaultedToZero(t *testing.T) {
-	body := strings.Replace(good, "target_sat_per_vb = 2.5", "", 1)
-	_, err := Load(write(t, "winthistle.toml", body))
-	if err == nil {
-		t.Fatal("a file with no fee rate loaded, and the rate is now zero")
-	}
-	if !strings.Contains(err.Error(), "target_sat_per_vb is required") {
-		t.Errorf("the refusal does not name the key: %v", err)
-	}
-	if !strings.Contains(err.Error(), "I-4") {
-		t.Errorf("the refusal does not say why it cannot be corrected later: %v", err)
 	}
 }
 
@@ -191,9 +156,9 @@ func TestWhatElseIsRefused(t *testing.T) {
 				"[limits]\nabort_after_signing_seconds = 300", 1),
 			want: "no longer contains a signing round",
 		},
-		"a third key that was retired": {
-			body: strings.Replace(good, "[fees]", "[fees]\nmode = \"ECONOMICAL\"", 1),
-			want: "nothing estimates now",
+		"the fees section, retired with the declared rate": {
+			body: good + "\n[fees]\ntarget_sat_per_vb = 12.0\n",
+			want: "no longer holds an opinion about the fee",
 		},
 		"a key set twice": {
 			body: strings.Replace(good, "[journal]",
@@ -233,14 +198,16 @@ address = "127.0.0.1:8332"
 path = "/state/runs.db"
 `))
 	if err == nil {
-		t.Fatal("a file missing four required keys was accepted")
+		t.Fatal("a file missing its required keys was accepted")
 	}
 	var invalid *Invalid
 	if !asInvalid(err, &invalid) {
 		t.Fatalf("the error is not an *Invalid: %T", err)
 	}
-	if len(invalid.Problems) < 4 {
-		t.Errorf("reported %d problems, expected at least 4:\n%v",
+	// Three, not four: the missing fee rate was one of them until issue #2
+	// removed the key it was missing.
+	if len(invalid.Problems) < 3 {
+		t.Errorf("reported %d problems, expected at least 3:\n%v",
 			len(invalid.Problems), invalid.Problems)
 	}
 }
