@@ -11,10 +11,11 @@ already have a wallet; keep using it.
 > ### Status: the mainnet cold probe passed. Nothing has ever been broadcast. Do not use.
 >
 > The direction changed on 2026-08-25 and the code has caught up. What this
-> README describes is what the tool now is, bar one item — see
-> [`docs/replan-2026-08.md`](docs/replan-2026-08.md), which is the current plan
-> and says plainly which part is not built. The commands are `run`, `doctor` and
-> `recover`, plus `print-macaroon-command` and two `example-*` printers.
+> README describes is what the tool now is — see
+> [`docs/replan-2026-08.md`](docs/replan-2026-08.md), which is the plan that got
+> it there and carries the account of each item as built. The commands are `run`,
+> `doctor` and `recover`, plus `print-macaroon-command` and two `example-*`
+> printers.
 >
 > The central safety property below is verified in LND's source and observed on
 > regtest, most recently on 2026-08-25 with *n* = 2 channels reaching
