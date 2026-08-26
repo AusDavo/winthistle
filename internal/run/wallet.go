@@ -418,12 +418,32 @@ const unsettledPollsBeforeSaying = 2
 // was finished before anybody looked at it. Nothing can have both; a poller
 // cannot ask the filesystem whether the writer has more to say.
 //
-// What makes this the right side of that trade is the shape of the exposure. A
-// wallet saving a 1,100-byte transaction opens the file and then writes it, and
-// the file is *empty* for the whole gap between those two — that is the wide
-// window, it is the one the flake landed in, and it is closed here outright. The
-// prefix window is one write's worth of a writer that splits the write at all,
-// which for a file this size is not what a wallet does.
+// What makes this the right side of that trade is the shape of the exposure, and
+// issue #10 measured it rather than leaving it asserted. Sparrow 2.5.3 is the
+// wallet this transport is built around; its three save paths were read in source
+// and each shape was run under strace.
+//
+// The binary PSBT save is one write(2) at any size — an unbuffered
+// FileOutputStream.write(byte[]), which the JDK issues as a single write for the
+// whole array, measured at 1.1 KB, 6 KB, 12 KB and 30 KB. The base64 PSBT save
+// and the .txn final-transaction save go through an OutputStreamWriter, whose
+// encoder buffer is 8192 bytes, and those do split: one write below 8 KB and
+// 8192-byte chunks above it. So step 4 has one encoding that never splits and one
+// that splits on a large batch, and step 7's .txn is hex and therefore twice the
+// transaction's size, which puts a 2-of-2 batch of about fifteen inputs over the
+// line. A writer that splits is not the exotic case this comment used to call it.
+//
+// What the earlier reading had right is which window is the wide one, and the
+// source says it more plainly than the guess did: all three paths create and
+// truncate the file *before* they compute what to put in it, so the file sits at
+// zero bytes for the whole of the serialization. That is the window the flake
+// landed in, and it is closed here outright.
+//
+// The prefix window is the gap between two encoder chunks, and it measures
+// 0.05–0.3 ms under strace, which inflates it. There is no syscall in that gap,
+// no I/O and no operator — it is the encoding of the next 8 KB. A poll would have
+// to land inside one of those *and* finish its read inside it. That is what the
+// two-poll rule would buy, for two seconds on every run.
 func readWhole(path string) (body []byte, present bool, err error) {
 	before, err := os.Stat(path)
 	if err != nil {

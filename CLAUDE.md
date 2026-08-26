@@ -135,6 +135,22 @@ built" for the account; the short version:
   The wide window is the empty one — a wallet saving 1,100 bytes is at zero for
   the whole gap between open and write — and that one is closed outright.
 
+  **Issue #10 asked whether the rest was worth its two seconds, and the answer
+  is measured now rather than argued: no.** Sparrow 2.5.3's three save paths,
+  read in source and each run under `strace`: the **binary** PSBT save is one
+  `write(2)` at any size — an unbuffered `FileOutputStream.write(byte[])`,
+  measured at 1.1 KB, 6 KB, 12 KB and 30 KB — while the **base64** PSBT save and
+  the **`.txn`** final-transaction save go through an `OutputStreamWriter` and do
+  split, into 8,192-byte chunks above 8 KB. So a splitting writer is real and not
+  exotic, and `readWhole`'s old claim that a file this size is not one was wrong.
+  **What decides it is the gap, not the write count**: between two encoder chunks
+  it measures 0.05–0.3 ms under `strace`, with no syscall, no I/O and no operator
+  in it, and a poll must land inside one *and* finish its read inside it. Closed
+  `wontfix` on 2026-08-27; the measurement is in `readWhole`'s doc comment. The
+  source also settles why the empty window is the wide one, more plainly than the
+  guess did: **all three paths truncate the file before they compute what to put
+  in it**, so it sits at zero for the whole serialization.
+
   **Do not close the rest by retrying on a decode failure.** It would work, and
   it would make a genuinely wrong file — the operator saved the wrong
   transaction, or signed at step 4 — indistinguishable from a slow one. Step 4's
