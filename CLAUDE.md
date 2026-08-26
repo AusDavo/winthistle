@@ -177,6 +177,61 @@ raw transaction rather than a PSBT — which became issue #3 and landed the same
 day. The model held first time; the ergonomics did not, which is the right way
 round and is what a commissioning probe is for.
 
+**The first live batch published on 2026-08-26**, run
+`20260826-191016-d9407c`: five channels, 9,000,000 sat, txid
+`a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90`, five of
+five `chan_pending` with nothing signed, ten backups off pending channels, the
+txid unmoved at step 7, published once, confirmed. **Step 8 was taken for the
+first time.** `--probe` paid for itself immediately: the graph's smallest
+existing channel is a poor proxy for a peer's minimum and was wrong for three
+of the five, because a node's smallest channel may be one *it* opened
+outbound, which its own inbound minimum never constrained. Only
+`accept_channel`'s refusal is authoritative, and it names the figure.
+
+**And then settlement stopped on the one channel that had opened — issue #6,
+landed 2026-08-27.** Two defects in `internal/settle`, and the second was the
+worse one. Both came from the same assumption: that a batch's members share a
+fate. **They share a funding transaction and nothing else.**
+
+- **`UPDATE_FAILURE_UNKNOWN` was classified terminal, and it is LND's
+  catch-all rather than a verdict.** A freshly-opened channel with a briefly
+  offline peer lands there, and the identical update applied cleanly by hand
+  minutes later. **But the reading it replaced was guarding something real** —
+  retrying forever is also wrong — so the bound moved rather than went.
+  `PolicyOutcome.Terminal()` is `INVALID_PARAMETER` and nothing else, terminal
+  on the first refusal, because LND checks the CLTV delta and the inbound fees
+  against its own bounds before it looks at the channel at all. `PENDING` and
+  `NOT_FOUND` retry with no clock, because both name what they are waiting
+  for. `PolicyOutcome.Unexplained()` — `UNKNOWN`, `INTERNAL_ERR` and **any
+  reason this build does not recognise** — retries for `settle.RetryWindow`,
+  ten minutes from the first refusal of that kind, and is then reported. **An
+  unrecognised value is deliberately retried rather than called terminal**:
+  treating a value you cannot interpret as a verdict on the policy is exactly
+  the mistake `UNKNOWN` was.
+
+  The bound is in *time* rather than attempts, because a count of attempts
+  only means minutes at one particular `Options.Interval` and the interval
+  belongs to the caller. `Options.RetryWindow` is the seam that makes the
+  window testable without injecting a clock, and `Tick` holds the only clock
+  there is, so `State.Stuck()` stays a question about a `Result` rather than
+  about the moment it is asked.
+
+- **`Settle` returned on the first stuck member, and that is the half that
+  cost something.** Four channels had not even opened yet and lost their
+  watcher, so each went live at LND's defaults — 1000 msat and 1 ppm — which
+  is the drain window the loop exists to close. A stuck member is now
+  recorded, the loop carries on for everyone else, and one `ErrStuck` comes
+  back at the end naming every one of them **with its channel point**, because
+  the operator's next move is one `updatechanpolicy` per stuck channel.
+  `Result.finished()` is the exit, and it is neither `Done()` nor "any member
+  is stuck". **Do not restore an early return**: with one the batch is only as
+  settlable as its unluckiest channel.
+
+The screen said *"That is the policy itself, not the channel"* about a policy
+that was fine. It belongs to `INVALID_PARAMETER` alone now, and the rule it
+broke is the one worth carrying forward: **do not assert a cause the program
+cannot know.**
+
 ---
 
 ## The three invariants

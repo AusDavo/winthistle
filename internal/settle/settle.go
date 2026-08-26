@@ -33,6 +33,24 @@
 // keeps polling. Applied is only ever set when LND came back with no failures at
 // all.
 //
+// # One member's refusal is not the batch's
+//
+// Members share a funding transaction and nothing else. So a member whose policy
+// cannot be applied is recorded and the loop carries on for everyone else, and
+// Settle returns one ErrStuck at the end naming all of them. It used to return
+// on the first, which the first live mainnet batch punished exactly as it
+// deserved: one channel of five confirmed early, was refused with LND's
+// catch-all while its peer was briefly offline, and took the watch on four
+// channels that had not yet opened down with it. Each of those went live at
+// LND's defaults with nothing left running to notice.
+//
+// Which refusals are worth waiting through is the other half of that, and the
+// answer is not readable off the enum. INVALID_PARAMETER is a verdict on the
+// policy and is terminal at once; PENDING and NOT_FOUND name what they are
+// waiting for; and everything else — UNKNOWN, INTERNAL_ERR, whatever a later
+// version adds — is LND declining to say, which is retried for RetryWindow and
+// then reported. See PolicyOutcome.Retryable, Terminal and Unexplained.
+//
 // # minimum_depth is not readable, and the design assumes it is
 //
 // Phase 0 in docs/design.html says to check each peer's minimum_depth and show
@@ -231,28 +249,56 @@ type PolicyOutcome struct {
 
 // Retryable reports whether waiting could change the answer.
 //
-// PENDING and NOT_FOUND both will: the first becomes false when the funding
-// transaction confirms, and the second when the channel's edge reaches the graph
-// database. INVALID_PARAMETER will not — the policy itself is wrong, and
-// retrying it every ten seconds until the operator gives up is worse than
-// stopping and saying so. Nor will UNKNOWN, which is LND declining to say: there
-// is nothing identifiable to wait for, so waiting is not a plan.
-func (o PolicyOutcome) Retryable() bool {
-	if !o.Refused {
+// Everything except INVALID_PARAMETER. PENDING and NOT_FOUND name what they are
+// waiting for — a confirmation and a graph edge — and waiting is the whole plan
+// for both.
+//
+// UNKNOWN used to be excluded, on the reading that LND declining to say leaves
+// nothing identifiable to wait for. The node falsified that on mainnet on
+// 2026-08-26: a channel that had just opened, with its peer briefly offline, was
+// refused with UNKNOWN, and the identical update applied cleanly by hand a few
+// minutes later. **UNKNOWN is LND's catch-all, not a verdict on the policy.**
+// The old reading was right about one thing — retrying it forever is not a plan
+// either — and that half now lives in Unexplained and RetryWindow, which bound
+// the retry instead of refusing to make it.
+func (o PolicyOutcome) Retryable() bool { return o.Refused && !o.Terminal() }
+
+// Terminal reports whether the refusal is a verdict on the policy itself, which
+// will arrive again on the hundredth attempt exactly as it did on the first.
+//
+// One reason qualifies, and only one. INVALID_PARAMETER is LND checking the CLTV
+// delta and the inbound fees against its own bounds before it looks at the
+// channel at all, so nothing about the channel can change the answer. Every
+// other refusal is about the channel, the graph, or LND's own insides.
+func (o PolicyOutcome) Terminal() bool {
+	return o.Refused &&
+		o.Reason == lnrpc.UpdateFailure_UPDATE_FAILURE_INVALID_PARAMETER
+}
+
+// Unexplained reports whether LND refused without naming something to wait for.
+//
+// UNKNOWN, INTERNAL_ERR, and any reason a later LND grows that this build does
+// not recognise. Retrying these is right — the mainnet refusal above is one of
+// them — and retrying them forever is not, because nothing in this class will
+// ever announce that it has changed its mind. So the loop bounds its own
+// patience: RetryWindow is the bound, Tick applies it, and
+// State.RetriesExhausted carries the verdict.
+//
+// An unrecognised reason is deliberately in this class rather than in Terminal.
+// Treating a value we cannot interpret as a statement about the policy is
+// exactly the mistake UNKNOWN was, and a bounded retry costs minutes at worst.
+func (o PolicyOutcome) Unexplained() bool {
+	if !o.Refused || o.Terminal() {
 		return false
 	}
 	switch o.Reason {
 	case lnrpc.UpdateFailure_UPDATE_FAILURE_PENDING,
-		lnrpc.UpdateFailure_UPDATE_FAILURE_NOT_FOUND,
-		lnrpc.UpdateFailure_UPDATE_FAILURE_INTERNAL_ERR:
-		return true
-	default:
+		lnrpc.UpdateFailure_UPDATE_FAILURE_NOT_FOUND:
 		return false
+	default:
+		return true
 	}
 }
-
-// Settled reports whether this outcome needs nothing further.
-func (o PolicyOutcome) Settled() bool { return o.Applied || (o.Refused && !o.Retryable()) }
 
 func (o PolicyOutcome) String() string {
 	switch {
@@ -341,14 +387,39 @@ type State struct {
 
 	Policy   PolicyOutcome
 	Attempts int
+
+	// RefusedSince is when the current unexplained refusal was first seen, and
+	// RetriesExhausted whether RetryWindow has run out since. Both are set by
+	// Tick, which is the only thing here holding a clock, so that Stuck stays a
+	// question about a Result rather than about the moment it is asked.
+	//
+	// Zero unless the outcome is Unexplained. A PENDING refusal is not on a
+	// clock of this kind — it is on the funding horizon's, which is measured in
+	// blocks and reported separately — and a terminal one needs no clock at all.
+	RefusedSince     time.Time
+	RetriesExhausted bool
+
+	// RefusedFor is that silence's length as of this pass, so the report can
+	// name what actually happened rather than the ceiling it was measured
+	// against. A member is found exhausted one poll past the window, never
+	// exactly on it.
+	RefusedFor time.Duration
 }
 
 // Settled reports whether there is nothing left to do for this channel.
 func (s State) Settled() bool { return s.Open && s.Policy.Applied }
 
-// Stuck reports whether this channel needs a human: the policy was refused for a
-// reason that waiting will not fix.
-func (s State) Stuck() bool { return s.Policy.Refused && !s.Policy.Retryable() }
+// Stuck reports whether this channel needs a human: either LND refused the
+// policy itself, or it refused without saying why for longer than RetryWindow.
+//
+// A stuck member does not stop the settlement. It is recorded, the loop carries
+// on for every other member, and Settle names all of them in one ErrStuck at the
+// end. That is the worse half of issue #6: on the first live batch a single
+// transient refusal abandoned the watch on four channels that had not opened
+// yet, so each went live at LND's defaults with nothing left running to notice.
+func (s State) Stuck() bool {
+	return s.Policy.Terminal() || (s.Policy.Unexplained() && s.RetriesExhausted)
+}
 
 // Result is the whole settlement, member by member.
 type Result struct {
@@ -359,6 +430,18 @@ type Result struct {
 
 	// Elapsed is how long the settlement has been running.
 	Elapsed time.Duration
+
+	// RetryWindow is the patience this pass ran with, carried so that the report
+	// names the figure it actually used and not the default. Zero in a Result
+	// built by hand, and retryWindow falls back to the constant.
+	RetryWindow time.Duration
+}
+
+func (r *Result) retryWindow() time.Duration {
+	if r.RetryWindow <= 0 {
+		return RetryWindow
+	}
+	return r.RetryWindow
 }
 
 // Done reports whether every member is open and policied.
@@ -380,6 +463,52 @@ func (r *Result) Stalled() []State {
 		}
 	}
 	return out
+}
+
+// Stuck lists the members whose policy will not be applied by any more polling.
+//
+// In Result order, which is by channel point: the report and the error both name
+// every one of them, and naming them in a stable order is what makes two runs
+// comparable.
+func (r *Result) Stuck() []State {
+	var out []State
+	for _, s := range r.States {
+		if s.Stuck() {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+// finished reports whether another pass could achieve anything: every member is
+// either open and policied, or stuck.
+//
+// Not Done, and not "any member is stuck". Done is the success, and stopping at
+// the first stuck member is the defect — a batch was only ever as settlable as
+// its unluckiest channel.
+func (r *Result) finished() bool {
+	for _, s := range r.States {
+		if !s.Settled() && !s.Stuck() {
+			return false
+		}
+	}
+	return len(r.States) > 0
+}
+
+// stuckErr is the one error that names every member the loop could not police,
+// or nil when there is none.
+func (r *Result) stuckErr() error {
+	stuck := r.Stuck()
+	if len(stuck) == 0 {
+		return nil
+	}
+	parts := make([]string, 0, len(stuck))
+	for _, s := range stuck {
+		parts = append(parts, fmt.Sprintf("%s (%s) — %s",
+			short(s.Member.Peer), s.Member.Channel, s.Policy))
+	}
+	return fmt.Errorf("%w: %d of %d — %s", ErrStuck, len(stuck), len(r.States),
+		strings.Join(parts, "; "))
 }
 
 // NearestExpiry is the smallest funding_expiry_blocks across the members still
@@ -412,6 +541,10 @@ type Options struct {
 	// FundingTxID is the batch's transaction, needed only to ask Core how deep
 	// it is. It is the same txid every member's channel point carries.
 	FundingTxID string
+
+	// RetryWindow overrides the default patience with an unexplained refusal.
+	// Zero means RetryWindow, and production passes zero.
+	RetryWindow time.Duration
 }
 
 // DefaultInterval is how often the settlement loop asks.
@@ -429,18 +562,45 @@ func (o Options) interval() time.Duration {
 	return o.Interval
 }
 
+// RetryWindow is how long an unexplained refusal is retried before the member is
+// called stuck.
+//
+// Ten minutes, measured from the first refusal of that kind and not from the
+// start of the run: a channel that sat pending for two days and then hit UNKNOWN
+// gets the whole window. Long enough for a peer to reconnect and for the graph
+// to catch up — the mainnet refusal that prompted this was a peer offline for a
+// few minutes — and a third of run.DefaultSettleFor, so a member that is never
+// going to take its policy is named inside the default window rather than at the
+// end of it.
+//
+// In time rather than in attempts, because a count of attempts only means
+// minutes at one particular Interval, and Interval belongs to the caller. A
+// caller that drives Tick four times as often should not get a quarter of the
+// patience.
+const RetryWindow = 10 * time.Minute
+
+func (o Options) retryWindow() time.Duration {
+	if o.RetryWindow <= 0 {
+		return RetryWindow
+	}
+	return o.RetryWindow
+}
+
 // Tick runs one pass: read LND's view, apply the policy to anything newly open,
 // and report where every member stands.
 //
 // Separated from Settle so that one pass can be tested, and so that a UI can
 // drive the loop itself at whatever rate it refreshes at.
 //
-// prev may be nil on the first pass. It carries forward the two things a single
-// pass cannot know: how many attempts have been made, and the depth at which a
-// channel was first seen open, which is the only authoritative reading of the
-// peer's minimum_depth there is.
+// prev may be nil on the first pass. It carries forward the three things a
+// single pass cannot know: how many attempts have been made, how long an
+// unexplained refusal has been going on, and the depth at which a channel was
+// first seen open, which is the only authoritative reading of the peer's
+// minimum_depth there is.
 func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 	opts Options) (*Result, error) {
+
+	now := time.Now()
 
 	open, active, err := openChannels(ctx, cli)
 	if err != nil {
@@ -469,7 +629,7 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 		}
 	}
 
-	out := &Result{}
+	out := &Result{RetryWindow: opts.retryWindow()}
 	for _, m := range members {
 		key := m.Channel.String()
 		s := State{
@@ -481,6 +641,8 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 			s.Attempts = was.Attempts
 			s.ObservedDepth = was.ObservedDepth
 			s.Policy = was.Policy
+			s.RefusedSince, s.RetriesExhausted = was.RefusedSince, was.RetriesExhausted
+			s.RefusedFor = was.RefusedFor
 		}
 
 		s.Open = open[key]
@@ -496,7 +658,11 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 			s.ObservedDepth = confs
 		}
 
-		if s.Policy.Settled() {
+		// Nothing another call can do: it landed, or it is stuck. Stuck rather
+		// than "not retryable", because the retry on an unexplained refusal is
+		// bounded by time and the bound is checked below, so this is where a
+		// member that has run out of patience stops costing an RPC a pass.
+		if s.Policy.Applied || s.Stuck() {
 			out.States = append(out.States, s)
 			continue
 		}
@@ -510,6 +676,26 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 		}
 		s.Attempts++
 		s.Policy = outcome
+
+		// The clock on an unexplained refusal, which is the only kind that is
+		// retried on a clock at all. It starts at the first one, survives a
+		// change of reason inside the class — UNKNOWN and INTERNAL_ERR are the
+		// same silence — and is cleared by anything that names what it is
+		// waiting for, so a channel refused with UNKNOWN and then with PENDING
+		// starts again from zero if the silence comes back.
+		switch {
+		case !outcome.Unexplained():
+			s.RefusedSince, s.RetriesExhausted = time.Time{}, false
+			s.RefusedFor = 0
+		case s.RefusedSince.IsZero():
+			s.RefusedSince = now
+		default:
+			s.RefusedFor = now.Sub(s.RefusedSince)
+			// Only after an attempt, never instead of one: a window of zero
+			// still buys the member the retry it is entitled to.
+			s.RetriesExhausted = s.RefusedFor >= opts.retryWindow()
+		}
+
 		out.States = append(out.States, s)
 	}
 
@@ -519,12 +705,22 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 	return out, nil
 }
 
-// ErrStuck means a member's policy was refused for a reason that waiting will
-// not change.
-var ErrStuck = errors.New("a channel's policy was refused for a reason polling cannot fix")
+// ErrStuck means the loop finished with at least one member still on LND's
+// default policy.
+//
+// It is returned once, at the end, wrapping a list of every member it applies to
+// — not on the first one, and not instead of settling the rest. The text says
+// "not applied to every channel" rather than "the settlement stopped", because
+// under this loop it did not stop.
+var ErrStuck = errors.New("the policy was not applied to every channel")
 
-// Settle runs the loop until every member is open and policied, the context ends,
-// or a policy is refused in a way that will not improve.
+// Settle runs the loop until every member is either open and policied or stuck,
+// or the context ends.
+//
+// A stuck member does not end it. The loop keeps going for everyone else and the
+// stuck ones come back in one ErrStuck at the end, naming all of them: they have
+// nothing to do with each other, and on the first live batch four channels that
+// had not yet opened lost their watcher to a fifth channel's transient refusal.
 //
 // It returns the last Result on every path, including the failing ones: a
 // partially settled batch is exactly the thing the operator has to be shown, and
@@ -554,14 +750,11 @@ func Settle(ctx context.Context, cli Client, members []Member, opts Options) (*R
 		res.Elapsed = time.Since(started)
 		last = res
 
-		if res.Done() {
-			return res, nil
-		}
-		for _, s := range res.States {
-			if s.Stuck() {
-				return res, fmt.Errorf("%w: the channel to %s — %s",
-					ErrStuck, short(s.Member.Peer), s.Policy)
-			}
+		// Every member is settled or stuck, so another pass would ask LND the
+		// same questions and get the same answers. stuckErr is nil when the
+		// batch simply finished, which is the ordinary success.
+		if res.finished() {
+			return res, res.stuckErr()
 		}
 
 		select {
