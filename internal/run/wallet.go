@@ -315,6 +315,23 @@ func (w *FileWallet) wait(ctx context.Context, path, what string) ([]byte, error
 // a tie rather than the filesystem doing it. Built passes one path; Signed passes
 // the set that step 7 accepts, because a wallet that saves a raw transaction
 // names it .txn and would otherwise be waited on forever.
+//
+// # A file that is there is not yet a file that is finished
+//
+// The wallet writing these files is not atomic from a poller's point of view. A
+// poll landing between the create and the last write sees a file that exists,
+// reads it without error, and comes away holding a prefix of a transaction —
+// zero bytes, if it landed early enough. That prefix used to be returned, and
+// the operator got a decode failure for a file that was correct a millisecond
+// later: at step 4 that is inside clock A, which on a five-channel batch is
+// every peer's reservation. Issue #8.
+//
+// So a candidate is returned only when readWhole says what it read is the whole
+// file. What is deliberately not done is retry on a decode failure. It would
+// close the same race, and it would cost the thing this transport is for: a
+// genuinely wrong file — the operator saved the wrong transaction — would become
+// indistinguishable from a slow one, and step 4's refusal of a signed packet is
+// I-1's last gate. A decode failure stays loud, on the first complete file.
 func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) ([]byte, string, error) {
 	poll := w.Poll
 	if poll <= 0 {
@@ -323,14 +340,34 @@ func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) (
 	tick := time.NewTicker(poll)
 	defer tick.Stop()
 
+	unsettled := make(map[string]int, len(paths))
+	said := make(map[string]bool, len(paths))
+
 	for {
 		for _, path := range paths {
-			body, err := os.ReadFile(path)
-			switch {
-			case err == nil:
-				return body, path, nil
-			case !os.IsNotExist(err):
+			body, present, err := readWhole(path)
+			if err != nil {
 				return nil, "", fmt.Errorf("reading %s: %w", path, err)
+			}
+			if body != nil {
+				return body, path, nil
+			}
+			if !present {
+				unsettled[path] = 0
+				continue
+			}
+			// There and not whole. Waiting is right, and waiting in silence is not:
+			// the operator's wallet has told them it saved the file, and issue #5 is
+			// the standing lesson that a wait nobody can see is the worse failure.
+			// Not on the first look, because an ordinary save caught mid-write is
+			// complete by the next one and saying so would be noise on every run.
+			unsettled[path]++
+			if unsettled[path] >= unsettledPollsBeforeSaying && !said[path] {
+				said[path] = true
+				fmt.Fprint(w.Out, prose.Bullet(fmt.Sprintf("%s is there but is still "+
+					"being written, so it has not been read: half a transaction is not "+
+					"read on purpose. If your wallet says it has finished saving, save "+
+					"it again over that file.", path)))
 			}
 		}
 		select {
@@ -340,4 +377,84 @@ func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) (
 		case <-tick.C:
 		}
 	}
+}
+
+// unsettledPollsBeforeSaying is how many consecutive looks find a file present
+// and unfinished before the wait says so on screen.
+//
+// Two rather than one, and a count of looks rather than a duration, because what
+// it measures is "this did not settle across a whole poll interval" — which is
+// the same statement at Poll = 2s and at the 5ms the tests use. Nothing decides
+// anything on this number; it only chooses the moment a line is printed.
+const unsettledPollsBeforeSaying = 2
+
+// readWhole reads path if what is there is a whole file, and holds its peace if
+// it is not.
+//
+// present says the path existed on this look, so the caller can tell "the wallet
+// has not saved yet" from "the wallet is part-way through saving". A nil body
+// with a nil error is the second: come back next tick.
+//
+// The check is two stats around the read. A wallet part-way through writing is
+// growing the file, so a size that moved across the read means what came back is
+// a prefix; a size of zero is that same case caught at its beginning, and is
+// skipped without reading because no valid transaction is empty in either
+// encoding. The stats cost a syscall each and are made on every look, which is
+// the point: a file that was already complete when the first poll found it is
+// read on that poll, with no extra tick of latency added to the common case.
+//
+// # What this does not catch, and why that is the trade
+//
+// A writer that writes in several chunks leaves a prefix sitting still between
+// two of them. If a look lands in one of those gaps the file is not moving while
+// it is read, and a prefix of a transaction is indistinguishable from a short
+// transaction: only decoding it could tell, and decoding it to decide whether to
+// wait is the fix this must not be. So that gap is closed only to the width of
+// the read.
+//
+// Closing it entirely means requiring the size to be unchanged across two
+// consecutive *polls*, which is a whole poll interval of latency on every run —
+// two seconds, at DefaultPoll, added to a step inside clock A, for a file that
+// was finished before anybody looked at it. Nothing can have both; a poller
+// cannot ask the filesystem whether the writer has more to say.
+//
+// What makes this the right side of that trade is the shape of the exposure. A
+// wallet saving a 1,100-byte transaction opens the file and then writes it, and
+// the file is *empty* for the whole gap between those two — that is the wide
+// window, it is the one the flake landed in, and it is closed here outright. The
+// prefix window is one write's worth of a writer that splits the write at all,
+// which for a file this size is not what a wallet does.
+func readWhole(path string) (body []byte, present bool, err error) {
+	before, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, false, err
+	}
+	if before.Size() == 0 {
+		return nil, true, nil
+	}
+
+	body, err = os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			// Gone between the stat and the open. There is nothing here to wait on
+			// yet, which is what an absent file means.
+			return nil, false, nil
+		}
+		return nil, true, err
+	}
+
+	after, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, false, nil
+		}
+		return nil, true, err
+	}
+	if after.Size() != before.Size() || int64(len(body)) != after.Size() {
+		return nil, true, nil
+	}
+	return body, true, nil
 }
