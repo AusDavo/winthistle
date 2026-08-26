@@ -487,20 +487,26 @@ func TestTheFilePathDrivesTheWholeSequence(t *testing.T) {
 		name string
 		// export is the operator's last click: which screen they saved from.
 		export func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte
+		// saveAs is the name their wallet then proposed. The two go together —
+		// a wallet exporting a PSBT names it .psbt, and one exporting the
+		// finished bytes names it .txn — so pairing them here is what makes this
+		// the sequence an operator actually performs rather than two halves of it.
+		saveAs func(w *run.FileWallet) string
 	}{
 		{"a signed psbt", func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte {
 			return env.SignLikeSparrow(t, unsigned)
-		}},
+		}, func(w *run.FileWallet) string { return w.SignedPath() }},
 		{"view final transaction", func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte {
 			return env.ViewFinalTransaction(t, unsigned)
-		}},
+		}, func(w *run.FileWallet) string { return w.SignedPaths()[1] }},
 	} {
-		t.Run(tc.name, func(t *testing.T) { runTheFilePath(t, tc.export) })
+		t.Run(tc.name, func(t *testing.T) { runTheFilePath(t, tc.export, tc.saveAs) })
 	}
 }
 
 func runTheFilePath(t *testing.T,
-	export func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte) {
+	export func(t *testing.T, env *regtestenv.Env, unsigned []byte) []byte,
+	saveAs func(w *run.FileWallet) string) {
 
 	env := regtestenv.Start(t)
 	peers := env.Peers(t)
@@ -550,7 +556,7 @@ func runTheFilePath(t *testing.T,
 		t.Errorf("the transcript does not say the gate opened over an unsigned "+
 			"transaction:\n%s", out.String())
 	}
-	if err := os.WriteFile(wallet.SignedPath(), export(t, env, funded.Raw),
+	if err := os.WriteFile(saveAs(wallet), export(t, env, funded.Raw),
 		0o600); err != nil {
 		t.Fatalf("saving the signed transaction: %v", err)
 	}

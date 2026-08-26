@@ -426,3 +426,149 @@ func TestStepSevenRefusesATransactionThatIsNotThePinnedOne(t *testing.T) {
 			"or refused for another reason: %v", err)
 	}
 }
+
+// TestStepSevenReadsARawTransactionSavedAsTXN is issue #5.
+//
+// Step 7 takes a raw transaction, and a wallet asked to save one names it .txn —
+// Sparrow does. SignedPath inherits its extension from --psbt, so it asserts
+// .psbt, and before this the .txn beside it was never looked at. That failed as
+// silence rather than as a refusal: step 7 has no deadline, by design, so the run
+// waited while the operator watched their wallet report that it had saved the
+// file.
+func TestStepSevenReadsARawTransactionSavedAsTXN(t *testing.T) {
+	p := unsignedPacket(t)
+	base := packetBytes(t, p)
+	raw := signedRawTX(t, p)
+
+	read := func(t *testing.T, which int) []byte {
+		t.Helper()
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+
+		paths := w.SignedPaths()
+		if len(paths) != 2 {
+			t.Fatalf("SignedPaths is %v, want the .psbt and the .txn", paths)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			// Written after Signed has cleared the candidates, which is the order a
+			// real operator produces: the instructions print, then they save.
+			time.Sleep(20 * time.Millisecond)
+			_ = os.WriteFile(paths[which], raw, 0o600)
+		}()
+		got, err := w.Signed(ctx, base)
+		<-done
+		if err != nil {
+			t.Fatalf("saved as %s: %v", filepath.Ext(paths[which]), err)
+		}
+		return got
+	}
+
+	viaPSBTName := read(t, 0)
+	viaTXNName := read(t, 1)
+
+	if !bytes.Equal(viaPSBTName, viaTXNName) {
+		t.Errorf("the same transaction read back differently depending on the name "+
+			"it was saved under: %d bytes via .psbt, %d via .txn",
+			len(viaPSBTName), len(viaTXNName))
+	}
+}
+
+// TestTheSignedNamesNeverCollide keeps SignedPath's own rule while widening the
+// search around it.
+//
+// A wallet that wrote the signed transaction over the unsigned one would leave
+// nothing to compare it against, and adding a second name must not create that
+// case by another route.
+func TestTheSignedNamesNeverCollide(t *testing.T) {
+	for _, name := range []string{
+		"batch.psbt", "batch.txn", "batch", "batch-signed.psbt", "batch.PSBT",
+	} {
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, name), new(bytes.Buffer))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		paths := w.SignedPaths()
+		if len(paths) == 0 {
+			t.Fatalf("%s: no signed path at all", name)
+		}
+		seen := map[string]bool{}
+		for _, p := range paths {
+			if p == w.Unsigned {
+				t.Errorf("--psbt %s: signed path %q is the unsigned path, so the "+
+					"wallet would overwrite what we compare against", name, p)
+			}
+			if seen[p] {
+				t.Errorf("--psbt %s: %q is listed twice", name, p)
+			}
+			seen[p] = true
+		}
+		if paths[0] != w.SignedPath() {
+			t.Errorf("--psbt %s: SignedPath %q is not tried first (%v)",
+				name, w.SignedPath(), paths)
+		}
+	}
+}
+
+// TestStepSevenNamesEveryPathItWatches is the copy half of issue #5.
+//
+// Watching a name the operator is never told about is the same defect as not
+// watching it: they still save to the one they were shown.
+func TestStepSevenNamesEveryPathItWatches(t *testing.T) {
+	dir := t.TempDir()
+	out := new(bytes.Buffer)
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 5 * time.Millisecond
+
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
+	defer cancel()
+	_, _ = w.Signed(ctx, packetBytes(t, unsignedPacket(t)))
+
+	for _, p := range w.SignedPaths() {
+		if !strings.Contains(out.String(), p) {
+			t.Errorf("step 7 watches %s and never says so", p)
+		}
+	}
+}
+
+// TestStepSevenClearsEveryCandidate extends the stale-file rule to the name that
+// was added, rather than leaving one of the two watched paths unswept.
+func TestStepSevenClearsEveryCandidate(t *testing.T) {
+	dir := t.TempDir()
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 5 * time.Millisecond
+
+	stale := packetBytes(t, unsignedPacket(t))
+	for _, p := range w.SignedPaths() {
+		if err := os.WriteFile(p, stale, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	if got, err := w.Signed(ctx, stale); err == nil {
+		t.Fatalf("a stale file was read as this run's signed transaction (%d bytes)",
+			len(got))
+	}
+	for _, p := range w.SignedPaths() {
+		if _, err := os.Stat(p); !os.IsNotExist(err) {
+			t.Errorf("%s survived, so the next attempt would read it", p)
+		}
+	}
+}

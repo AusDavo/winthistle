@@ -108,7 +108,8 @@ button is two clicks from its Sign button. A packet with any signature on it is
 refused here, and the cost is building it again inside clock A.
 
 The two paths are `--psbt FILE`, which is where you save that transaction, and
-`FILE-signed.psbt` beside it, which is where the signed one goes at step 7. The
+`FILE-signed.psbt` or `FILE-signed.txn` beside it, either of which is where the
+signed one goes at step 7. The
 second name is derived rather than asked for, so the two cannot be the same file.
 
 **Step 7 takes a signed PSBT or a raw transaction**, hex or binary — whichever

@@ -56,7 +56,7 @@ exists: `winthistle run`, `doctor` and `recover` work against the cluster in
 anything is signed, one publish — and the I-1 gate is observed at *n* = 3 with
 nothing signed when it opens. `run` **builds nothing and signs nothing**: it
 prints the recipients, reads the unsigned transaction back from `--psbt FILE`,
-and reads the signed one from `FILE-signed.psbt`. `internal/combine` has twenty
+and reads the signed one from `FILE-signed.psbt` or `FILE-signed.txn`. `internal/combine` has twenty
 adversarial tests on inbound PSBTs. `internal/plan` has the batch verifier. None
 of that is broken, and none of it should be described as broken.
 
@@ -98,8 +98,21 @@ built" for the account; the short version:
   a packet's partial signatures — which a raw transaction has none of, so it
   would be accepted in silence by a check with nothing to look at.
   `TestStepFourStillRefusesARawSignedTransaction` is the guard, and
-  `TestTheFilePathDrivesTheWholeSequence` now runs the whole sequence once per
+  `TestTheFilePathDrivesTheWholeSequence` runs the whole sequence once per
   encoding against the live node.
+
+  **Step 7 watches two names, because the encoding it accepts has a
+  conventional extension it was not looking for** — issue #5, landed
+  2026-08-26. `SignedPath` derives its extension from `--psbt`, so it asserted
+  `.psbt`, and a wallet asked to save a raw transaction names it `.txn`.
+  `FileWallet.SignedPaths` returns both, `waitAny` polls them in order so
+  `SignedPath` still wins a tie, and a candidate equal to `Unsigned` or to
+  another is dropped — the signed file may never overwrite the one it is
+  compared against. **The failure this fixes was silence, not a refusal**: step
+  7 has no deadline by design, so a file under the unwatched name left the run
+  waiting while the wallet reported it had saved. Every watched path is printed,
+  because watching a name the operator is never told is the same defect as not
+  watching it.
 - ~~**Item 5** deletes the cut packages.~~ **Done, 2026-08-26.** `coldwallet`'s
   setup half, `setup` and the `setups` table, `bump`, `rehearsal`, `signers`,
   `server`, `webrun`, `signet/` and `signetenv`, `fees`, `doctor`'s Core checks,

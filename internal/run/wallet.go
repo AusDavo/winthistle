@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,6 +124,40 @@ func (w *FileWallet) SignedPath() string {
 	return strings.TrimSuffix(w.Unsigned, ext) + "-signed" + ext
 }
 
+// RawTXExtension is what a wallet asked to save a finalized transaction calls
+// it. Sparrow does; so does anything else offering to export the finished bytes.
+const RawTXExtension = ".txn"
+
+// SignedPaths is every path Signed will read, in the order it prefers them.
+//
+// Step 7 takes a signed PSBT *or* a finalized raw transaction, and SignedPath
+// inherits its extension from --psbt — so on the documented invocation it names
+// batch-signed.psbt and a batch-signed.txn saved beside it would never be looked
+// at. Nothing would say so, either. Step 7 has no deadline by design, because
+// the gate is open and every channel is already recoverable, so the run would
+// simply keep waiting while the operator watched their wallet report that it had
+// saved the file. A wrong name here costs silence rather than a refusal, which is
+// why this is two paths and not a paragraph in the copy.
+//
+// SignedPath stays first, so a run that somehow produces both is not ambiguous
+// about which it read. A candidate equal to Unsigned, or to one already listed,
+// is dropped: SignedPath's own rule is that nothing may overwrite the
+// transaction we still have to compare against, and widening the search must not
+// quietly widen that.
+func (w *FileWallet) SignedPaths() []string {
+	ext := filepath.Ext(w.Unsigned)
+	stem := strings.TrimSuffix(w.Unsigned, ext)
+
+	paths := make([]string, 0, 2)
+	for _, p := range []string{w.SignedPath(), stem + "-signed" + RawTXExtension} {
+		if p == w.Unsigned || slices.Contains(paths, p) {
+			continue
+		}
+		paths = append(paths, p)
+	}
+	return paths
+}
+
 // Built waits for the unsigned transaction and refuses a signed one.
 //
 // # The refusal is I-1, not tidiness
@@ -193,26 +228,35 @@ func (w *FileWallet) Built(ctx context.Context, _ []Recipient) ([]byte, error) {
 // question more directly than a PSBT does. So Built keeps calling combine.Parse
 // alone, and the second encoding lives here, at this call site only.
 func (w *FileWallet) Signed(ctx context.Context, unsigned []byte) ([]byte, error) {
-	got := w.SignedPath()
+	paths := w.SignedPaths()
 
 	// Remove the answer before asking the question, so a file left by an earlier
 	// attempt cannot be read as this one's. The unsigned path is guaranteed fresh
-	// by NewFileWallet; this one is ours to name and therefore ours to clear.
-	if err := os.Remove(got); err != nil && !os.IsNotExist(err) {
-		return nil, fmt.Errorf("clearing %s: %w", got, err)
+	// by NewFileWallet; these are ours to name and therefore ours to clear, and
+	// every one of them has to go — a stale file under the name we are about to
+	// start watching is the same defect as a stale file under the one we always
+	// watched.
+	for _, p := range paths {
+		if err := os.Remove(p); err != nil && !os.IsNotExist(err) {
+			return nil, fmt.Errorf("clearing %s: %w", p, err)
+		}
 	}
 
 	fmt.Fprint(w.Out, prose.Bullet("Sign the transaction you built — the same one, "+
-		"unchanged — and save it here:"))
-	fmt.Fprintf(w.Out, "      %s\n", got)
+		"unchanged — and save it under either of these names:"))
+	for _, p := range paths {
+		fmt.Fprintf(w.Out, "      %s\n", p)
+	}
 	fmt.Fprint(w.Out, prose.Bullet("Let the wallet finalize it. A complete "+
 		"transaction is what this step wants now: every channel in the batch is "+
 		"already recoverable, so a wallet holding signed bytes front-runs nothing."))
 	fmt.Fprint(w.Out, prose.Bullet("A signed PSBT or a raw transaction, either is "+
 		"read — Sparrow's View Final Transaction hex is a raw transaction, and so "+
-		"is what a wallet writes when it offers to export the finished bytes."))
+		"is what a wallet writes when it offers to export the finished bytes. The "+
+		"name it lands under does not decide which: both paths above are watched, "+
+		"and what is inside the file is what is read."))
 
-	body, err := w.wait(ctx, got, "the signed transaction")
+	body, got, err := w.waitAny(ctx, paths, "the signed transaction")
 	if err != nil {
 		return nil, err
 	}
@@ -261,6 +305,17 @@ func (w *FileWallet) decodeSigned(body, unsigned []byte, path string) ([]byte, e
 // holding, and step 7 has no deadline at all now that the gate is open. What ends
 // either is the operator, or the run's own context.
 func (w *FileWallet) wait(ctx context.Context, path, what string) ([]byte, error) {
+	body, _, err := w.waitAny(ctx, []string{path}, what)
+	return body, err
+}
+
+// waitAny is wait over more than one name, and it reports which one answered.
+//
+// The paths are tried in order on every tick, so the caller's preference decides
+// a tie rather than the filesystem doing it. Built passes one path; Signed passes
+// the set that step 7 accepts, because a wallet that saves a raw transaction
+// names it .txn and would otherwise be waited on forever.
+func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) ([]byte, string, error) {
 	poll := w.Poll
 	if poll <= 0 {
 		poll = DefaultPoll
@@ -269,16 +324,19 @@ func (w *FileWallet) wait(ctx context.Context, path, what string) ([]byte, error
 	defer tick.Stop()
 
 	for {
-		body, err := os.ReadFile(path)
-		switch {
-		case err == nil:
-			return body, nil
-		case !os.IsNotExist(err):
-			return nil, fmt.Errorf("reading %s: %w", path, err)
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			switch {
+			case err == nil:
+				return body, path, nil
+			case !os.IsNotExist(err):
+				return nil, "", fmt.Errorf("reading %s: %w", path, err)
+			}
 		}
 		select {
 		case <-ctx.Done():
-			return nil, fmt.Errorf("waiting for %s at %s: %w", what, path, ctx.Err())
+			return nil, "", fmt.Errorf("waiting for %s at %s: %w",
+				what, strings.Join(paths, " or "), ctx.Err())
 		case <-tick.C:
 		}
 	}
