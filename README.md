@@ -8,7 +8,7 @@ transaction back until every channel is already recoverable**.
 It builds nothing, holds no keys, selects no coins, and derives no addresses. You
 already have a wallet; keep using it.
 
-> ### Status: works on regtest, never run on mainnet. Do not use.
+> ### Status: the mainnet cold probe passed. Nothing has ever been broadcast. Do not use.
 >
 > The direction changed on 2026-08-25 and the code has caught up. What this
 > README describes is what the tool now is, bar one item — see
@@ -20,9 +20,12 @@ already have a wallet; keep using it.
 > regtest, most recently on 2026-08-25 with *n* = 2 channels reaching
 > `chan_pending` over a transaction **nothing had signed**.
 >
-> It has never been run against mainnet, and the mainnet cold probe that would
-> commission it has not been done. Nothing here should be pointed at a node
-> holding funds you care about.
+> The mainnet cold probe passed on 2026-08-26, with *n* = 2 against real peers:
+> both channels reached `chan_pending` over an unsigned transaction, the signed
+> transaction came back with its txid unmoved, and the batch was then taken
+> apart. **No funding transaction has ever been broadcast by this tool on
+> mainnet** — step 8 has never been taken outside regtest. Treat it accordingly:
+> that is one node, two peers, once.
 
 ## What it replaces
 
