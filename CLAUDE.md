@@ -113,6 +113,35 @@ built" for the account; the short version:
   waiting while the wallet reported it had saved. Every watched path is printed,
   because watching a name the operator is never told is the same defect as not
   watching it.
+
+  **And both waits read a file the wallet was still writing** — issue #8, landed
+  2026-08-27. `waitAny` returned any `os.ReadFile` that did not error, including
+  the zero-byte one a poll sees between a wallet's open and its write, and that
+  prefix went straight to the decoder: the operator got *"it is empty"* for a
+  file that was correct a millisecond later. At step 4 that is a failed run
+  **inside clock A**, which on a five-channel batch is every peer's reservation.
+  It predates issue #5 — `wait()` had the same line at `0e8a050`, and `9c051a9`
+  moved it into `waitAny` verbatim while adding the second filename.
+
+  `run.readWhole` is the rule now: an empty file is skipped without being read,
+  and a stat either side of the read discards one the writer moved underneath
+  it. **Two stats, and no extra tick** — a file that was already complete when
+  the first poll found it is still read on that poll. The other shape, requiring
+  the size unchanged across two consecutive *polls*, is stronger against a
+  chunked writer and costs a whole poll interval, two seconds at `DefaultPoll`,
+  on every run. **What it does not cover is stated rather than papered over**: a
+  writer that splits the write leaves a prefix sitting still between chunks, and
+  a prefix is indistinguishable from a short transaction without decoding it.
+  The wide window is the empty one — a wallet saving 1,100 bytes is at zero for
+  the whole gap between open and write — and that one is closed outright.
+
+  **Do not close the rest by retrying on a decode failure.** It would work, and
+  it would make a genuinely wrong file — the operator saved the wrong
+  transaction, or signed at step 4 — indistinguishable from a slow one. Step 4's
+  refusal of a signed packet is I-1's last gate, and a gate that waits instead of
+  refusing is not one. **The wait says when it is holding off on a file**, for
+  the reason issue #5 gives directly above: replacing a refusal with silence is
+  the same defect wearing better manners.
 - ~~**Item 5** deletes the cut packages.~~ **Done, 2026-08-26.** `coldwallet`'s
   setup half, `setup` and the `setups` table, `bump`, `rehearsal`, `signers`,
   `server`, `webrun`, `signet/` and `signetenv`, `fees`, `doctor`'s Core checks,

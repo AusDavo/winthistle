@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -314,9 +315,11 @@ func writeAfterClear(t *testing.T, w *run.FileWallet, body []byte) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		// Written aside and renamed into place, so the poller cannot catch the
-		// file between create-and-truncate and the bytes landing in it and read a
-		// wallet's export as an empty one.
+		// Written aside and renamed into place, so this test is about the encoding
+		// it names and nothing else. The transport does not depend on the rename any
+		// more — readWhole declines a file it caught mid-write, and the tests at the
+		// bottom of this file are where that is asserted — but a fixture that hands
+		// over the whole file at once keeps the other cases single-subject.
 		staged := w.SignedPath() + ".staging"
 		if err := os.WriteFile(staged, body, 0o600); err != nil {
 			return
@@ -571,4 +574,387 @@ func TestStepSevenClearsEveryCandidate(t *testing.T) {
 			t.Errorf("%s survived, so the next attempt would read it", p)
 		}
 	}
+}
+
+// Issue #8: a file that is there is not yet a file that is finished.
+//
+// Both waits poll a file the wallet is actively writing, and os.ReadFile on one
+// caught mid-write returns a prefix and a nil error. The tests below construct
+// that rather than hoping for it: a file that never finishes is waited on by
+// construction, and a file that does finish is finished only after the transport
+// has said it looked and turned the partial one down.
+//
+// What the wide window actually is, because it decides what is testable here. A
+// wallet saving 1,100 bytes opens the file and then writes it, and the gap
+// between those two is the whole of the exposure: the file is *empty* for all of
+// it, and then goes to its full length in one write. That is the case the flake
+// was, and it is closed here absolutely — an empty file is never read, whatever
+// it does next. A prefix is what a writer that writes in several chunks leaves
+// between two of them; readWhole catches one that moves while it is being read,
+// and readWhole's own doc comment says plainly what that does not cover.
+
+// syncBuffer is the transcript, readable from the goroutine staging the writes
+// while the transport is writing to it.
+type syncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *syncBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *syncBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// stillWriting is what the transport says when a candidate has been there and
+// unfinished across a whole poll interval. The tests use it as a synchronisation
+// point — it is printed only after the poller has looked at the unfinished file
+// and declined to read it — which is what makes the two-stage writes below a
+// constructed race rather than a hopeful one.
+const stillWriting = "is still being written"
+
+// awaitPolled blocks until the transport has looked at an unfinished file and
+// turned it down. It reports rather than fails, because it is called from the
+// goroutine doing the staging and only the test goroutine may call Fatal — and it
+// gives up when stop closes, so a test that has already failed does not then sit
+// out the deadline of a stage that will never come.
+func awaitPolled(out *syncBuffer, stop <-chan struct{}) bool {
+	return awaitCondition(stop, func() bool {
+		return strings.Contains(out.String(), stillWriting)
+	})
+}
+
+// awaitGone blocks until path is not there, which is how a step-7 fixture waits
+// for Signed to have cleared the candidates before it writes one.
+func awaitGone(path string, stop <-chan struct{}) bool {
+	return awaitCondition(stop, func() bool {
+		_, err := os.Stat(path)
+		return os.IsNotExist(err)
+	})
+}
+
+func awaitCondition(stop <-chan struct{}, ok func() bool) bool {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if ok() {
+			return true
+		}
+		select {
+		case <-stop:
+			return false
+		case <-time.After(time.Millisecond):
+		}
+	}
+	return false
+}
+
+// TestAFileTheWalletHasNotWrittenYetIsNotRead is the defect, at both steps.
+//
+// The file is created and left empty, which is what a poll landing between the
+// wallet's open and its write sees, and it is put there before the call so there
+// is no timing to win or lose. An implementation that returns any read which did
+// not error hands nothing to combine.Parse and gets "it is empty"; a correct one
+// waits. At step 4 that difference is a failed run inside clock A, and every
+// peer's reservation with it.
+func TestAFileTheWalletHasNotWrittenYetIsNotRead(t *testing.T) {
+	whole := packetBytes(t, unsignedPacket(t))
+
+	t.Run("step 4", func(t *testing.T) {
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+		if err := os.WriteFile(w.Unsigned, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+
+		got, err := w.Built(ctx, nil)
+		if err == nil {
+			t.Fatalf("step 4 read %d bytes out of a file the wallet had not written "+
+				"yet. Inside clock A that fails the run, and every peer's reservation "+
+				"with it", len(got))
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("step 4 did not wait for the wallet to write the file; it failed "+
+				"on what it read: %v", err)
+		}
+	})
+
+	t.Run("step 7", func(t *testing.T) {
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+
+		// Written after the clear, which is where a real one lands too.
+		stop := make(chan struct{})
+		defer close(stop)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if awaitGone(w.SignedPath(), stop) {
+				_ = os.WriteFile(w.SignedPath(), nil, 0o600)
+			}
+		}()
+		t.Cleanup(func() { <-done })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+
+		got, err := w.Signed(ctx, whole)
+		if err == nil {
+			t.Fatalf("step 7 read %d bytes out of a file the wallet had not written "+
+				"yet", len(got))
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Errorf("step 7 did not wait for the wallet to write the file; it failed "+
+				"on what it read: %v", err)
+		}
+	})
+}
+
+// TestAFileThatArrivesUnfinishedIsWaitedForAndThenReadWhole is the same race with
+// the wallet finishing, which is what actually happens: the file is correct a
+// moment later, and the run this used to fail was not wrong about anything.
+//
+// The second stage is written only once the transport has said it found the file
+// unfinished, so the poll between the two stages is an observed fact rather than
+// a sleep. An implementation that returns any successful read fails this on the
+// bytes and not on a timeout: it has already handed the empty file to the decoder
+// by then.
+func TestAFileThatArrivesUnfinishedIsWaitedForAndThenReadWhole(t *testing.T) {
+	t.Run("step 4", func(t *testing.T) {
+		whole := packetBytes(t, unsignedPacket(t))
+
+		dir := t.TempDir()
+		out := &syncBuffer{}
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+		if err := os.WriteFile(w.Unsigned, nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		stop := make(chan struct{})
+		defer close(stop)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if awaitPolled(out, stop) {
+				_ = os.WriteFile(w.Unsigned, whole, 0o600)
+			}
+		}()
+		t.Cleanup(func() { <-done })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		got, err := w.Built(ctx, nil)
+		if err != nil {
+			t.Fatalf("Built: %v", err)
+		}
+		if !bytes.Equal(got, whole) {
+			t.Errorf("step 4 came back with %d bytes, want the whole %d-byte packet",
+				len(got), len(whole))
+		}
+	})
+
+	t.Run("step 7", func(t *testing.T) {
+		// The .txn name, because that is where this surfaced: issue #5's own test,
+		// under load.
+		p := unsignedPacket(t)
+		base := packetBytes(t, p)
+		raw := signedRawTX(t, p)
+
+		dir := t.TempDir()
+		out := &syncBuffer{}
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+		paths := w.SignedPaths()
+		txn := paths[len(paths)-1]
+
+		stop := make(chan struct{})
+		defer close(stop)
+		done := make(chan struct{})
+		go func() {
+			defer close(done)
+			if !awaitGone(txn, stop) {
+				return
+			}
+			if err := os.WriteFile(txn, nil, 0o600); err != nil {
+				return
+			}
+			if awaitPolled(out, stop) {
+				_ = os.WriteFile(txn, raw, 0o600)
+			}
+		}()
+		t.Cleanup(func() { <-done })
+
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		got, err := w.Signed(ctx, base)
+		if err != nil {
+			t.Fatalf("Signed: %v", err)
+		}
+		back, err := psbt.NewFromRawBytes(bytes.NewReader(got), false)
+		if err != nil {
+			t.Fatalf("step 7 returned something that is not a PSBT: %v", err)
+		}
+		if back.UnsignedTx.TxHash() != p.UnsignedTx.TxHash() {
+			t.Errorf("the txid moved through the transport: %s, want %s",
+				back.UnsignedTx.TxHash(), p.UnsignedTx.TxHash())
+		}
+		if len(back.Inputs[0].FinalScriptWitness) == 0 {
+			t.Error("the witness did not survive the transport")
+		}
+	})
+}
+
+// TestTheWaitSaysWhenItIsHoldingOffOnAFile.
+//
+// Declining to read an unfinished file replaces a decode failure with a wait, and
+// a wait nobody can see is the failure issue #5 was: the operator's wallet has
+// told them it saved, and the screen would say nothing at all. Step 7 has no
+// deadline by design, so silence there lasts until somebody gives up.
+func TestTheWaitSaysWhenItIsHoldingOffOnAFile(t *testing.T) {
+	dir := t.TempDir()
+	out := &syncBuffer{}
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 5 * time.Millisecond
+	if err := os.WriteFile(w.Unsigned, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	_, _ = w.Built(ctx, nil)
+
+	if !strings.Contains(out.String(), w.Unsigned) ||
+		!strings.Contains(out.String(), stillWriting) {
+		t.Errorf("the wait never said it was holding off on %s, so the operator "+
+			"watches nothing happen:\n%s", w.Unsigned, out.String())
+	}
+	if n := strings.Count(out.String(), stillWriting); n != 1 {
+		t.Errorf("said it %d times; saying it once is the whole point of saying it", n)
+	}
+}
+
+// TestAFileCompleteOnTheFirstPollIsReadOnTheFirstPoll.
+//
+// The other shape for this fix — require the size to be unchanged across two
+// consecutive polls — is stronger against a slow writer and costs a whole poll
+// interval on every run, which at DefaultPoll is two seconds added to a step
+// inside clock A for a file that was finished before anybody looked. Two stats
+// around the read cost two syscalls and cost the common case nothing. This is the
+// assertion that keeps that true, so the poll interval here is long enough that an
+// extra tick could not hide inside it.
+func TestAFileCompleteOnTheFirstPollIsReadOnTheFirstPoll(t *testing.T) {
+	dir := t.TempDir()
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 3 * time.Second
+
+	whole := packetBytes(t, unsignedPacket(t))
+	if err := os.WriteFile(w.Unsigned, whole, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	start := time.Now()
+	got, err := w.Built(ctx, nil)
+	elapsed := time.Since(start)
+	if err != nil {
+		t.Fatalf("Built: %v", err)
+	}
+	if !bytes.Equal(got, whole) {
+		t.Error("the packet did not survive the transport")
+	}
+	if elapsed >= w.Poll {
+		t.Errorf("a file that was already complete took %s to read, which is a whole "+
+			"poll interval of latency added to every run", elapsed)
+	}
+}
+
+// TestAnInvalidFileStillFailsLoudly is the rejected fix, asserted against.
+//
+// Retrying on a decode failure would close this race too, and it would make a
+// genuinely wrong file — the operator saved the wrong transaction, or signed at
+// step 4 — indistinguishable from a slow one. Step 4's refusal of a signed packet
+// is I-1's last gate, and a gate that waits instead of refusing is not one. So a
+// finished file that does not decode fails on the first look and not on the
+// context.
+func TestAnInvalidFileStillFailsLoudly(t *testing.T) {
+	junk := bytes.Repeat([]byte{0x7f}, 512)
+
+	t.Run("step 4", func(t *testing.T) {
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+		if err := os.WriteFile(w.Unsigned, junk, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err = w.Built(ctx, nil)
+		if err == nil {
+			t.Fatal("step 4 accepted 512 bytes of nothing in particular")
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("step 4 waited out a file that will never decode: %v", err)
+		}
+		if !strings.Contains(err.Error(), "not a PSBT") {
+			t.Errorf("the refusal does not say what step 4 wanted: %v", err)
+		}
+	})
+
+	t.Run("step 7", func(t *testing.T) {
+		dir := t.TempDir()
+		w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Poll = 5 * time.Millisecond
+		writeAfterClear(t, w, junk)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		_, err = w.Signed(ctx, packetBytes(t, unsignedPacket(t)))
+		if err == nil {
+			t.Fatal("step 7 accepted 512 bytes of nothing in particular")
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("step 7 waited out a file that will never decode: %v", err)
+		}
+		if !strings.Contains(err.Error(), "neither a PSBT nor a raw transaction") {
+			t.Errorf("the refusal does not name both encodings it tried: %v", err)
+		}
+	})
 }
