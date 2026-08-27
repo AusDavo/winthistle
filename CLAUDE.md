@@ -436,9 +436,11 @@ that order. **#24 and #25 are closed; #26 and #27 remain:**
    name activities. The `jerr` branch's question went moot with the write.
    `TestAFailedSigningStepIsRecordedAsAwaitedAndNeverAsDeclined` is **node-free** —
    `sign` uses only `d.Out`, `d.Journal` and `d.Signing`, so `Deps.LND` stays nil
-   — four error classes keyed on `combine.ErrTXIDMoved` and `context.Canceled`
-   rather than on sentences, and verified to fail against the old code on all
-   four. **`docs/design.html` does not carry this claim and did not move**; its
+   — five error classes keyed on `combine.ErrTXIDMoved`,
+   `combine.ErrIncompleteWitnesses` and `context.Canceled` rather than on
+   sentences, and verified to fail against the old code on all five. The last of
+   the five is the refusal **#22 rewrote one call away from this frame**, and it
+   is the instance the issue led with. **`docs/design.html` does not carry this claim and did not move**; its
    four `signer` mentions are about BIP174 and QR scope, and both its `declin`
    hits are LND's.
 3. **#26 · `internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
