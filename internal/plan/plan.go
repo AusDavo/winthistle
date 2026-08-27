@@ -451,13 +451,18 @@ func TopUpAddress(ctx context.Context, cli Client) (string, error) {
 // ReserveTopUp turns the anchor-reserve pre-flight's finding into a top-up
 // output, or into nothing when the node already clears the reserve.
 //
-// It aims at the larger of the two figures internal/reserve reports. The smaller
-// one, ShortfallAtVerify, is what psbt_verify will actually demand — none of the
-// batch is in the channel database yet, so every verify sees the same pre-batch
-// channel count. The larger one is what the node needs once all n are pending,
-// and below it LND declines further on-chain spends and public channel opens.
-// Since an output is being built either way, building the one that leaves the
-// node whole costs a few hundred satoshis of fee and saves a second transaction.
+// It aims at the larger of the two figures internal/reserve reports, and that is
+// the load-bearing choice rather than an economy. The smaller one,
+// ShortfallAtVerify, is only what the batch's FIRST psbt_verify demands: an
+// earlier channel's CompleteReservation can put it in the channel database before
+// a later channel's verify, so the nth verify can be judged against existing + n,
+// which is ShortfallAfterBatch's figure. Measured at n = 3 by
+// TestALaterVerifyCountsAnEarlierChannelInTheBatch, where the figure moved from
+// 10,000 to 20,000 sat mid-batch. Aiming smaller would leave a refused verify
+// inside clock A with every earlier peer's window already open.
+//
+// It is also what the node needs once all n are pending, below which LND declines
+// further on-chain spends and public channel opens. One output covers both.
 func ReserveTopUp(ctx context.Context, cli Client, f reserve.Finding) (*TopUp, error) {
 	// An all-private batch is never judged: enforceNewReservedValue returns
 	// before it counts anything for an unannounced channel, and a private channel

@@ -14,8 +14,9 @@ func (f Finding) Summary() string {
 		return fmt.Sprintf("the node's own wallet is %s short of the reserve "+
 			"psbt_verify will demand", prose.Sats(f.ShortfallAtVerify()))
 	case ShortAfterBatch:
-		return fmt.Sprintf("the batch will verify, but it leaves the node's own "+
-			"wallet %s under the reserve for %d pending channels",
+		return fmt.Sprintf("the batch's first verify clears, but the node's own "+
+			"wallet is %s under the reserve for %d pending channels — which a "+
+			"later verify in the same batch can already be judged against",
 			prose.Sats(f.ShortfallAfterBatch()), f.Batch.Public)
 	case NotApplicable:
 		return "every channel in this batch is private, so LND's anchor reserve " +
@@ -103,9 +104,11 @@ func (f Finding) reportRefused() string {
 
 	if f.AfterBatch > f.AtVerify {
 		b.WriteString("\n")
-		b.WriteString(prose.Para(fmt.Sprintf("Aim at %s rather than %s. Verify needs the "+
-			"smaller figure, because none of the batch is in the channel database "+
-			"yet; once all %d are pending the node wants the larger one.",
+		b.WriteString(prose.Para(fmt.Sprintf("Aim at %s rather than %s. The smaller "+
+			"figure is what the batch's first verify needs; each later one can see a "+
+			"channel from earlier in the same batch already in the channel database, "+
+			"so the last can be judged against the larger figure — which is also what "+
+			"the node wants once all %d are pending.",
 			prose.Sats(f.AfterBatch), prose.Sats(f.AtVerify), f.Batch.Public)))
 	}
 	b.WriteString(privateNote(f.Batch))
@@ -115,11 +118,12 @@ func (f Finding) reportRefused() string {
 func (f Finding) reportShortAfter() string {
 	var b strings.Builder
 
-	b.WriteString("This batch will verify. It leaves the node's own wallet under\n")
-	b.WriteString("the reserve, though, and now is the cheapest moment to fix that.\n\n")
+	b.WriteString("This batch's first verify will pass. The node's own wallet is\n")
+	b.WriteString("under the reserve for the channels the batch will leave pending,\n")
+	b.WriteString("and now is the cheapest moment to fix that.\n\n")
 
 	rows := []prose.Row{
-		prose.Note("required at verify", f.AtVerify, "met"),
+		prose.Note("required at the first verify", f.AtVerify, "met"),
 		prose.Line(fmt.Sprintf("required with %d pending", f.Batch.Public), f.AfterBatch),
 		prose.Line("unlocked and available", f.Available),
 		prose.Line("short by, afterwards", f.ShortfallAfterBatch()),
@@ -130,19 +134,24 @@ func (f Finding) reportShortAfter() string {
 	}
 	b.WriteString(prose.Table(rows))
 
-	b.WriteString("\nNothing will refuse the batch. What changes is afterwards: below\n")
-	b.WriteString("the reserve LND declines further on-chain spends and public\n")
-	b.WriteString("channel opens from this wallet, and there is less on hand to\n")
-	b.WriteString("fee-bump a force-close of these channels than LND has decided\n")
-	b.WriteString("there should be.\n")
+	b.WriteString("\nTwo things change. Below the reserve LND declines further\n")
+	b.WriteString("on-chain spends and public channel opens from this wallet, and\n")
+	b.WriteString("there is less on hand to fee-bump a force-close of these channels\n")
+	b.WriteString("than LND has decided there should be. And the larger figure can\n")
+	b.WriteString("bind before the batch is published at all: a channel from earlier\n")
+	b.WriteString("in the batch can already be in the channel database when a later\n")
+	b.WriteString("one is verified, so a later verify can be refused mid-batch, with\n")
+	b.WriteString("every earlier peer's window already open.\n")
 
 	b.WriteString("\nWhat to do:\n")
 	b.WriteString(prose.Bullet(fmt.Sprintf(
 		"Add a top-up output for %s to the batch, which costs one output's "+
-			"worth of fee and nothing else.", prose.Sats(f.ShortfallAfterBatch()))))
+			"worth of fee and nothing else. It counts at every verify, including "+
+			"the last: LND credits an output paying into its own wallet.",
+		prose.Sats(f.ShortfallAfterBatch()))))
 	b.WriteString(prose.Bullet(
-		"Or top the node's wallet up separately, any time before the channels " +
-			"go to chain."))
+		"Or top the node's wallet up separately, before step 5 rather than " +
+			"before the channels go to chain."))
 	b.WriteString(privateNote(f.Batch))
 	return b.String()
 }
@@ -152,7 +161,7 @@ func (f Finding) reportClear() string {
 	b.WriteString("The node's own on-chain wallet clears LND's anchor reserve, at\n")
 	b.WriteString("verify and after the batch.\n\n")
 	b.WriteString(prose.Table([]prose.Row{
-		prose.Line("required at verify", f.AtVerify),
+		prose.Line("required at the first verify", f.AtVerify),
 		prose.Line(fmt.Sprintf("required with %d pending", f.Batch.Public), f.AfterBatch),
 		prose.Line("unlocked and available", f.Available),
 	}))
