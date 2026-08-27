@@ -146,8 +146,8 @@ func TestOnePeersWindowExpiringLeavesTheRestOfTheBatchArmed(t *testing.T) {
 	// specific: LND dropped the funding intent when the peer's cancellation
 	// arrived, so there is nothing for psbt_finalize to act on. Measured against
 	// alice on 2026-08-25 — "no funding intent found for pendingChannelID(…)",
-	// which is chanfunding's own wording and names the channel, so it is safe to
-	// put in front of an operator as it stands.
+	// which is PsbtFundingVerify's own wording (lnwallet/wallet.go:757) and names
+	// the channel, so it is safe to put in front of an operator as it stands.
 	err = env.TryFinalize(t, lapsing, rawTxHex)
 	if err == nil {
 		t.Fatal("psbt_finalize succeeded against a reservation the peer had already " +

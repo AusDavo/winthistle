@@ -5,8 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/AusDavo/winthistle/internal/policy"
 )
 
 // write puts a file in a temp directory and returns its path.
@@ -293,9 +291,9 @@ func TestAPolicyLNDWouldRefuseIsRefusedHere(t *testing.T) {
 	if !strings.Contains(err.Error(), "below LND's minimum") {
 		t.Errorf("refused for the wrong reason: %v", err)
 	}
-	if policy.MinTimeLockDelta != 18 {
-		t.Errorf("routing.MinCLTVDelta is recorded as %d", policy.MinTimeLockDelta)
-	}
+	// That the minimum this refuses against is LND's own is
+	// TestTranscribedConstantsMatchLND's claim to make. A literal pinned here
+	// said 18 for as long as the constant did.
 }
 
 func TestABatchWithNothingInItIsRefused(t *testing.T) {

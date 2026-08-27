@@ -270,7 +270,7 @@ func TestOurFinalizerAgreesWithCoresByteForByte(t *testing.T) {
 	}
 }
 
-// TestADeviceThatReSignsAModifiedTransactionIsNamedAgainstTheRealFixture.
+// TestADeviceThatReSignsAModifiedTransactionIsNamed.
 //
 // The unit tests cover the refusal; this covers it with a real signer's output,
 // where the packet also carries the derivations and witness script Core attaches

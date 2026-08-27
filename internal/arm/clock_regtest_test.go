@@ -25,16 +25,18 @@ const slowEnv = "WINTHISTLE_SLOW"
 //     reservations. These reservations are always initiated by us and the remote
 //     peer is likely going to cancel them after some idle time anyway." So the
 //     only clock in the picture is the peer's.
-//   - On the peer, the clock is resCtx.lastUpdated, and handleFundingOpen sets it
-//     with `defer resCtx.updateTimestamp()` — at the end of handling
-//     open_channel, which is the same message handler that sends accept_channel.
+//   - On the peer, the clock is resCtx.lastUpdated, and
+//     fundeeProcessOpenChannel sets it with `defer resCtx.updateTimestamp()`
+//     (funding/manager.go:1901) — at the end of handling open_channel, which is
+//     the same message handler that sends accept_channel.
 //     The two candidate answers are therefore a few microseconds apart on the
 //     peer's side of the wire, and one round trip apart on ours.
 //   - It fires when the peer's zombie sweeper next ticks and finds
 //     time.Since(lastUpdated) > ReservationTimeout. Those are
 //     DefaultZombieSweeperInterval = 1 minute and DefaultReservationTimeout = 10
 //     minutes, neither adjustable in a release build — lncfg/dev.go returns the
-//     constant, and only a `dev`-tagged build reads the flags.
+//     constant, and only lncfg/dev_integration.go reads the flags, under the
+//     `integration` tag rather than the `dev` one.
 //
 // So: answerable on regtest, but not in the form the question was asked. The
 // magnitude, the granularity and *whose* clock it is are all observable, and this

@@ -24,7 +24,8 @@
 // still works — but it is not free of the peer's patience, and that turns out to
 // matter more.
 //
-// Reading handleFundingOpen at v0.21.2-beta: before the peer creates anything it
+// Reading fundeeProcessOpenChannel at v0.21.2-beta: before the peer creates
+// anything it
 // counts its live reservations for us plus its pending channels with no thaw
 // height, and refuses with ErrMaxPendingChannels if that count is already at
 // --maxpendingchannels. LND's default for that flag is 1. Then, if it accepts,
@@ -85,9 +86,12 @@ import (
 //
 // chanfunding.DefaultReservationTimeout is how long a reservation may sit
 // unchanged; lncfg.DefaultZombieSweeperInterval is how often the sweeper looks.
-// Neither is adjustable in a release build — lncfg/dev.go returns the constant
-// and only a dev-tagged build reads the flags — so the hold is bounded by their
-// sum, and TestWhoOwnsTheTenMinuteClock has measured it twice: 10m41s against
+// Neither is adjustable in a release build: lncfg/dev.go is built when the
+// `integration` tag is absent and returns the constant, and only
+// lncfg/dev_integration.go reads the flags. The tag is `integration`, not `dev` —
+// LND has a `dev` tag as well, on build/config_dev.go, and it drives the log
+// level rather than this. So the hold is bounded by their sum, and
+// TestWhoOwnsTheTenMinuteClock has measured it twice: 10m41s against
 // bob at lnd v0.19.3-beta, and 10m14s against carol at v0.21.2-beta. The spread
 // is the sweeper's one-minute granularity, not a change in the timeout.
 //
@@ -181,8 +185,9 @@ func (c Connection) String() string {
 // PendingOpen is a channel this node already has pending open with a peer the
 // batch means to open to.
 //
-// It is here because of what the peer does with it. handleFundingOpen counts its
-// live reservations for us *plus* its pending channels with no thaw height, and
+// It is here because of what the peer does with it. fundeeProcessOpenChannel
+// counts its live reservations for us *plus* its pending channels with no thaw
+// height, and
 // refuses with ErrMaxPendingChannels once that count is at
 // --maxpendingchannels, whose default is 1. So one channel already pending with
 // a peer is, against a default peer, the whole of its budget for us — and the
@@ -458,9 +463,11 @@ func ValidatePubkey(s string) error {
 
 // isAlreadyConnected recognises LND's refusal to connect twice.
 //
-// Matched on text because rpcserver.go returns a plain fmt.Errorf here with no
-// code to key off — the same situation as abort.ErrNoShim, and handled the same
-// way.
+// Matched on text because there is nothing else to match on. LND does have a
+// type for it — errPeerAlreadyConnected, server.go:166, whose Error() is the
+// sentence below — but it is unexported and it does not cross gRPC as a type
+// anyway, so what reaches us is a string. The same situation as abort.ErrNoShim,
+// and handled the same way.
 func isAlreadyConnected(err error) bool {
 	return strings.Contains(err.Error(), "already connected to peer")
 }

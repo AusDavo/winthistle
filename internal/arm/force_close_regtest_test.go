@@ -163,9 +163,15 @@ func csvDelayOf(ctx context.Context, t *testing.T, env *regtestenv.Env,
 
 // awaitMempool blocks until Core has that transaction in its mempool.
 //
-// LND broadcasts the commitment from the ChainArbitrator after CloseChannel's
-// ClosePending update has already been sent, so lncli can return a txid a moment
-// before Core has the bytes.
+// The ordering inside LND is the other way round: the ChainArbitrator broadcasts
+// inside ForceCloseContract (rpcserver.go:2831, and PublishTx at
+// channel_arbitrator.go:1162) and only then does rpcserver send the ClosePending
+// update carrying the txid. So the wait is not for a broadcast that has not
+// happened yet. It is because the broadcast is allowed to have failed:
+// ErrDoubleSpend and ErrMempoolFee are logged and swallowed at :1170, the txid is
+// reported anyway, and LND's rebroadcaster is what gets the transaction in
+// afterwards. A txid without a mempool entry is a state this test has to be able
+// to sit through.
 func awaitMempool(t *testing.T, env *regtestenv.Env, txid string) {
 	t.Helper()
 	deadline := time.Now().Add(90 * time.Second)

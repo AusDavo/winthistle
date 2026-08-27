@@ -34,7 +34,18 @@ const (
 
 	// MinTimeLockDelta and MaxTimeLockDelta are what UpdateChannelPolicy will
 	// accept: routing.MinCLTVDelta and routing.MaxCLTVDelta.
-	MinTimeLockDelta = 18
+	//
+	// Checked in LND's RPC handler, not against the channel — rpcserver.go:7504
+	// calls validateChannelPolicyTimeLockDelta before it looks at any channel,
+	// and a delta outside these bounds comes back as a gRPC error for the whole
+	// call rather than as a failed_updates entry for one channel. So the whole
+	// batch's policy pass fails at once, and every channel stays at the
+	// defaults above. That is why Validate refuses a delta before a channel is
+	// waiting on one.
+	//
+	// TestTranscribedConstantsMatchLND is what holds these to LND's own
+	// numbers; MinTimeLockDelta said 18 for as long as nothing did.
+	MinTimeLockDelta = 24
 	MaxTimeLockDelta = 65535
 )
 

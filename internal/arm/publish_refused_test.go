@@ -220,7 +220,7 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		//
 		// BtcWallet.PublishTransaction runs the backend's TestMempoolAccept
 		// first and, when it refuses, maps the reject reason through
-		// mapRpcclientError. ErrMempoolConflict, ErrMissingInputs,
+		// mapRpcclientError. ErrMempoolConflict, ErrMissingInputsOrSpent,
 		// ErrTxAlreadyKnown and ErrTxAlreadyConfirmed all collapse into a bare
 		// lnwallet.ErrDoubleSpend — Core's reject string is *dropped*, so
 		// "txn-mempool-conflict" above is what the proto could carry and not what
@@ -241,9 +241,9 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 	}, {
 		// bitcoind unreachable at publish time.
 		//
-		// We never call Core here — the only pre-flight is testmempoolaccept, and
-		// that ran back in the armed window. LND is the one that needs the
-		// backend, and it needs it twice inside this single RPC: BtcWallet asks
+		// We never call Core here, and since item 5 there is no pre-flight of
+		// ours anywhere — testmempoolaccept went with Core. LND is the one that
+		// needs the backend, and it needs it inside this single RPC: BtcWallet asks
 		// the chain for TestMempoolAccept before publishing, and a failure that
 		// is not ErrBackendVersion is returned raw. So a dead bitcoind arrives
 		// here as an ordinary transport error, and the important part is what it
@@ -338,8 +338,8 @@ func TestARefusedPublishKeepsTheTransactionToRebroadcast(t *testing.T) {
 // abandon it must not have. But it means the raw transaction in the journal is
 // re-broadcast by the operator with their own tools —
 // `bitcoin-cli sendrawtransaction <hex>` — and not by a second call from here. A
-// retry path in this repository would be a third WalletKit.PublishTransaction
-// call site, which the pinned count of 2 forbids.
+// retry path in this repository would be a second WalletKit.PublishTransaction
+// call site, which the pinned count of 1 forbids.
 func TestARefusedPublishCannotBeRetriedThroughThisProgram(t *testing.T) {
 	ctx := context.Background()
 	runID := "refused-no-retry"

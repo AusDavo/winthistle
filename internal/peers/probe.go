@@ -104,8 +104,9 @@ type Probe struct {
 	// HoldsUntil is when this peer's reservation can be assumed gone.
 	//
 	// Zero for a refused probe, which costs nothing: every limit check in
-	// handleFundingOpen runs before InitChannelReservation, so a refusal leaves
-	// no reservation behind. Set for an accepted one, because shim_cancel is
+	// fundeeProcessOpenChannel runs before InitChannelReservation, so a refusal
+	// leaves no reservation behind. Set for an accepted one, because shim_cancel
+	// is
 	// local — CancelFundingIntent deletes our own map entry and sends the peer
 	// nothing — so only the peer's zombie sweeper releases it.
 	HoldsUntil time.Time
@@ -279,8 +280,10 @@ var (
 	// "received funding error from <66 hex chars>: "
 	fromPeer = regexp.MustCompile(`received funding error from [0-9a-fA-F]{66}: `)
 
-	// lnwallet.ErrChanTooSmall / ErrChanTooLarge, which render their amounts
-	// through btcutil.Amount.String() — BTC with trailing zeros trimmed.
+	// lnwallet.ErrChanTooSmall / ErrChanTooLarge (lnwallet/errors.go:138, :148),
+	// which render their amounts through btcutil.Amount.String(): eight decimal
+	// places when there is a decimal point at all, and a bare integer when there
+	// is not. [0-9.]+ takes either.
 	tooSmall = regexp.MustCompile(
 		`chan size of ([0-9.]+) BTC is below min chan size of ([0-9.]+) BTC`)
 	tooLarge = regexp.MustCompile(
@@ -358,10 +361,13 @@ func notConnected(raw string) bool {
 
 // satFromBTCString parses "0.0002" into satoshis without a float.
 //
-// btcutil.Amount.String() renders BTC with trailing zeros trimmed, so the string
-// can carry anywhere from zero to eight decimal places. Parsing it as a float
-// and multiplying would be the ordinary mistake; this is a peer's stated minimum
-// and it goes straight into a comparison against a channel amount.
+// btcutil.Amount.String() pads to eight decimal places when the amount has a
+// fractional part and prints a bare integer when it does not, so the string
+// carries either zero decimal places or eight. This accepts anything between,
+// because the padding is a formatting choice in a dependency and the cost of it
+// changing again is a peer's stated minimum read as zero. Parsing it as a float
+// and multiplying would be the ordinary mistake; this number goes straight into
+// a comparison against a channel amount.
 func satFromBTCString(s string) int64 {
 	whole, frac, _ := strings.Cut(s, ".")
 	if len(frac) > 8 {

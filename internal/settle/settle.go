@@ -67,7 +67,7 @@
 //     from above. It is the authoritative figure, it arrives too late to plan
 //     with, and it is exactly the right thing to record for next time.
 //   - LND's own default policy, which a peer running stock LND will be using:
-//     between 3 and 6, scaled linearly by capacity against MaxFundingAmount, and
+//     between 1 and 6, scaled linearly by capacity against MaxFundingAmount, and
 //     6 for anything wumbo. ExpectedDepth computes it, and it is a prediction.
 //   - Nothing else. There is no gossip field and no third party may be asked.
 //
@@ -107,14 +107,17 @@ import (
 // what a channel is worth before the policy lands.
 const (
 	// ForgetHorizonBlocks is lncfg.DefaultMaxWaitNumBlocksFundingConf. Not
-	// adjustable in a release build: lncfg/dev.go returns the constant and only
-	// a dev-tagged build reads the flag.
+	// adjustable in a release build: lncfg/dev.go returns the constant, and the
+	// flag is read only by lncfg/dev_integration.go, which is built under the
+	// `integration` tag. Not the `dev` tag, which LND also has and which drives
+	// something else.
 	ForgetHorizonBlocks = 2016
 
 	// MinDepth and MaxDepth bound LND's default NumRequiredConfs, and
 	// MaxFundingAmount is what it scales against — funding.MaxBtcFundingAmount,
-	// 2^24 - 1.
-	MinDepth         = 3
+	// 2^24 - 1. They are lnwallet.minRequiredConfs and lnwallet.maxRequiredConfs,
+	// both unexported, in lnwallet/confscale.go.
+	MinDepth         = 1
 	MaxDepth         = 6
 	MaxFundingAmount = int64(1<<24) - 1
 
@@ -224,11 +227,12 @@ type Member struct {
 // ExpectedDepth predicts how many confirmations a peer running stock LND will
 // want before it considers this channel open.
 //
-// A prediction, and the report says so. It reproduces the NumRequiredConfs
-// closure wired up in server.go: 6 for anything above MaxFundingAmount, and
-// otherwise 6 * stake / MaxFundingAmount clamped into [3, 6]. A peer that set
-// --bitcoin.defaultchanconfs, or that runs a channel acceptor, or that is not
-// LND at all, is bound by none of it.
+// A prediction, and the report says so. It reproduces lnwallet.ScaleNumConfs,
+// which the NumRequiredConfs closure in server.go:1608 calls through
+// lnwallet.FundingConfsForAmounts: 6 for anything above MaxFundingAmount, and
+// otherwise 6 * stake / MaxFundingAmount clamped into [MinDepth, MaxDepth]. A
+// peer that set --bitcoin.defaultchanconfs, or that runs a channel acceptor, or
+// that is not LND at all, is bound by none of it.
 func ExpectedDepth(amountSat int64) int64 {
 	if amountSat > MaxFundingAmount {
 		return MaxDepth
