@@ -507,9 +507,17 @@ func channelBreakdown(r *journal.Run, indent string) string {
 		}
 	}
 	if len(parts) == 0 {
-		// Not a blank line. A run with no channels journalled is a run that
-		// stopped before Begin wrote any, and saying so beats an empty column
-		// that reads as a row the renderer gave up on.
+		// Not a blank line, for the reason stateColumn renders "(no state)": a
+		// row that says nothing is read as a rendering fault rather than as a
+		// fact.
+		//
+		// #30 item 5. This comment used to call it "a run that stopped before
+		// Begin wrote any", which asserts a cause twice over. Begin refuses a
+		// batch with no channels in it and writes the run row and the channel
+		// rows in one transaction (journal/write.go), and nothing deletes a
+		// channel row, so a journalled run with no channels is not reachable
+		// through this build at all — which is the reason to render it rather
+		// than a story about how it got here. The emitted copy was always fine.
 		return indent + "no channels\n"
 	}
 

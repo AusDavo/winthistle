@@ -196,8 +196,13 @@ func (r *Run) AbortTarget() (abort.Target, error) {
 	return t, nil
 }
 
-// Recover is the entry point that turns a crashed run back into an executed
+// Recover is the entry point that turns an unfinished run into an executed
 // abort: read the row, build the target, run it, and write down what happened.
+//
+// "A crashed run" is what this line used to say, and it knows nothing of the
+// kind — it is handed a run id. Its own caller says why that matters,
+// run/recover.go: a crash and a mid-run failure leave the same artifacts, and
+// the commonest way in is Ctrl-C. #30 item 4.
 //
 // The move to StateAborting is written before the first RPC, for the same reason
 // StatePublishing is: an abort that is itself interrupted has to be visible as
