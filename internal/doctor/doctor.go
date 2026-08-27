@@ -40,12 +40,23 @@
 //     credential being examined does not authorise that method.
 //   - codes.Unknown with the same text is the interceptor refusing *this* call.
 //     bakery.ErrPermissionDenied is an errgo error with no gRPC status attached,
-//     so it arrives untyped. It means the configured credential is too narrow to
-//     run the check at all, which is itself the diagnosis: it was baked before
-//     this build existed.
+//     so it arrives untyped. It means LND would not run the check over the
+//     configured credential.
 //
 // Matching on the code alone would confuse them, and matching on the text alone
 // would too. Both are matched.
+//
+// # And that is where the diagnosis stops
+//
+// The second bullet used to end "which is itself the diagnosis: it was baked
+// before this build existed", and the report said so on screen. It is a claim
+// about the file's history, and a refusal carries no history: a credential baked
+// by hand, or a path pointing at some macaroon other than the one the operator
+// baked, arrives identically. Issue #13 came in through a third route — a
+// half-written file, which lnd.ReadMacaroon now refuses by name before anything
+// is presented to LND — but closing one route is not the same as being entitled
+// to the claim. Report the refusal, name both readings, and let the operator
+// look at the path.
 package doctor
 
 import (
@@ -222,16 +233,32 @@ func checkConfig(r *Report, cfg *config.Config) {
 func checkLND(ctx context.Context, r *Report, cfg *config.Config) *lnd.Client {
 	c := r.add(Check{Name: "LND"})
 
-	for _, f := range []struct{ what, path string }{
-		{"tls_cert", cfg.LND.TLSCert},
-		{"macaroon", cfg.LND.Macaroon},
+	var missingCert, missingMac bool
+	for _, f := range []struct {
+		what string
+		path string
+		gone *bool
+	}{
+		{"tls_cert", cfg.LND.TLSCert, &missingCert},
+		{"macaroon", cfg.LND.Macaroon, &missingMac},
 	} {
 		if _, err := os.Stat(f.path); err != nil {
 			c.fail("%s: %v", f.what, err)
+			*f.gone = true
 		}
 	}
-	if c.Status == Fail {
+	// The fix follows whichever one is missing. It used to offer the bake
+	// command for both, which on a missing tls.cert is a command that cannot
+	// help and a cause — "your credential is wrong" — that the stat did not
+	// establish: it named the file it could not find, and that was the cert.
+	if missingMac {
 		c.fix("winthistle print-macaroon-command --save-to %s", cfg.LND.Macaroon)
+	}
+	if missingCert {
+		c.fix("# lnd writes tls.cert into its data directory at startup\nls -l %s",
+			cfg.LND.TLSCert)
+	}
+	if c.Status == Fail {
 		return nil
 	}
 
@@ -240,11 +267,21 @@ func checkLND(ctx context.Context, r *Report, cfg *config.Config) *lnd.Client {
 
 	cli, err := lnd.Dial(dialCtx, cfg.LND)
 	if err != nil {
+		// Before "cannot reach": Dial refuses an unreadable credential without
+		// dialling, so the node has not been asked anything and whether it is up
+		// is not something this has established.
+		if errors.Is(err, lnd.ErrMacaroonFile) {
+			c.fail("%v", err)
+			c.fix("ls -l %s", cfg.LND.Macaroon)
+			return nil
+		}
 		c.fail("cannot reach %s: %v", cfg.LND.Address, err)
-		if tooNarrow(err) {
-			c.say("That is the credential being refused rather than the node being " +
-				"down: lnd.Dial's probe calls GetInfo, and this macaroon does not " +
-				"carry it. Re-bake it from this build.")
+		if refusedOverMacaroon(err) {
+			c.say("That is a credential being refused rather than the node being " +
+				"down: lnd.Dial's probe calls GetInfo, and LND would not run it " +
+				"over this macaroon. Either it was baked without GetInfo, or the " +
+				"path in winthistle.toml is not the credential you baked — this " +
+				"cannot tell those apart, and re-baking only fixes the first.")
 			c.fix("winthistle print-macaroon-command --save-to %s | sh", cfg.LND.Macaroon)
 			return nil
 		}
@@ -287,9 +324,13 @@ func checkMacaroon(ctx context.Context, r *Report, cfg *config.Config, cli *lnd.
 		c.say("not checked: LND could not be reached")
 		return
 	}
-	mac, err := os.ReadFile(cfg.LND.Macaroon)
+	// The same guard as Dial's, because this is a second read of the same file
+	// and it can tear on its own: Dial succeeding a moment ago says nothing
+	// about what is on disk now, and a re-bake is exactly what moves it.
+	mac, err := lnd.ReadMacaroon(cfg.LND.Macaroon)
 	if err != nil {
-		c.fail("reading %s: %v", cfg.LND.Macaroon, err)
+		c.fail("%v", err)
+		c.fix("ls -l %s", cfg.LND.Macaroon)
 		return
 	}
 
@@ -298,8 +339,13 @@ func checkMacaroon(ctx context.Context, r *Report, cfg *config.Config, cli *lnd.
 		ok, err := authorises(ctx, cli, mac, m.Name, m.Ops)
 		switch {
 		case errors.Is(err, errProbeRefused):
-			c.fail("this credential cannot even run the permission check, which "+
-				"means it was baked before this build: %v", err)
+			c.fail("LND would not run the permission check over this credential, "+
+				"so what it authorises cannot be reported here at all: %v", err)
+			c.say("What that establishes is the refusal, not its reason. A " +
+				"credential baked before this build carries no such method, and " +
+				"a path pointing at some macaroon other than the one you baked " +
+				"arrives here identically. Re-baking fixes the first and " +
+				"silently does nothing for the second, so read the path first.")
 			c.fix("winthistle print-macaroon-command --save-to %s | sh", cfg.LND.Macaroon)
 			return
 		case err != nil:
@@ -381,22 +427,28 @@ func authorises(ctx context.Context, cli *lnd.Client, mac []byte, method string,
 		// that does not authorise the method by returning InvalidArgument with
 		// bakery's own text inside it.
 		return false, nil
-	case tooNarrow(err):
+	case refusedOverMacaroon(err):
 		return false, fmt.Errorf("%w: %v", errProbeRefused, err)
 	default:
 		return false, err
 	}
 }
 
-// tooNarrow reports whether an error is LND's interceptor refusing *our* call
-// over the macaroon.
+// refusedOverMacaroon reports whether an error is LND's interceptor refusing
+// *our* call over the macaroon.
+//
+// It was called tooNarrow, which is the claim and not the observation, and is
+// the half of issue #13 that no guard closes. What this establishes is that LND
+// refused the call over the credential; *why* it refused — a permission never
+// baked in, a caveat, or a path pointing at some macaroon other than the one the
+// operator baked — is not in the error, and a caller must not assert one.
 //
 // The text, not the code. bakery.ErrPermissionDenied is errgo.New("permission
 // denied") with no gRPC status attached, so LND's interceptor passes it through
 // as codes.Unknown; matching on codes.PermissionDenied would never fire. If LND
 // ever starts typing it, the code check below starts carrying the weight and
 // the text check becomes redundant rather than wrong.
-func tooNarrow(err error) bool {
+func refusedOverMacaroon(err error) bool {
 	if err == nil {
 		return false
 	}

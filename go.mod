@@ -11,6 +11,7 @@ require (
 	github.com/lightningnetwork/lnd v0.21.2-beta
 	golang.org/x/tools v0.39.0
 	google.golang.org/grpc v1.79.3
+	gopkg.in/macaroon.v2 v2.0.0
 	modernc.org/sqlite v1.29.10
 )
 
@@ -172,7 +173,6 @@ require (
 	google.golang.org/protobuf v1.36.10 // indirect
 	gopkg.in/errgo.v1 v1.0.1 // indirect
 	gopkg.in/macaroon-bakery.v2 v2.0.1 // indirect
-	gopkg.in/macaroon.v2 v2.0.0 // indirect
 	gopkg.in/natefinch/lumberjack.v2 v2.0.0 // indirect
 	gopkg.in/yaml.v2 v2.4.0 // indirect
 	gopkg.in/yaml.v3 v3.0.1 // indirect

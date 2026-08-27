@@ -620,8 +620,9 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
   `codes.InvalidArgument` from `CheckMacaroonPermissions` is the answer about
   the macaroon in the request; an *untyped* error carrying the same "permission
   denied" text is the interceptor refusing the caller. Match both, as
-  `doctor.tooNarrow` does — the code alone confuses them and the text alone does
-  too.
+  `doctor.refusedOverMacaroon` does — the code alone confuses them and the text
+  alone does too. (It was `tooNarrow`; issue #13 renamed it, because what it
+  establishes is the refusal and not its reason.)
 
 - **`ExportAllChannelBackups` is node-wide.** The snapshot covers every channel
   the node has, not the batch's. A test may assert "at least the batch"; on the

@@ -239,6 +239,71 @@ trading the thing for the evidence of the thing. No `docker` control was added
 either; the harness shells out to the wrapper an operator would run and nothing
 more.
 
+**The credential is proved to be a macaroon before it is presented as one, and
+the rule behind it is the one to carry: a failure may be reported, but its cause
+may only be named where the program established it.** Issue #13, landed
+2026-08-27. `lnd.Dial` read the macaroon with `os.ReadFile` and hex-encoded
+whatever came back, so a torn read produced a well-formed *credential* carrying
+the wrong bytes — `hex.EncodeToString(nil)` is `""` — which LND then refused on
+authentication, and every sentence downstream was about the wrong half of the
+setup: the address, the permission list, re-baking. **The failure was never the
+defect.** It fails loudly and before step 2, so no peer has been told anything
+and no clock is running. The defect is the asserted cause, which is issue #6's
+rule verbatim: **do not assert a cause the program cannot know.**
+
+- **`lnd.ReadMacaroon` is the one read**, used by `Dial` and by `doctor`'s
+  `checkMacaroon`, and it refuses an empty file outright and anything that fails
+  `macaroon.UnmarshalBinary`, naming the file. `ErrMacaroonFile` marks the class
+  so a caller may say "this file" and must not say "this node" or "too narrow" —
+  nothing has been asked of LND by the time one is returned. **`doctor` reads the
+  same file a second time and needed the same guard**: `Dial` succeeding a moment
+  ago says nothing about what is on disk now, and a re-bake is exactly what moves
+  it.
+- **The window is one this build prints the command for.** `winthistle
+  print-macaroon-command --save-to PATH | sh` is `lncli bakemacaroon --save_to`
+  writing the exact path `Dial` reads. As in issue #8 the wide half is zero
+  bytes, for the whole gap between the writer's open and its write — and
+  re-baking is the action the old copy recommended, so the diagnosis sent the
+  operator back through the race.
+- **No retry and no polling, which is where this parts from `run.readWhole`.**
+  That transport polls for a file a wallet is still writing, inside clock A, so
+  it has to tell "not finished" from "wrong". `Dial` is a one-shot at a moment
+  nothing is waiting on: a credential that is wrong must fail on the first look.
+- **`gopkg.in/macaroon.v2` was already in the module graph**, so the only
+  `go.mod` change is its promotion from indirect to direct. `lnd/macaroons` is
+  still not imported, for the reason `internal/lnd/client.go`'s `macaroonCreds`
+  comment gives — it drags in kvdb and etcd for fifteen lines.
+- **`doctor.tooNarrow` is `doctor.refusedOverMacaroon` now, because the name was
+  the claim rather than the observation.** The predicate is unchanged and still
+  right: `codes.InvalidArgument` is `CheckMacaroonPermissions` answering about the
+  macaroon in the *request*, and an untyped `permission denied` is LND's
+  interceptor refusing *our call* — matching on either the code alone or the text
+  alone confuses the two. What it establishes is the refusal. **Why** LND refused
+  — a permission never baked in, a caveat, or a path pointing at some macaroon
+  other than the one the operator baked — is not in the error, and the copy no
+  longer picks one. *"which means it was baked before this build"* is gone from
+  the report and from the package doc. **Guarding the read closed one route into
+  that claim and did not earn the claim**, which is why (3) was taken rather than
+  left as covered by (2).
+- **Two guards do not make a validator.** Do not add a third check here, do not
+  validate the macaroon's caveats or its location, and do not second-guess LND:
+  `CheckMacaroonPermissions` remains the only authority on what a credential is
+  allowed to do. This proves the bytes are a macaroon and stops.
+
+**And #13 is not the last instance of that rule being broken.** An audit of every
+place this build renders a cause found three more, none of them touched by this
+slice and all worth their own issue: `internal/settle/report.go:296` tells the
+operator the peer *has* cancelled the funding when all it has is a negative block
+count off `PendingChannels`; `internal/settle/report.go:237` blames a Bitcoin
+Core this build has not dialled since item 5, on a branch that now always fires
+because `run.settlePhase` passes no `Chain` at all; and
+`internal/combine/rawtx.go:165` calls a partially-signed transaction *"the one
+you built at step 4"* because it returns on the first witnessless input.
+**`internal/peers` is the package the rest should be held to** — it strips LND's
+misleading `remote canceled … possibly timed out` prefix, labels *"The peer
+said"* against *"This node said"*, and says in terms when a refusal is not a
+verdict.
+
 **Three things item 5 decided, which the code now depends on:**
 
 1. **There is no fee rate anywhere in this build.** Item 5 made it declared
