@@ -29,6 +29,15 @@ func run(state journal.State, chans ...journal.Channel) *journal.Run {
 	}
 }
 
+// channelWithID is channel() for a test that needs the ids to differ, which is
+// anything reading a journal.Run and an abort.Report against each other:
+// alreadyGoneSplit keys one on the other.
+func channelWithID(id lnd.PendingChanID, state journal.ChannelState) journal.Channel {
+	c := channel(state, false)
+	c.PendingChanID = id
+	return c
+}
+
 func channel(state journal.ChannelState, withOutpoint bool) journal.Channel {
 	c := journal.Channel{
 		PendingChanID: lnd.PendingChanID{1, 2, 3},
@@ -582,8 +591,97 @@ func TestTheSignerNoteSaysOnlyWhatTheJournalHolds(t *testing.T) {
 	})
 }
 
+// #32 item 1's screen half. "It is not a failure" was asserted over every shim
+// that came back already gone, on the one path where it is a channel the
+// operator must go and look at with clock B running.
+//
+// abort.ErrNoShim establishes an absence and nothing else — LND holds no funding
+// intent under that id. What decides what the absence means is the journal's own
+// row, which is why this screen splits the shims rather than hedging all of
+// them: on the unverified side the run never reached psbt_verify, so LND never
+// created a channel; on the verified side psbt_verify completed the funding flow
+// and a channel that reached chan_pending consumed its own intent on the way.
+func TestAShimGoneOverAVerifiedChannelIsNotWavedAway(t *testing.T) {
+	verified := lnd.PendingChanID{1}
+	unverified := lnd.PendingChanID{2}
+	got := RecoveryOutcome(
+		run(journal.StateAborting,
+			channelWithID(verified, journal.ChanVerified),
+			channelWithID(unverified, journal.ChanShimRegistered)),
+		&abort.Report{Cancelled: []abort.ShimOutcome{
+			{ID: verified, AlreadyGone: true},
+			{ID: unverified, AlreadyGone: true},
+		}}, nil)
+
+	// The claims that were made and could not be: two unobserved causes, a
+	// verdict over the whole set, and "nothing is left" on a screen reporting a
+	// channel that is.
+	mustNotContain(t, got, "It is not a failure")
+	mustNotContain(t, got, "expected result of a second abort")
+	mustNotContain(t, got, "timed the reservation out first")
+	mustNotContain(t, got, "Nothing of this run is left on this node")
+
+	// What was read, on both sides.
+	mustContain(t, got, "LND holds no funding intent under")
+	mustContain(t, got, "nothing left to take apart")
+	mustContain(t, got, "this run had verified, and that is what to go and look at")
+	mustContain(t, got, "consumed its own intent")
+
+	// The next move, and the peer's key to match it against.
+	mustContain(t, got, "lncli pendingchannels")
+	mustContain(t, got, fakeKey)
+	mustContain(t, got, "2016 blocks")
+	mustContain(t, got, "stays marked as aborting")
+}
+
+// The other side on its own: with nothing verified there is nothing standing,
+// and the screen must still be able to say so. A hedge that fires on every
+// already-gone shim would be the same defect facing the other way.
+func TestAShimGoneOverAnUnverifiedChannelStillSaysNothingIsLeft(t *testing.T) {
+	id := lnd.PendingChanID{2}
+	got := RecoveryOutcome(
+		run(journal.StateAborting, channelWithID(id, journal.ChanShimRegistered)),
+		&abort.Report{Cancelled: []abort.ShimOutcome{{ID: id, AlreadyGone: true}}},
+		nil)
+
+	mustContain(t, got, "Nothing of this run is left on this node")
+	mustContain(t, got, "nothing left to take apart")
+	mustNotContain(t, got, "go and look at")
+	mustNotContain(t, got, "lncli pendingchannels")
+}
+
+// A shim the run has no row for is not the benign case. The zero ChannelState is
+// not ChanShimRegistered, and the branch it falls to has to be the one that
+// tells the operator to go and look — an unknown must not be the thing that gets
+// waved away. [[go-zero-value-passes-an-assertion]] is this the other way up.
+func TestAShimGoneForAChannelTheRunDoesNotKnowIsNotWavedAway(t *testing.T) {
+	got := RecoveryOutcome(run(journal.StateAborting),
+		&abort.Report{Cancelled: []abort.ShimOutcome{
+			{ID: lnd.PendingChanID{9}, AlreadyGone: true},
+		}}, nil)
+
+	mustContain(t, got, "go and look at")
+	mustNotContain(t, got, "Nothing of this run is left on this node")
+}
+
+// A heading with no bullets under it reads as a rendering fault, and Recovery
+// has already said nothing is standing two lines above. Reachable for any run
+// whose channels are all in terminal states, which ChanShimGone makes ordinary.
+func TestARunWithNothingLeftPrintsNoAbortPlan(t *testing.T) {
+	got := Recovery(run(journal.StateAborted,
+		channel(journal.ChanShimGone, false)), time.Now())
+
+	mustContain(t, got, "Nothing of this run is still standing in LND")
+	mustNotContain(t, got, "An abort of this run would")
+	// And the state itself now has a sentence rather than the default's bare
+	// restatement of the value.
+	mustContain(t, got, "left nothing behind")
+	mustNotContain(t, got, "The journal has this run as aborted.")
+}
+
 // halfAborted is the shape of a bad night: an abort that ran partway, so the
-// same run carries channels on both sides of it and in every state at once.
+// same run carries channels on both sides of it and in every state at once,
+// ChanShimGone included since #32 added it.
 //
 // It is the widest row RecoveryList can produce, and it is not a hypothetical —
 // RecoveryOutcome tells the operator to expect exactly this shape and to run the
@@ -593,7 +691,7 @@ func halfAborted(perState int) *journal.Run {
 	r.ID = "20260824-193012-9f3a1c"
 	for _, st := range []journal.ChannelState{
 		journal.ChanShimRegistered, journal.ChanVerified, journal.ChanPending,
-		journal.ChanAbandoned, journal.ChanCancelled,
+		journal.ChanAbandoned, journal.ChanCancelled, journal.ChanShimGone,
 	} {
 		for i := 0; i < perState; i++ {
 			r.Channels = append(r.Channels, channel(st, st == journal.ChanPending))
@@ -608,7 +706,7 @@ func halfAborted(perState int) *journal.Run {
 //
 // RecoveryList was missing from this map until it got a route in the web UI, and
 // it was ten columns over the pane when it was added: a half-aborted run carries
-// channels in all five states at once and the counts went out on one unwrapped
+// channels in all six states at once and the counts went out on one unwrapped
 // line. Same defect internal/plan shipped, for the same reason — the screen
 // nobody measured. Every screen this file renders is in here now, including the
 // list's empty and no-channel shapes.
@@ -651,6 +749,16 @@ func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 		"signing, every signer state": Recovery(withSigners(journal.StateSigning,
 			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,
 			journal.SignerDeclined, journal.SignerState("from-the-future")), time.Now()),
+		// #32 item 1's screen half: the widest of the already-gone paragraphs,
+		// with a full 66-character pubkey on a bullet under it.
+		"outcome, a shim gone over a verified channel": RecoveryOutcome(
+			run(journal.StateAborting,
+				channelWithID(lnd.PendingChanID{1}, journal.ChanVerified),
+				channelWithID(lnd.PendingChanID{2}, journal.ChanShimRegistered)),
+			&abort.Report{Cancelled: []abort.ShimOutcome{
+				{ID: lnd.PendingChanID{1}, AlreadyGone: true},
+				{ID: lnd.PendingChanID{2}, AlreadyGone: true},
+			}}, nil),
 		"outcome, partial": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
 			Failures: []error{
 				errWrap(abort.ErrBluntNotConfirmed),

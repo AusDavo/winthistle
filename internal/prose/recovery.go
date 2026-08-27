@@ -214,7 +214,17 @@ func recoveryPublished(r *journal.Run) string {
 }
 
 // recoveryPlan says exactly what the abort will do.
+//
+// Nothing at all when there is nothing to do, header included. A heading with no
+// bullets under it reads as a rendering fault, and Recovery has already said
+// "nothing of this run is still standing in LND" two lines above — this was
+// found by rendering the screens for a run whose channels were all in terminal
+// states, which ChanShimGone makes an ordinary shape rather than a rare one.
 func recoveryPlan(r *journal.Run, pending, shims []journal.Channel) string {
+	if len(pending) == 0 && len(shims) == 0 {
+		return ""
+	}
+
 	var b strings.Builder
 
 	b.WriteString("An abort of this run would:\n")
@@ -322,23 +332,35 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 		b.WriteString(fmt.Sprintf("  %-24s  %d\n", "of those, blunt flag", blunt))
 	}
 
-	cancelled, alreadyGone := 0, 0
+	cancelled := 0
 	for _, c := range rep.Cancelled {
-		if c.AlreadyGone {
-			alreadyGone++
-			continue
+		if !c.AlreadyGone {
+			cancelled++
 		}
-		cancelled++
 	}
+	unverified, standing := alreadyGoneSplit(r, rep)
+	alreadyGone := len(unverified) + len(standing)
 	b.WriteString(fmt.Sprintf("  %-24s  %d\n", "shims cancelled", cancelled))
 	if alreadyGone > 0 {
 		b.WriteString(fmt.Sprintf("  %-24s  %d\n", "shims already gone", alreadyGone))
 	}
 	b.WriteString("\n")
 	if rep.Clean() && err == nil {
-		b.WriteString(Para(
-			"Nothing of this run is left on this node. Nothing was broadcast, so " +
-				"nothing was spent."))
+		if len(standing) == 0 {
+			b.WriteString(Para(
+				"Nothing of this run is left on this node. Nothing was broadcast, " +
+					"so nothing was spent."))
+		} else {
+			// #32 item 1's screen half. Every step succeeded, so this used to be
+			// the sentence a crashed-process recovery ended on — over a channel
+			// that is very likely open on the peer with clock B running. What
+			// this frame has is the abort's own report and the journal row as it
+			// was before the abort ran; neither says nothing is left.
+			b.WriteString(Para(
+				"Nothing was broadcast, so nothing was spent — and this run is " +
+					"not finished on this node. The paragraph below says which " +
+					"part of it is not, and it is the part to act on."))
+		}
 		if len(rep.Abandoned) > 0 {
 			b.WriteString("\n")
 			// This is #27's claim one function over, and it was found by the
@@ -356,13 +378,64 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 				len(rep.Abandoned), Plural(len(rep.Abandoned)),
 				WasWere(len(rep.Abandoned)))))
 		}
-		if alreadyGone > 0 {
+		// The two halves of "already gone" are printed apart, because the
+		// absence means opposite things on either side of psbt_verify and the
+		// old single paragraph named two causes it had not observed and called
+		// the whole set not-a-failure. #32 item 1.
+		if len(unverified) > 0 {
 			b.WriteString("\n")
 			b.WriteString(Para(fmt.Sprintf(
-				"%d shim%s already gone before this ran. That is the expected "+
-					"result of a second abort over the same run, and of a peer that "+
-					"timed the reservation out first. It is not a failure.",
-				alreadyGone, Plural(alreadyGone))))
+				"%d shim%s already gone with nothing behind %s. What the abort read "+
+					"is an absence — LND holds no funding intent under %s pending "+
+					"channel id%s — and on this side of psbt_verify that settles it: "+
+					"this run never verified %s, and psbt_verify is what starts "+
+					"LND's funding flow, so LND created no channel here and there is "+
+					"nothing left to take apart.",
+				len(unverified), Plural(len(unverified)), themIt(len(unverified)),
+				theirIts(len(unverified)), Plural(len(unverified)),
+				themIt(len(unverified)))))
+		}
+		if len(standing) > 0 {
+			b.WriteString("\n")
+			b.WriteString(Para(fmt.Sprintf(
+				"%d shim%s already gone over %s this run had verified, and that is "+
+					"what to go and look at. What the abort read is the same absence "+
+					"— LND holds no funding intent under %s pending channel id%s — "+
+					"but psbt_verify carries skip_finalize, so verifying a channel "+
+					"completes LND's funding flow rather than parking it. A channel "+
+					"that went on to reach chan_pending consumed its own intent on "+
+					"the way, and looks exactly like this from here. This journal "+
+					"never recorded the outpoint %s reached, so nothing in this tool "+
+					"can abandon %s.",
+				len(standing), Plural(len(standing)), aChannel(len(standing)),
+				theirIts(len(standing)), Plural(len(standing)),
+				themIt(len(standing)), themIt(len(standing)))))
+			b.WriteString("\n")
+			// The full pubkey, not shortKey's sixteen characters: this is the
+			// string an operator matches against remote_node_pub in lncli
+			// pendingchannels, so it has to be greppable rather than merely
+			// recognisable.
+			for _, c := range standing {
+				b.WriteString(Bullet(fmt.Sprintf("%s — %s",
+					orNone(c.PeerPubkey), Sats(c.AmountSat))))
+			}
+			b.WriteString("\n")
+			b.WriteString(Para(fmt.Sprintf(
+				"Run lncli pendingchannels and look for the peer%s above. A channel "+
+					"that is there is one the peer is holding too, and it goes on "+
+					"holding one of its own pending-channel slots until 2016 blocks "+
+					"pass from the funding height. Abandon it by the channel point "+
+					"that listing gives you: lncli abandonchannel --channel_point=… "+
+					"--i_know_what_i_am_doing. Nothing was broadcast, so that "+
+					"outpoint will never exist and there is no force-close being "+
+					"given up.",
+				Plural(len(standing)))))
+			b.WriteString("\n")
+			b.WriteString(Para(
+				"This run stays marked as aborting and goes on appearing in " +
+					"winthistle recover. Nothing this program can read will ever " +
+					"tell it otherwise: the row says verified, and asking LND for " +
+					"the shim again returns the same absence it returned this time."))
 		}
 		return b.String()
 	}
@@ -478,6 +551,15 @@ func stateMeans(s journal.State) string {
 			"nothing, because each of these channels was already recoverable before " +
 			"it was asked. Taking it apart costs what an armed run costs: each " +
 			"channel has to be abandoned, and LND wants its blunt flag for each one."
+	case journal.StateAborted:
+		// It had no arm and fell to the default's bare "the journal has this run
+		// as aborted", which was tolerable while the state meant only that
+		// nothing failed. Since #32 it means more than that and the sentence can
+		// say what was established.
+		return "An abort of this run completed and left nothing behind, and both " +
+			"halves of that are read off the rows below rather than assumed: no " +
+			"step of the abort failed, and nothing in this run is still a channel " +
+			"to abandon or a shim to cancel. What is here is a record, not a job."
 	case journal.StateAborting:
 		return "An abort of this run is in progress, or one was interrupted " +
 			"partway. That state is written before the first call it describes, so " +
@@ -506,7 +588,7 @@ func stateMeans(s journal.State) string {
 // which side of the abort.
 //
 // It has to wrap at all because a run in aborting with a partial abort behind it
-// can carry channels in all five states at once — the normal shape of a bad
+// can carry channels in all six states at once — the normal shape of a bad
 // night, and the shape RecoveryOutcome tells the operator to expect. Even at one
 // channel per state that came out at 83 columns against a 78-column pane, and on
 // a batch of a few dozen at 88.
@@ -518,7 +600,7 @@ func channelBreakdown(r *journal.Run, indent string) string {
 	var parts []string
 	for _, st := range []journal.ChannelState{
 		journal.ChanShimRegistered, journal.ChanVerified, journal.ChanPending,
-		journal.ChanAbandoned, journal.ChanCancelled,
+		journal.ChanAbandoned, journal.ChanCancelled, journal.ChanShimGone,
 	} {
 		if n := counts[st]; n > 0 {
 			parts = append(parts, fmt.Sprintf("%d %s", n, st))
@@ -588,7 +670,46 @@ func channelTable(r *journal.Run) string {
 	return b.String()
 }
 
+// alreadyGoneSplit divides the shims that came back already gone by how far this
+// journal had got with each channel, which is the one thing that decides what
+// the absence means.
+//
+// r is the run as it was read *before* the abort ran — both callers of
+// RecoveryOutcome load it and then hand that same load in — so these are the
+// states the abort found, which is what this screen is reporting on. A channel
+// the run does not know about, and a nil run, fall to the standing side rather
+// than the benign one: the zero ChannelState is not ChanShimRegistered, and an
+// unknown must not be the one that gets waved away.
+func alreadyGoneSplit(r *journal.Run, rep *abort.Report) (unverified, standing []journal.Channel) {
+	known := map[string]journal.Channel{}
+	if r != nil {
+		for _, c := range r.Channels {
+			known[c.PendingChanID.String()] = c
+		}
+	}
+	for _, o := range rep.Cancelled {
+		if !o.AlreadyGone {
+			continue
+		}
+		c, ok := known[o.ID.String()]
+		if !ok {
+			c = journal.Channel{PendingChanID: o.ID}
+		}
+		if c.State == journal.ChanShimRegistered {
+			unverified = append(unverified, c)
+			continue
+		}
+		standing = append(standing, c)
+	}
+	return unverified, standing
+}
+
 // split divides the run's channels the way the abort divides them.
+//
+// ChanShimGone is in neither list, and that is the point of the state: it is the
+// one shim outcome the journal can call terminal, so there is nothing here for a
+// recovery to do about it. ChanCancelled and ChanAbandoned are out for the same
+// reason.
 func split(r *journal.Run) (pending, shims []journal.Channel) {
 	for _, c := range r.Channels {
 		switch c.State {
@@ -700,6 +821,32 @@ func andList(items []string) string {
 
 func mayBePublic(r *journal.Run) bool {
 	return r.State == journal.StatePublishing || r.State == journal.StatePublished
+}
+
+// themIt and theirIts are theyLower's object and possessive, for the same
+// reason: a count of one and a count of three want different words and the
+// sentence around them should not have to be written twice.
+func themIt(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
+// aChannel keeps "over a channel this run had verified" and "over channels this
+// run had verified" one sentence rather than two.
+func aChannel(n int) string {
+	if n == 1 {
+		return "a channel"
+	}
+	return "channels"
+}
+
+func theirIts(n int) string {
+	if n == 1 {
+		return "its"
+	}
+	return "their"
 }
 
 // idsWhere names the runs a warning is about, rather than saying "at least one
