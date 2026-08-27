@@ -663,25 +663,59 @@ row to find what the previous one's vocabulary could not see.** Denominator:
 `fmt.Fprint*` and 15 `prose` calls plus 41 operator-reaching errors in `run`,
 and 50 errors in `arm`. All five verified in source, and the LND half of the
 sharpest one re-read at v0.21.2-beta. Filed 2026-08-27 as **#39, #40, #41, #42
-and #43**; none is fixed, and each is a decision rather than a typo.
+and #43**; **#39 is closed and the other four remain**, and each is a decision
+rather than a typo.
 
-- **#39 · `reportArmed` puts the commitment signature on the peer, and says the
-  funds come back without this node.** The sharpest, because it is the screen
-  the operator reads with one call left and because **the same function
-  contradicts it eighteen lines later**. `funderProcessFundingSigned` parses
-  `commitSig` from **the peer's `funding_signed`**
-  (`msg.CommitSig.ToSignature()`, `:2805`) and hands it to
-  `CompleteReservation(nil, commitSig)` — so **this node** stored **the
-  peer's** signature, which is what `CLAUDE.md`'s own I-1 citation and
-  `arm.go:756-757` both say. The screen has the custodian inverted, and *"even
-  if this node vanished"* is denied by the backup paragraph below it: *"lives
-  in this node's channel database … the backup plus the peer's data-loss
-  protection is what recovers them"*. **The safety conclusion is not in
-  question** — recoverable by force-close is I-1 and is executed by a test. The
-  clause an operator acts on is the one that is wrong, at the moment the copy
-  is telling them to store the backup off the box. **And nothing renders this
-  screen and asserts on it**, which is #24's `checkJournal` finding in a third
-  package. - **#40 · `arm.Verify`'s doc still describes the ordering PR #35
+- ~~**#39 · `reportArmed` puts the commitment signature on the peer, and says
+  the funds come back without this node.**~~ **Done, 2026-08-27.** The first
+  instance of the rule found in copy describing **a mechanism inside LND's own
+  code**, so getting it right meant reading LND rather than reading this build.
+  `funderProcessFundingSigned` parses `commitSig` from **the peer's
+  `funding_signed`** (`msg.CommitSig.ToSignature()`, `:2805`) and hands it to
+  `CompleteReservation(nil, commitSig)` at `:2813`, before `chan_pending` at
+  `:2897` — so **this node** stored **the peer's** signature. The screen had the
+  custodian inverted and **the same function denied its second clause eighteen
+  lines later**, in the backup paragraph.
+
+  **The screen says `"this node has stored the peer's commitment signature"`
+  now**, one clause, copying `arm.go:756-757` — which is the model rather than
+  the thing to edit, and `internal/arm` did not change. **Saying nothing about
+  custody was the other available answer and was rejected**: the backup
+  paragraph depends on the custody fact, so a screen that never states it leaves
+  *"already recoverable"* as a bare assertion and makes the paragraph below it a
+  non-sequitur. *"even if this node vanished"* is **deleted rather than
+  rescoped** — it is the clause an operator acts on and it says the backup is
+  optional at the moment the copy is telling them to store it off the box.
+  **I-1 did not move**: *"a force-close would get the funds back"* stands.
+
+  **Decision 2 was the shape question and the fix to decision 1 dissolved it.**
+  The two paragraphs stay apart. The backup one is **conditional** — it renders
+  only when the export carried single-channel backups — and #21's mistake is a
+  claim whose correction sits on a branch; the answer is to make the
+  unconditional paragraph true standing alone, not to merge them. **Whether that
+  branch can be false is now stated rather than assumed**, in `reportArmed`'s
+  doc: `armWindow` guards `MultiChanBackup` and that guard **does not reach the
+  singles this screen keys on**, because LND's `createBackupSnapshot` packs the
+  multi from the same slice and `Multi.PackToWriter` writes a version byte and a
+  count for zero backups. In practice it is true — every channel here reached
+  `chan_pending`, and `FetchStaticChanBackups` reads pending-open channels too —
+  and in practice is not the same as checked.
+
+  **The control is the fix**, because `reportArmed` was printed into two live
+  transcripts and asserted on by neither, which is #24's `checkJournal` finding
+  in a third package. `report_internal_test.go` is **node-free** — every field
+  `reportArmed` reads is exported or in-package — keys on the *shape* of the old
+  claim rather than on a bare word, renders both sides of the conditional, and
+  **measures the pane, which nothing had done for this screen**. Five assertions
+  fail against the old copy.
+
+  **`README.md` and `docs/design.html` were checked and are right**, which is
+  why neither moved and why the page was not republished. `README.md:165`
+  (*"has stored the peer's commitment signature"*), `:209` and `:345`, and
+  `docs/design.html:686`, `:726` and `:748` all say what LND does; **the screen
+  never matched the citation the rest of the repository already carried.** The
+  one site of *"even if this node vanished"* in the tree was this one.
+- **#40 · `arm.Verify`'s doc still describes the ordering PR #35
   reversed.** A hole left **inside #35's own slice**, at the other end of the
   write it moved: the doc says *"each success is journalled as it happens"* and
   *"a channel recorded as verified is one LND has committed an outpoint for"*,
@@ -719,6 +753,101 @@ and #43**; none is fixed, and each is a decision rather than a typo.
   *not* name — empty and staying empty — is the one that reaches the branch.
   **Step 4 is inside clock A, where waiting is the one thing that cannot
   help.**
+
+**PR #46's audit was pointed one layer out, and it found more than any sweep so
+far — six of them safety-adjacent and one with a direct operator cost.** The
+question was not the printed lines, which PR #36 had turned: it was **every place
+this build describes a mechanism inside LND, Bitcoin Core or a peer's node**,
+checked against source at v0.21.2-beta, with **doc comments as the unturned
+ground**. Denominator: **8,964 comment lines across 105+ files**, ~220 sites
+making checkable external claims, 153 verified correct, **~50 unverifiable
+because Bitcoin Core is not vendored**. Five findings were re-read in source
+before filing and are **#47, #48, #49, #50 and #51**; six smaller ones plus three
+comments stale against this build are batched as **#52**.
+
+**The dominant cause is the version bump, and that is the lesson.** `CLAUDE.md`'s
+standing instruction — *"On the next bump, re-cite before assuming"* — caught
+roughly thirty line numbers and missed **a new proto field, two constants and a
+dependency's formatting change**. **Line numbers move loudly; values and new
+fields do not.** Add that to the bump procedure.
+
+- **#47 · a peer's `minimum_depth` is readable, and the build says five times in
+  printed copy that it is not.** `PendingChannels`' `confirmations_until_active`
+  (`lightning.proto:2812`) is filled from `calcRemainingConfs`, which returns
+  `pendingChan.NumConfsRequired` verbatim while `ConfirmationHeight == 0`
+  (`rpcserver.go:4015-4019`); for an initiator that field is the peer's
+  `min_accept_depth`, set in `funderProcessAcceptChannel`
+  (`funding/manager.go:2129-2142`). **`PendingChannels` is already registered,
+  already called on the batch path and already in the baked macaroon**, so the
+  reading costs no call site, no registry entry and no permission. **It changes
+  #28's answer** — that issue's two options were *weaken the page* or *build it
+  from `GetTransactions`, which is a new call site, a registry entry and a
+  permission* — and it falsifies the memory that says no RPC reports it.
+- **#48 · `policy.MinTimeLockDelta` is 18 and `routing.MinCLTVDelta` is 24.** The
+  one finding with a direct operator cost: a delta of 18–23 passes `Validate()`,
+  arms, publishes, and is then refused **for the whole batch at once** by
+  `validateCltvDeltaBounds` (`config.go:287`) in the RPC handler — a gRPC error,
+  not a `failed_updates` entry — leaving every channel at LND's 1000 msat / 1 ppm
+  defaults, which is issue #6's cost exactly. **And
+  `TestPolicyValidateMatchesLNDsBounds` keys both arms on our own constant**, so
+  it can only pass: a third shape of the check-that-cannot-fail, self-referential
+  rather than stale.
+- **#49 · `INVALID_PARAMETER` is described as the one refusal that is not about
+  the channel, and it is the one that is entirely about the channel.** Both sites
+  in `routing/localchans/manager.go` (`:122`, `:273`) are `updateEdge` failing,
+  and `updateEdge` fetches the channel and measures against its **negotiated**
+  `LocalChanCfg` bounds (`:448-467`). The CLTV delta and inbound fees are checked
+  in the RPC handler and produce **no `failed_updates` entry at all**. The
+  `Terminal()` conclusion probably survives on a better argument — negotiated
+  bounds do not change — but **this sentence is the whole justification recorded
+  for issue #6's fix**, in the code and in this file.
+- **#50 · `handleFundingOpen` does not exist at v0.21.2-beta, and eight sites
+  cite it, two of them printed.** **This is `handleFundingSigned` again**, on the
+  fundee side, never looked for. The real name is `fundeeProcessOpenChannel`
+  (`funding/manager.go:1438`). `peers.go:27` is the sharpest, because it says
+  *"Reading handleFundingOpen at v0.21.2-beta"*. The `--probe` reasoning it
+  supports was proved against live peers and is not in question.
+- **#51 · `internal/reserve`'s package doc reasons from `psbt_finalize`**, which
+  this build removed — *"`CompleteReservation` runs … after `psbt_finalize`"* —
+  and the conclusion *"every verify in a batch sees the same pre-batch count"*
+  rests on it. Under the inversion `skip_finalize` at **verify** completes the
+  flow, so an earlier channel may be in the channel database before a later
+  channel's verify. **Not established: whether the conclusion still holds.** That
+  is a measurement on the harness at *n* = 3, and the cost if it does not is a
+  refused verify **inside clock A**. Second finding in two slices at the far end
+  of something the inversion moved; #40 is the other.
+- **#52 · six smaller citations plus three comments stale against this build.**
+  `peers.go:459` attributes an error to `rpcserver.go` when it is `server.go:174`
+  and denies a type that exists (behaviour right — the type does not cross gRPC);
+  `btcutil.Amount.String()` re-adds trailing zeros, so **no fixture uses what LND
+  actually sends**; a force-close broadcast ordering stated backwards; `chanfunding`
+  where it is `lnwallet`; and `dev`-tagged where the switch is `integration`-tagged
+  — **a trap, because LND has both tags driving different predicates**. Plus two
+  test comments still saying `Method.CallSites` is 2 and one still calling
+  `testmempoolaccept` the pre-flight.
+
+**The other half of the audit came back clean for the sixth sweep running**: no
+test asserts on a copy string, check name or map key the build no longer emits.
+Denominator: **2,511 comment-free, concatenation-folded literals across 56
+non-test files**, against **260 assertion call sites plus 43 comparison-position
+literals** across 51 test files; 336 assertion-position literals by the
+field-marker walk, **100 misses adjudicated by hand, zero stale**. All four
+literal-keyed map lookups checked and every key live. **Trap (iv) answered
+cleanly for the third sweep**: 16 assertion-position literals match production
+source only inside comments, and every one is a documented negative assertion, a
+runtime-formatted value or a fixture — **zero positive assertions matching only a
+doc comment**. One note, verified rather than taken: `doctor_test.go:240` builds
+`Check{Name: "the coins"}`, a name item 5 deleted, but it is **fixture position**
+— the test asserts on `r.OK()` and `r.Checks[0].Status` — so it cannot go quiet.
+
+**And the sweep of this slice's own screen filed #45**: the build's I-1
+shorthand, *"recoverable by force-close"*, is printed at **five sites, three of
+which say nothing has been broadcast in the same sentence**. `CLAUDE.md`'s own
+measurement is that force-closing a pending channel is not refused and broadcasts
+a commitment whose parent exists nowhere. No funds are at risk and the app cannot
+close a channel, but it is the one action this file names as the destructive
+ten-minute instinct, and **no screen says otherwise**. Two-sided across five
+sites, so filed rather than folded in.
 
 **And `internal/arm` prints nothing at all** — no `Fprint`, no `prose`, no
 writer, no logger, across 1,021 lines. Its whole operator-facing surface is
