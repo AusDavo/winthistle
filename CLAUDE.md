@@ -23,7 +23,7 @@ Direction and rationale: `docs/replan-2026-08.md`. Full spec: `docs/design.html`
 1  pre-flight            peers reachable? anchor reserve sufficient?    [LND only]
 2  open n streams        psbt_shim + no_publish              ← clock A starts
 3  print the plan        peer · alias · address · amount · policy
-4  build in Sparrow      enter the recipients, pick coins and fee, Save PSBT
+4  build in Sparrow      load the recipients CSV, pick coins and fee, Save PSBT
 5  verify + psbt_verify  outputs match the plan; skip_finalize; txid pinned
 6  n × chan_pending      ← GATE OPEN. clock A stops, clock B starts
 7  sign in Sparrow       no ten-minute pressure
@@ -55,8 +55,9 @@ exists: `winthistle run`, `doctor` and `recover` work against the cluster in
 **inverted** sequence — `skip_finalize` at verify, the *n* receipts before
 anything is signed, one publish — and the I-1 gate is observed at *n* = 3 with
 nothing signed when it opens. `run` **builds nothing and signs nothing**: it
-prints the recipients, reads the unsigned transaction back from `--psbt FILE`,
-and reads the signed one from `FILE-signed.psbt` or `FILE-signed.txn`. `internal/combine` has twenty
+prints the recipients, writes them to `FILE-recipients.csv`, reads the unsigned
+transaction back from `--psbt FILE`, and reads the signed one from
+`FILE-signed.psbt` or `FILE-signed.txn`. `internal/combine` has twenty
 adversarial tests on inbound PSBTs. `internal/plan` has the batch verifier. None
 of that is broken, and none of it should be described as broken.
 
@@ -178,6 +179,42 @@ built" for the account; the short version:
   as built". **All six items are done, and the mainnet cold probe passed on
   2026-08-26** — run `20260826-043441-9a8f28`, two channels, both to
   `chan_pending` with nothing signed.
+
+**The application writes a file now, and "it writes none" was a stated
+property.** Issue #15, landed 2026-08-27: `FileWallet` writes
+`FILE-recipients.csv` at step 4 — address, amount, label, the three columns
+Sparrow's *Send to Many → Load CSV* reads — so the operator loads the recipients
+instead of typing *n* addresses inside clock A. `docs/design.html` said *"the app
+writes none and reads two"* and no longer does. **What replaced it is narrower
+and is the rule to hold: the app writes nothing it later trusts.** The CSV
+carries no transaction and no signature, it is never read back, nothing
+downstream depends on it, and a failure to write it is reported and not returned
+— a convenience that can end a batch inside clock A is not one. `os.WriteFile`
+appears in exactly one place in `internal/`, and `run.writeRecipients` is it.
+
+- **BTC, eight places, no separator, label quoted, header row.** Settled by
+  measurement against Sparrow 2.5.3, not by preference — the reasoning is in
+  `recipientsCSV`'s doc comment and in issue #15's comment. The short version:
+  Sparrow reads the amount in whatever unit its preference is set to and we
+  cannot see which, so one reading is always wrong; sats-in-BTC-mode is silently
+  10⁸ too large, BTC-in-sats-mode drops every row and names its own cause. **Do
+  not add a `--csv-unit` flag** — it would reopen the question the measurement
+  closed.
+- **The printed table stays, and is not the CSV's preview.** The table is the
+  *attribution*, which is job one; `regtestenv.RecipientsIn` scrapes it and is
+  the only test that it is legible. Both renderings come off one `[]Recipient` in
+  one call, and `TestTheFilePathDrivesTheWholeSequence` asserts they agree
+  against a live batch.
+- **The path is derived from `--psbt` and refused if it exists**, like
+  `SignedPath` and like `Unsigned`. Refused rather than overwritten, which is
+  where it parts from `SignedPaths`: this is a name invented out of the
+  operator's stem in the operator's directory, and truncating a file we did not
+  create is not a thing to do silently. A stale one was written for another
+  batch's addresses.
+- **Step 5 is still the whole check**, and the copy says so in those words. A
+  10⁸ amount is `WrongAmount`, a dropped row is `MissingOutput`. Nothing about
+  the trust boundary moved, and no copy may imply the CSV is *why* the addresses
+  are right.
 
 **Three things item 5 decided, which the code now depends on:**
 

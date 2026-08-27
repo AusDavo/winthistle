@@ -14,8 +14,8 @@
 //     for. psbt_verify finds its own funding output and stops — it never asserts
 //     that its output is the only one, which is what lets n channels share a
 //     transaction — so an output nobody named passes all n of LND's checks. Ours
-//     runs first, which is why a mis-paste at step 4 costs a redo inside clock A
-//     rather than a channel.
+//     runs first, which is why a wrong output at step 4 costs a redo inside clock
+//     A rather than a channel.
 //   - peers.ReadyToArm, before arm.Open. An accepted shim probe costs one of
 //     that peer's pending-channel slots for about eleven minutes, and
 //     shim_cancel does not give it back, so a run that probed and then armed
@@ -393,11 +393,16 @@ func waitForPeers(ctx context.Context, d Deps, probes []peers.Probe) error {
 //
 // Steps 2 to 6 are the only part under the peers' ten minutes, and the only step
 // inside them that takes any time at all is step 4 — the operator in Sparrow,
-// pasting n addresses in and choosing coins. Everything else is local: the
+// getting n recipients in and choosing coins. Everything else is local: the
 // verifier is arithmetic, psbt_verify is one RPC per stream, and the receipts
 // arrived in 0.55 s at n = 2 on the harness. So a batch that blows clock A blows
 // it in a wallet's Send tab, before LND has been shown anything, and the cost is
 // n shim cancels.
+//
+// The first half of that step is smaller than it was. FileWallet writes the
+// recipients as a CSV Sparrow's Send to Many loads in one action, so what is left
+// inside the clock is choosing coins and a fee. It does not make the budget
+// generous — it makes the part of it that scales with n stop scaling.
 func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result) (
 	*arm.Armed, *combine.Finalized, error) {
 
@@ -430,13 +435,17 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	}
 
 	// Step 3 and step 4: the recipients, and then the operator in their wallet.
-	// The addresses are printed in full because they are copy-pasted from the
-	// terminal, never typed, and a mis-paste is what plan.Verify is for.
+	// The addresses are printed in full and never abbreviated, because this table
+	// is the attribution — which peer gets which output, at what amount — and it
+	// is the last screen on which that is legible to a human. How they reach the
+	// wallet is the transport's business: FileWallet writes them as a CSV as well,
+	// and prints where. Whichever route they take, an output nobody named is what
+	// plan.Verify is for.
 	section(d.Out, "Step 4 — build the transaction in your wallet")
 	pay := recipientsOf(streams, p)
 	fmt.Fprint(d.Out, recipientTable(pay))
-	fmt.Fprint(d.Out, prose.Para("Enter these as recipients, choose your coins and "+
-		"the fee, and save the PSBT. Do not sign it yet: nothing is recoverable "+
+	fmt.Fprint(d.Out, prose.Para("Pay exactly these recipients, choose your coins "+
+		"and the fee, and save the PSBT. Do not sign it yet: nothing is recoverable "+
 		"until step 6, so a transaction signed and broadcast before then would "+
 		"confirm one 2-of-2 output per channel with no channel behind any of them."))
 
@@ -474,8 +483,8 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 
 	// Ours first. LND's psbt_verify finds its own funding output and stops, so
 	// an output nobody named passes all n of its checks — and it pins the funding
-	// outpoint while it is at it, so a mis-paste caught here costs a redo and one
-	// caught there costs a channel.
+	// outpoint while it is at it, so a wrong output caught here costs a redo and
+	// one caught there costs a channel.
 	section(d.Out, "Step 5 — does it match the plan?")
 	v, err := batchPlan.Verify(unsigned)
 	if err != nil {

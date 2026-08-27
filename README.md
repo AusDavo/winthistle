@@ -46,7 +46,7 @@ there. The commands are `run`, `doctor` and `recover`, plus
 1  pre-flight            peers reachable? anchor reserve sufficient?
 2  open n streams        psbt_shim + no_publish              ← clock A starts
 3  print the plan        peer · alias · address · amount · policy
-4  build in Sparrow      enter the recipients, pick coins and fee, Save PSBT
+4  build in Sparrow      load the recipients CSV, pick coins and fee, Save PSBT
 5  verify + psbt_verify  outputs match the plan; skip_finalize; txid pinned
 6  n × chan_pending      ← GATE OPEN. clock A stops, clock B starts
 7  sign in Sparrow       no ten-minute pressure
@@ -224,6 +224,11 @@ free. Winthistle's own work across steps 2 to 6 takes about a second; the ten
 minutes are spent at step 4, by you, in Sparrow. That is the whole budget and it
 is the only thing in it.
 
+Step 4 got smaller. Winthistle writes the recipients as a CSV that Sparrow's
+**Send to Many → Load CSV** reads in one action, so what is left inside the clock
+is choosing coins and a fee. That does not make the budget generous; it makes the
+part of it that grew with *n* stop growing.
+
 **Clock B — about 2016 blocks, roughly two weeks, covering step 6 to
 confirmation.** After it, the **peer** marks the channel cancelled and forgets
 it; your node never does — `waitForTimeout` arms only for the responder.
@@ -245,16 +250,45 @@ Step 4 — build the transaction in your wallet
   channel 2  acinq             250,000 sat
       bcrt1qhtl7hc8ckygznefeyjd37je92vspksmqg9dg7rrnsa0ls003c17bqhea9y
 
-Enter these as recipients, choose your coins and the fee,
+Pay exactly these recipients, choose your coins and the fee,
 and save the PSBT. Do not sign it yet.
 
+  - You do not have to type any of that. Sparrow's Send to Many →
+    Load CSV reads this file, which has just been written with exactly
+    the recipients above — this saves you typing; step 5 is still
+    what checks it:
+      /home/you/batch-recipients.csv
+  - The amounts in it are BTC, not sats, and the file cannot say so
+    for itself — set Sparrow's unit to BTC before you load it. In
+    sats mode it finds no recipients at all and tells you why, which
+    is the failure worth having: sats read in BTC mode would load a
+    hundred million times too large without a word.
   - Save it here, unsigned. Binary or base64, either is read:
       /home/you/batch.psbt
 ```
 
-Addresses get a line of their own. A P2WSH funding address is 62 characters, and
-a wrapped one is a string you would have to reassemble by hand at the step where
-a wrong character costs a channel.
+**The table stays, and it is not the CSV's preview.** The file is how the
+recipients get into Sparrow; the table is the *attribution* — which peer gets
+which output, at what amount — and it is the only screen on which that is legible
+to you. Addresses get a line of their own there. A P2WSH funding address is 62
+characters, and a wrapped one is a string you would have to reassemble by hand.
+
+**The CSV is a convenience and is scoped like one.** It removes the typing; it
+removes nothing from step 5, which is still the whole check on what comes back.
+Every way a CSV can go wrong is a way a paste could go wrong and is caught in the
+same place: an amount 10⁸ out is `WrongAmount`, a row Sparrow dropped is
+`MissingOutput`. Nothing about the trust boundary moved.
+
+**Why BTC and not sats.** The amount column carries no unit, and Sparrow reads it
+in whichever unit your preference is set to — a setting Winthistle cannot see. One
+of the two readings is always going to be wrong; the question is which wrong you
+would rather have. Sat integers loaded in BTC mode become a hundred million times
+too large, silently, and only surface much later as insufficient funds at coin
+selection. BTC decimals loaded in sats mode fail to parse, every row drops, and
+Sparrow says *"No recipients found. Use a CSV file with three columns, and ensure
+amounts are in sats."* The second names its own cause. So the file is BTC, to
+eight places, with no grouping separator anywhere and the label quoted — measured
+against Sparrow 2.5.3, not inferred.
 
 **"Do not sign it yet" is enforced, not advised.** Step 4 is the one moment left
 where the gate can be defeated from outside: you would be holding a broadcastable
@@ -262,11 +296,12 @@ funding transaction with nothing yet recoverable, and your wallet's Broadcast
 button is two clicks from its Sign button. A packet with any signature on it is
 refused here, and the cost is building it again inside clock A.
 
-**The signed file's name is derived, not asked for.** `--psbt FILE` is where you
-save the unsigned transaction; the signed one goes to `FILE-signed.psbt` or
-`FILE-signed.txn` beside it. Because the second name comes from the first rather
-than from you, the two cannot be the same file, and the signed transaction can
-never overwrite the one it is about to be compared against.
+**The other names are derived, not asked for.** `--psbt FILE` is where you save
+the unsigned transaction; the signed one goes to `FILE-signed.psbt` or
+`FILE-signed.txn` beside it, and the recipients go to `FILE-recipients.csv`.
+Because those names come from the first rather than from you, none of them can be
+the same file, and the signed transaction can never overwrite the one it is about
+to be compared against.
 
 **Step 7 takes a signed PSBT or a raw transaction**, hex or binary — whichever
 your wallet hands you, including the hex from Sparrow's *View Final
@@ -318,13 +353,14 @@ Winthistle knows what the transaction *means*, so it can check both directions:
 
 - **Outbound**, before you build anything: it prints the batch plan — every
   funding address with the peer it funds, the exact amount, and the forwarding
-  policy that channel will carry. You paste those addresses into Sparrow as
-  recipients. You never type one.
+  policy that channel will carry. Those addresses reach Sparrow as a generated
+  CSV, or by copy-paste from the terminal. You never type one.
 - **Inbound**, before LND is asked to commit: it refuses a transaction that does
   not match the plan you approved — an output the plan does not name, a missing
   or duplicated output, a wrong amount, a legacy input, an input spent twice, an
-  input whose UTXO does not belong to it. A mis-paste is caught here, before
-  anything is pinned, so it costs a redo rather than a channel.
+  input whose UTXO does not belong to it. An output that is not the one the plan
+  named is caught here, before anything is pinned, so it costs a redo rather than
+  a channel — however it got there.
 
 **The policy in that plan** is the forwarding policy the channel will route at:
 base fee, fee rate and CLTV delta. It comes from the `[policy]` block of your
@@ -443,8 +479,9 @@ them.
 
 **And not something that should have been built into Sparrow instead.** The
 objection is fair — a Sparrow that held the `psbt_shim` conversation itself would
-have the peer/address/amount mapping by construction, and would not need you to
-paste anything. Four reasons it is a separate program anyway:
+have the peer/address/amount mapping by construction, and would not need a file
+handed between two programs at all. Four reasons it is a separate program
+anyway:
 
 - **The safety property is read out of LND's internals, and LND moves.** That
   `chan_pending` follows `CompleteReservation` is behaviour observed in
@@ -460,10 +497,11 @@ paste anything. Four reasons it is a separate program anyway:
   is worth roughly what the effort of checking it costs. Inside a wallet it would
   be a feature among hundreds.
 - **Two programs that must agree is a stronger check than one program agreeing
-  with itself.** Winthistle prints addresses it derived from LND; you paste them
-  into a wallet that derived nothing; the wallet's output is checked back against
-  the plan. The paste is the seam, and the seam is where a mistake becomes
-  visible.
+  with itself.** Winthistle prints addresses it derived from LND and writes them
+  to a file; you load them into a wallet that derived nothing; the wallet's
+  output is checked back against the plan. The hand-off is the seam, and the seam
+  is where a mistake becomes visible. Generating the file narrows how a mistake
+  gets in; it does not move where one is caught.
 
 **What integration would not fix**, and this is worth conceding plainly: it would
 not improve verification on a hardware device. Coldcard and Jade would still show
@@ -487,7 +525,8 @@ and in the setup this was built and probed against, two of the three do. Nothing
 here is an air gap and nothing here should be read as one.
 
 **What Winthistle defends against is error, not an adversary.** A swapped output,
-a mis-pasted address, a wrong amount, a batch that reaches the network with a
+a wrong address however it arrived, a wrong amount, a batch that reaches the
+network with a
 channel still unrecoverable, a signer that moved the txid: those are the failures
 it refuses, and they are the ones that actually take channels. An attacker who
 controls the box you are working on has your signing wallet and your node. They
@@ -519,9 +558,11 @@ a security one, and it is the reason there is no fee estimate.
 **Two smaller things that are checks rather than claims.** `--psbt` refuses a
 path that already exists, because the funding addresses did not exist before the
 run — LND issues them at step 2 — so a file predating the run cannot be this
-batch's transaction. And the signed file's name is derived from the unsigned
-one's, so a wallet cannot be talked into overwriting the packet it is about to be
-compared against.
+batch's transaction. The generated `FILE-recipients.csv` is refused on the same
+rule turned around: one already on disk was written for some other batch's
+addresses, and loading it would build a transaction paying them. And the signed
+file's name is derived from the unsigned one's, so a wallet cannot be talked into
+overwriting the packet it is about to be compared against.
 
 ## What you need
 
@@ -541,8 +582,10 @@ coins on-chain, sign a message, sign a transaction or spend the node's own coins
 way of `CheckMacaroonPermissions`.
 
 **A wallet.** Sparrow, or anything that builds a transaction to addresses you
-paste in and exports a PSBT. Hot, cold, single-sig, multisig — which of those it
-is does not matter to this program.
+hand it and exports a PSBT. Hot, cold, single-sig, multisig — which of those it
+is does not matter to this program. The recipients CSV is written for Sparrow's
+Send to Many dialog specifically; any other wallet takes the recipients off the
+printed table, which is what the table is for.
 
 ## Documentation
 

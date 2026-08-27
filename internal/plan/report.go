@@ -40,7 +40,8 @@ func (p *Plan) Document() string {
 
 	// The address goes on its own line. A bech32 P2WSH address is 62 characters
 	// and a taproot one 62 too, so anything sharing a line with one overruns the
-	// pane — and this is copy the operator reads character by character.
+	// pane — and this is copy the operator reads to check an output, not a string
+	// a program consumes.
 	funding := 0
 	for _, n := range named {
 		if n.Kind == ChangeOut {
