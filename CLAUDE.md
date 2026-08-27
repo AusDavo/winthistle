@@ -581,20 +581,74 @@ ends with `abort`'s or LND's own error text appended to a bullet. It fits.
 fix, and it is the sixth sweep in a row to find what the previous one's
 vocabulary could not see.** Denominator: 15 write functions in `internal/journal`,
 12 production call sites and 83 test ones. The hole is fixed in the slice, above;
-the other three are **#37 and #38**, both filed 2026-08-27 and neither fixed.
+the other three were **#37 and #38**, both filed 2026-08-27. **#37 is closed;
+#38 remains.**
 
-- **#37 · `SignerSigned` is journalled for a file nothing checked for
-  signatures**, and it is **#25's mechanism with the polarity reversed**: #25
-  wrote a false *failure* over a true row, this writes a false *success*.
-  `run.go:624` writes it once `SigningWallet.Signed` returns bytes, and on the
-  PSBT branch that is `combine.Parse`, which checks magic bytes and returns —
-  **no signature is looked for anywhere on that path**. `RecordSigner` upserts,
-  so the true `SignerAwaiting` row is replaced, and `combine.Accept` — the thing
-  that would refuse an unsigned packet, with `ErrNoSignatures` — runs at
-  `run.go:531`, *after* `sign()` returned. **The two step-7 encodings disagree**:
-  the `.txn` route is guarded by `SignedFromTX`'s witness count, the `.psbt`
-  route is not, so the same operator mistake journals differently depending on
-  what their wallet saved. No test covers the success-path row at all.
+- ~~**#37 · `SignerSigned` is journalled for a file nothing checked for
+  signatures.**~~ **Done, 2026-08-27.** **#25's mechanism with the polarity
+  reversed** — #25 wrote a false *failure* over a true row, this wrote a false
+  *success*, and it is the second of the three instances of the rule that
+  persisted one to disk. `run.sign` wrote it once `SigningWallet.Signed` returned
+  bytes, and on the PSBT branch the only thing that had looked at those bytes was
+  `combine.Parse`: five magic bytes in, bytes out, **a sniffer and not a parser,
+  as its own doc says**. `RecordSigner` upserts, so the true `SignerAwaiting` row
+  written thirty lines above was replaced, and `prose.signerNote` read it back as
+  *"1 signed"* for a run where nothing was. **The two step-7 encodings
+  disagreed**: the `.txn` route is guarded by `SignedFromTX`'s witness count, the
+  `.psbt` route was not, so one operator mistake journalled two ways depending on
+  what the wallet saved.
+
+  **Decision 1: the write moved to `armWindow`, one statement after
+  `combine.Accept`**, which executes every input's witness against its own
+  script. **This is #32's ordering rule with the mechanics reversed and the
+  reason unchanged: a row may only claim what has been established when it is
+  written.** `MarkVerified` moved *ahead* of its call because that row is read to
+  mean *"the call may have landed, go and look"*, so its safe direction is early;
+  this one is read to mean *"it did happen"*, so its safe direction is late. A
+  crash in the gap now leaves `SignerAwaiting`, which is **one more case falling
+  under #25's own reading of that state** — the wallet was asked and nothing
+  usable came back. **Three rejections worth keeping.** Weakening the doc to *"a
+  file came back that decodes as a PSBT"* (#32 item 2's shape) leaves the screen
+  still printing *"1 signed"* for an unsigned run, and *"signed"* is the value's
+  own name, which is #22's rule at the sentinel level. Writing nothing on success
+  either is wrong in the other direction — a refused publish would render as
+  *"1 still awaited"*, sending the operator back to a wallet that did its job.
+  And checking for signatures inside `sign()` would make a second, weaker
+  authority on one question, which is #13's *"two guards do not make a
+  validator"*. **`internal/combine` did not change at all**, which was the stated
+  test of whether decision 1 landed in the right place.
+
+  **Decision 2 changed no emitted copy, and the rule it turned on is the one to
+  carry: does the operator's next move change if the row is the false one?** It
+  does not — a false `signed` row belongs to a run that stopped at `Accept`'s
+  refusal, which named the file and the missing signatures on the terminal at the
+  time, and nothing on the recovery path consults a signer row. **`declined` was
+  different in kind: it pointed at a signing device.** And **the conditionality
+  runs the other way from #31's** — every `declined` row was written by the
+  defect, while a `signed` row is right whenever the run got past `Accept` and
+  stopped afterwards, so a hedge would teach the operator to distrust the one
+  signer signal that is right. That is #21's mistake with the arms swapped.
+  Conditioning it on the build was not available: no version column, no
+  migrations, and the narrower key — this value on a run still in `StateSigning`
+  — admits true rows, because `--stop-before-publish` reaches the screen in
+  exactly that shape. The control **asserts an absence and says it pins a
+  rejection**.
+
+  **The printed line carried the same claim one output earlier**, and it is in
+  scope for the same reason #24's extra sites were: `"signed (12s elapsed)"` is
+  now `"a file came back after 12s; nothing has checked it for signatures yet."`,
+  and the honest version was already printed by `armWindow`, once the check has
+  run, as *"signed and checked"*. **Its width was found by rendering the
+  transcript and reading it, not by a grep** — step 7's duration belongs to the
+  operator, so `1h23m45s` is the ordinary case and the first wording was two
+  columns over `PaneWidth`.
+
+  **The positive control already existed and is node-backed**:
+  `TestTheFilePathDrivesTheWholeSequence` asserts the row reads `signed` after a
+  full run, once per encoding. The new one,
+  `TestASuccessfulSigningStepIsNotRecordedAsSigned`, is node-free by #25's route
+  and hands back the unsigned packet — the operator mistake in its most ordinary
+  form — and was proved to fail against the old code on three assertions.
 - **#38 · two docs name a stronger observation than their caller made.**
   `ChanPending`'s *"chan_pending arrived"* and five sibling sites, where
   `receiptFor`'s fallback establishes the same fact by asking `PendingChannels` —
