@@ -587,7 +587,15 @@ func split(r *journal.Run) (pending, shims []journal.Channel) {
 // journal, or a newer one's.
 func signerNote(r *journal.Run) string {
 	if len(r.Signers) == 0 {
-		return Para("No signer had been asked for anything when this stopped.")
+		// "No signer had been asked for anything when this stopped" — #30 item 3.
+		// The second half was a claim about the run, not about the signers, and
+		// this screen renders for a run that may be going right now. The first
+		// half survives because the narrower question *can* be answered here:
+		// run.sign writes the SignerAwaiting row before it calls
+		// SigningWallet.Signed, so no row at all means step 7 was never entered.
+		return Para("No signer row was written for this run, and step 7 writes " +
+			"one before it asks a wallet for anything — so nothing has been asked " +
+			"of a wallet.")
 	}
 	var awaiting, signed, partial, declined, unknown int
 	for _, s := range r.Signers {
@@ -620,16 +628,36 @@ func signerNote(r *journal.Run) string {
 		counts = append(counts, fmt.Sprintf("%d still awaited", awaiting))
 	}
 	if declined > 0 {
-		counts = append(counts, fmt.Sprintf("%d declined", declined))
+		counts = append(counts, fmt.Sprintf("%d marked declined", declined))
 	}
 	if unknown > 0 {
 		counts = append(counts, fmt.Sprintf("%d in a state this build does not "+
 			"recognise", unknown))
 	}
 
-	return Para(fmt.Sprintf(
+	out := Para(fmt.Sprintf(
 		"Signers: %s. No key material, PSBT or descriptor is stored in the journal "+
 			"— a signer here is a label and a state.", andList(counts)))
+
+	if declined > 0 {
+		// "%d declined" was the whole of it, and it said a wallet refused.
+		// Nothing in this build can observe a refusal — a file transport has no
+		// channel through which a wallet says no — and since issue #25 nothing
+		// writes the value either. So every row this branch will ever see was
+		// written by the frame that fix removed, which recorded it on *any*
+		// failure of step 7. It stays renderable, because those rows are on
+		// operators' disks; what it may not do is name a cause that was never
+		// observed. See journal.SignerDeclined, which documents the same thing
+		// at the value.
+		out += "\n" + Para(
+			"That declined count comes off a journal an earlier build wrote, and it "+
+				"never meant a wallet said no. The old step 7 recorded it whenever "+
+				"the signing step failed at all — a file that never appeared, one "+
+				"that could not be read, a txid that had moved, or Ctrl-C. Read it "+
+				"as a signing step that did not finish, and the error the run "+
+				"printed at the time for why.")
+	}
+	return out
 }
 
 // andList renders a list the way a sentence wants it.

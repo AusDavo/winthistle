@@ -2,6 +2,7 @@ package prose
 
 import (
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"testing"
@@ -475,6 +476,69 @@ func TestTheHedgedStateSaysWhatTheJournalEstablished(t *testing.T) {
 	}
 }
 
+// withSigners is a run carrying signer rows, which no test in this package built
+// until now — so every sentence signerNote writes about a signer had been
+// rendered by nothing, including its widths. #24 found the same gap in doctor's
+// journal check.
+func withSigners(state journal.State, states ...journal.SignerState) *journal.Run {
+	r := run(state, channel(journal.ChanPending, true))
+	for i, st := range states {
+		r.Signers = append(r.Signers, journal.Signer{
+			Label: fmt.Sprintf("wallet-%d", i),
+			State: st,
+		})
+	}
+	return r
+}
+
+// The signer note may not say what the run was doing, and it may not say a
+// wallet refused.
+//
+// Two halves of #30, one function. The zero branch said "No signer had been
+// asked for anything when this stopped" — the first half is establishable,
+// because run.sign writes the awaiting row before it calls Signed, and the
+// second is a claim about a run that may be going right now. And "%d declined"
+// says a wallet said no, which nothing in this build can observe: PR #31 stopped
+// sign() writing the value, so every row this will ever see was written by the
+// defect that fix removed.
+func TestTheSignerNoteSaysOnlyWhatTheJournalHolds(t *testing.T) {
+	t.Run("no rows", func(t *testing.T) {
+		got := flat(Recovery(run(journal.StateArming,
+			channel(journal.ChanShimRegistered, false)), time.Now()))
+		if regexp.MustCompile(`asked for anything when this stopped`).MatchString(got) {
+			t.Errorf("the signer note says the run stopped, which it cannot "+
+				"know:\n%s", got)
+		}
+		mustContain(t, got, "No signer row was written for this run")
+		mustContain(t, got, "step 7 writes one before it asks a wallet")
+	})
+
+	t.Run("declined", func(t *testing.T) {
+		got := flat(Recovery(withSigners(journal.StateSigning,
+			journal.SignerDeclined), time.Now()))
+		// The count stays — the row is on disk and dropping the arm would put it
+		// in the unknown bucket — and it must not stand alone as a verdict.
+		mustContain(t, got, "1 marked declined")
+		mustContain(t, got, "never meant a wallet said no")
+		mustContain(t, got, "whenever the signing step failed at all")
+		// The four things the old step 7 actually had in hand when it wrote it.
+		mustContain(t, got, "Ctrl-C")
+		mustContain(t, got, "a txid that had moved")
+	})
+
+	t.Run("every state adds up", func(t *testing.T) {
+		got := flat(Recovery(withSigners(journal.StateSigning,
+			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,
+			journal.SignerDeclined, journal.SignerState("from-the-future")), time.Now()))
+		for _, want := range []string{
+			"1 signed", "1 returned a partial signature", "1 still awaited",
+			"1 marked declined", "1 in a state this build does not recognise",
+		} {
+			mustContain(t, got, want)
+		}
+	})
+}
+
 // halfAborted is the shape of a bad night: an abort that ran partway, so the
 // same run carries channels on both sides of it and in every state at once.
 //
@@ -539,6 +603,11 @@ func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 			}},
 			Cancelled: []abort.ShimOutcome{{ID: lnd.PendingChanID{1, 2, 3}}},
 		}, nil),
+		// signerNote's own sentences, which nothing measured before: the counts
+		// line at its widest, and the declined paragraph under it.
+		"signing, every signer state": Recovery(withSigners(journal.StateSigning,
+			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,
+			journal.SignerDeclined, journal.SignerState("from-the-future")), time.Now()),
 		"outcome, partial": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
 			Failures: []error{
 				errWrap(abort.ErrBluntNotConfirmed),
