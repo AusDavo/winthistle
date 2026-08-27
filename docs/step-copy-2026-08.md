@@ -82,11 +82,9 @@ abort path, not positions in the sequence.
    the step-4 table off the transcript and is the check that this stayed legible.
 2. **The standing line.** One helper in `prose`, four values. Printed where its
    value changes rather than under every heading — see slice 2 below.
-3. **Step 6's own screen.** The paragraph exists and is good; it currently
-   arrives under no heading, after step 5's output, reading as a continuation of
-   the verify. Give it the heading and the line, and nothing else.
-4. **Step 8.** The publish has no heading at all today. One heading, one line,
-   and the txid it re-checked.
+3. ~~**Step 6's own screen.**~~ Collapsed into slices 1 and 2 — see below.
+4. **Step 8 says what it checked.** The checks between the heading and the RPC
+   all run inside `arm.Publish` and none of them prints anything when it passes.
 
 ## Slice 1 — landed
 
@@ -150,6 +148,30 @@ refuse a force-close on a pending channel — and drops the clause.
 **Still not covered by any test:** the `StagePublished` line, for the same reason
 the step 8 and step 9 headings are not. Its wording is asserted in
 `internal/prose`; its call site is not reached.
+
+## Slice 3 — collapsed, not skipped
+
+Slice 3 was *"give step 6 the heading and the line, and nothing else"*. Slice 1
+gave it the heading and slice 2 gave it the line, so by the time it came round
+there was nothing in it. The four-slice split assumed the rail and the standing
+line would arrive separately from the screens they sit on; they did not.
+
+## Slice 4 — landed
+
+One paragraph under `Step 8 — publish, once`, naming the three checks that stand
+between the heading and the RPC: the bytes are hashed again and refused if they
+are not the txid pinned at `psbt_verify` (I-3), the transaction goes on disk
+before the call because nothing else will rebroadcast it, and the journal refuses
+the call unless it counts every channel at `chan_pending`.
+
+All three run inside `arm.Publish` and none prints anything when it passes. The
+sentence is not reassurance — it is the difference between a program that
+publishes what it was handed and one that publishes only what it pinned, and step
+8 is the last screen on which that distinction can still be read.
+
+It stays inline in `run.go` rather than moving to `prose` to become testable. The
+gap is not the wording, it is that no test executes the publish path; an assertion
+on the string would answer a question nobody asked and read like coverage.
 
 ## What this pass may not do
 

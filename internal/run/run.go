@@ -249,6 +249,18 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 
 	section(d.Out, "Step 8 — publish, once")
+	// What this screen owes the operator is the checks that stand between the
+	// heading and the RPC, because they all run inside arm.Publish and none of
+	// them prints anything when it passes. Naming them here is not reassurance:
+	// it is the difference between a program that publishes what it was handed
+	// and one that publishes only what it pinned, and step 8 is the last screen
+	// on which that distinction can still be read.
+	fmt.Fprint(d.Out, prose.Para("One call, and this program has no second. The "+
+		"bytes are hashed again before the call goes out and refused if they are "+
+		"not the txid LND committed to at psbt_verify (I-3); the transaction "+
+		"goes on disk first, because nothing else will rebroadcast it; and the "+
+		"journal refuses the call unless it counts every channel at "+
+		"chan_pending."))
 	if err := arm.Publish(ctx, d.LND.WalletKit, d.Journal, armed, final.RawTx); err != nil {
 		// Deliberately no abort here, and no attempt to decide whether the
 		// transaction went out. journal.MarkPublishing lands before the RPC, so
