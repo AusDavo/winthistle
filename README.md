@@ -35,11 +35,9 @@ against anybody else's peers. There is no CI. The safety property below is read
 out of LND's source and observed on a running node, and both of those are things
 that were true on a date rather than things anybody guarantees.
 
-The direction changed on 2026-08-25 and the code has caught up. What this README
-describes is what the tool now is — see
-[`docs/replan-2026-08.md`](docs/replan-2026-08.md), which is the plan that got it
-there. The commands are `run`, `doctor` and `recover`, plus
-`print-macaroon-command` and two `example-*` printers.
+The direction changed on 2026-08-25 and the code has caught up: what this README
+describes is what the tool now is. The commands are `run`, `doctor` and
+`recover`, plus `print-macaroon-command` and two `example-*` printers.
 
 ## The sequence
 
@@ -607,10 +605,8 @@ printed table, which is what the table is for.
 
 ## Documentation
 
-- [`docs/replan-2026-08.md`](docs/replan-2026-08.md) — **the current direction**,
-  and the honest account of what is built and what is not. Read this first.
-- [`docs/design.html`](docs/design.html) — the full design: invariants, the
-  sequence, the two clocks, the hazard register, recovery.
+- [`docs/design.html`](docs/design.html) — **the full design**: invariants, the
+  sequence, the two clocks, the hazard register, recovery. Read this first.
 - [`docs/superseded.md`](docs/superseded.md) — designs Winthistle used to have,
   and why each went. Written so that a gap is not mistaken for an oversight.
 - `CLAUDE.md` — the invariants and the do-not-reintroduce list, with source
