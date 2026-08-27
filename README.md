@@ -469,8 +469,9 @@ mid-publish leaves artifacts rather than mystery. `publishing` is written *befor
 `PublishTransaction` is called, deliberately, because "this may have been
 broadcast" is the state that needs recording.
 
-`winthistle recover` lists the runs that stopped and takes one apart: cancel the
-shims, abandon what reached pending. It is safe to run as many times as it takes
+`winthistle recover` lists the runs the journal never saw finish — neither
+published nor aborted, which includes one being armed in another terminal right
+now — and takes one apart: cancel the shims, abandon what reached pending. It is safe to run as many times as it takes
 and everything under it is idempotent. It refuses a run that reached the publish
 call, and nothing in this program will abort one — read that run on its own, which
 begins with looking for the txid rather than touching anything.
