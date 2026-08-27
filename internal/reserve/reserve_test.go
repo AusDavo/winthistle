@@ -275,14 +275,24 @@ func TestTheShortAfterReportDoesNotClaimTheBatchWillFail(t *testing.T) {
 		NowRequired: 20_000, AtVerify: 30_000, AfterBatch: 50_000,
 	}
 	report := f.Report()
-	if !strings.Contains(report, "will verify") {
-		t.Errorf("the report does not say the batch will verify:\n%s", report)
+	if !strings.Contains(report, "first verify will pass") {
+		t.Errorf("the report does not say the batch's first verify passes:\n%s", report)
 	}
 	if strings.Contains(report, "Stop here") {
 		t.Errorf("the report tells the operator to stop over a warning:\n%s", report)
 	}
 	if !strings.Contains(report, "10,000 sat") {
 		t.Errorf("the report omits the post-batch shortfall:\n%s", report)
+	}
+
+	// And it must not promise the whole batch verifies, which is what this used to
+	// assert. A later verify in the same batch can be judged against AfterBatch —
+	// TestALaterVerifyCountsAnEarlierChannelInTheBatch measures it — so a report
+	// that says the batch will verify is asserting something the program cannot
+	// know.
+	if !strings.Contains(report, "refused mid-batch") {
+		t.Errorf("the report does not say a later verify can be refused mid-batch, "+
+			"so it reads as a promise that the whole batch verifies:\n%s", report)
 	}
 }
 

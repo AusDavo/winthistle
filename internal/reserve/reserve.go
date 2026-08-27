@@ -33,18 +33,36 @@
 // output inside the batch, paying an address of the node's own, *is* credited by
 // CheckReservedValue, so it counts at verify time without waiting for a block.
 //
-// # Two figures, not one
+// # Two figures, and the batch moves between them
 //
-// At verify time the count is existing channels + 1, not + n. CurrentNumAnchorChans
-// reads the channel database, and no member of the batch is in it yet:
-// CompleteReservation runs when the peer's funding_signed arrives, which is after
-// psbt_finalize. Every verify in a batch therefore sees the same pre-batch count.
+// The count CurrentNumAnchorChans reads is existing channels + 1 at the FIRST
+// verify, and it can be larger at every verify after that. This used to be
+// written the other way round — every verify sees the same pre-batch count,
+// because CompleteReservation runs after psbt_finalize — and both halves of that
+// are wrong in this build. There is no psbt_finalize here: a skip_finalize
+// psbt_verify is what completes LND's funding flow, so CompleteReservation runs
+// during arm.Verify, and its SyncPending (lnwallet/wallet.go:2534) writes the
+// channel into the database before chan_pending is emitted. Nothing orders one
+// channel's SyncPending against another channel's psbt_verify.
 //
-// Once the batch is published all n are pending anchor channels and the count has
-// grown by n, so the wallet has to hold the larger figure too — not to get the
-// batch through, but because below it LND declines further on-chain spends and
-// public channel opens, and there is less on hand to fee-bump a force-close than
-// LND has decided there should be.
+// Measured rather than reasoned about, at n = 3, by
+// TestALaterVerifyCountsAnEarlierChannelInTheBatch: with channel 1 at
+// chan_pending, RequiredReserve(additional=1) — the call behind AtVerify — went
+// from 10,000 to 20,000 sat while the batch was half-verified. Back to back with
+// no wait, the verify loop won the race against the peer's funding_signed round
+// trip on that harness; that is a latency measurement and not a property to rest
+// a pre-flight on.
+//
+// So the worst case at verify is existing + n, which is AfterBatch — the same
+// figure the node needs once the batch is published, and below which LND declines
+// further on-chain spends and public channel opens and has less on hand to
+// fee-bump a force-close than it has decided there should be. AtVerify is the
+// floor, AfterBatch is the ceiling, and a batch has to clear the ceiling.
+//
+// What clears it is plan.ReserveTopUp, which aims at the larger of the two
+// figures, and the fact that CheckReservedValue credits an output paying into the
+// node's own wallet: a top-up inside the batch counts at every verify, including
+// the last.
 //
 // All source citations are against lnd v0.21.2-beta.
 package reserve
@@ -114,8 +132,11 @@ const (
 	// Clear: the node's wallet covers the reserve at verify and after the batch.
 	Clear Verdict = iota
 
-	// ShortAfterBatch: the batch will verify, but publishing it leaves the node
-	// under the reserve LND wants for the channels it will then have.
+	// ShortAfterBatch: the first verify clears, but the wallet is under the
+	// figure the batch's last verify could see, and under the one the node needs
+	// once every member is pending. Not blocking, because the plan pays the
+	// difference as a top-up output inside the batch; without one it is a refusal
+	// waiting to happen partway through clock A.
 	ShortAfterBatch
 
 	// WouldBeRefused: psbt_verify will fail. Nothing about the batch can fix
@@ -162,12 +183,16 @@ type Finding struct {
 	// node needs for the channels it already has.
 	NowRequired int64
 
-	// AtVerify is RequiredReserve(additional = 1) — the figure psbt_verify will
-	// use, for every member of the batch. Meaningful only when Batch.Public > 0.
+	// AtVerify is RequiredReserve(additional = 1) — the figure the FIRST
+	// psbt_verify in the batch uses, and the floor for the rest. A later verify
+	// can see a larger one, because an earlier channel may already be in the
+	// channel database; see the package doc. Meaningful only when
+	// Batch.Public > 0.
 	AtVerify int64
 
 	// AfterBatch is RequiredReserve(additional = Batch.Public): what the node
-	// will need once the batch is published and all of them are pending.
+	// will need once the batch is published and all of them are pending — and
+	// also the ceiling at verify, since the nth verify can see existing + n.
 	AfterBatch int64
 }
 
@@ -188,11 +213,13 @@ func (f Finding) Verdict() Verdict {
 // Blocking reports whether the run must not proceed to signing.
 func (f Finding) Blocking() bool { return f.Verdict() == WouldBeRefused }
 
-// ShortfallAtVerify is what has to arrive before step 5 will pass.
+// ShortfallAtVerify is what has to arrive before the batch's first verify will
+// pass. It is a floor, not the figure to aim at — see ShortfallAfterBatch.
 func (f Finding) ShortfallAtVerify() int64 { return shortfall(f.AtVerify, f.Available) }
 
 // ShortfallAfterBatch is what has to arrive before the node is back at the
-// reserve it wants with the whole batch pending.
+// reserve it wants with the whole batch pending — and it is also what every
+// verify in the batch is safe against, which is why plan.ReserveTopUp aims here.
 func (f Finding) ShortfallAfterBatch() int64 { return shortfall(f.AfterBatch, f.Available) }
 
 func shortfall(need, have int64) int64 {

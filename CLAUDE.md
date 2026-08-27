@@ -94,10 +94,17 @@ The bump procedure, in order:
 
 - **#42** · a first-channel `arm.Open` failure is reported as a journalling
   failure and the peer's own refusal is discarded. Functional, not copy.
-- **#51** · `internal/reserve`'s package doc reasons from `psbt_finalize`, which
-  the inversion removed, and its conclusion — *"every verify in a batch sees the
-  same pre-batch count"* — rests on it. Needs a harness measurement at *n* = 3;
-  the cost if the conclusion no longer holds is a refused verify inside clock A.
+- **The count at verify grows under the batch, and the top-up is what covers
+  it.** `AtVerify` (`RequiredReserve(additional=1)`) is the figure the *first*
+  `psbt_verify` uses and the floor for the rest; the *n*th can be judged against
+  `AfterBatch`, because an earlier channel's `CompleteReservation` calls
+  `SyncPending` (`lnwallet/wallet.go:2534`) before `chan_pending` and nothing
+  orders that against a later verify. Measured at *n* = 3 by
+  `TestALaterVerifyCountsAnEarlierChannelInTheBatch`: the figure moved 10,000 →
+  20,000 sat mid-batch. **`plan.ReserveTopUp` aiming at the larger figure is
+  therefore load-bearing, not an economy** — a top-up output inside the batch is
+  credited by `CheckReservedValue` at every verify, including the last. Do not
+  "optimise" it down to `ShortfallAtVerify`.
 - **`Options.Chain` is the harness's seam and may not be deleted.** The
   application fills it on no path, so `Confs == -1` is the rule; `internal/
   regtestenv`'s Core fills it, and deleting the field would take

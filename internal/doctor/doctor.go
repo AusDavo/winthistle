@@ -493,9 +493,13 @@ func checkReserve(ctx context.Context, r *Report, cli *lnd.Client, opts Options)
 			"batch, so the cold wallet pays for it.",
 			prose.Sats(f.ShortfallAtVerify()))
 	case reserve.ShortAfterBatch:
-		c.warn("the batch will verify, but publishing it leaves the node %s under "+
-			"the reserve LND wants for the channels it will then have. Below it LND "+
-			"declines further on-chain spends and public channel opens.",
+		c.warn("the batch's first verify clears, but the node is %s under the "+
+			"reserve LND wants for the channels it will then have. Below it LND "+
+			"declines further on-chain spends and public channel opens — and the "+
+			"larger figure can bind before the batch is published at all, because a "+
+			"channel from earlier in the batch can already be in the channel "+
+			"database when a later one is verified. `winthistle run` pays this as a "+
+			"top-up output inside the batch; this command builds nothing.",
 			prose.Sats(f.ShortfallAfterBatch()))
 	case reserve.NotApplicable:
 		c.say("every channel in this batch is unannounced, so LND's check does not " +
