@@ -11,7 +11,11 @@ import (
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
-// Unfinished is the runs that stopped somewhere they should not have.
+// Unfinished is the runs the journal shows as neither published nor aborted.
+//
+// Which is all the journal establishes — a run is in the list from the moment
+// its streams open, so one being armed right now is in it too. The screen this
+// prints hedges accordingly; see prose.RecoveryList.
 //
 // It listed the CPFP children too, until this build stopped building them. The
 // pairing was the whole reason it existed rather than a bare j.Unfinished: a

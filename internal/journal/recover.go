@@ -81,10 +81,23 @@ func (j *Journal) Load(ctx context.Context, runID string) (*Run, error) {
 
 // Unfinished lists the runs the journal shows as neither published nor aborted.
 //
-// This is the recovery screen's input: on startup, anything in here is a run
-// that stopped somewhere it should not have. It includes runs in
-// StatePublishing, deliberately — those are the ones an operator most needs to
-// see, and the ones Run.AbortTarget will refuse to tear down.
+// That is the whole of what it establishes, and a caller must not read more into
+// it. The journal records what a run wrote, not whether it is still writing: a
+// run is in here from the moment Begin records its first stream, so a batch
+// being armed in another terminal right now is in this list beside three that
+// died in August. This comment used to say that anything in here is a run that
+// stopped somewhere it should not have, which is how that claim reached the two
+// screens that print it.
+//
+// The hedge belongs at the callers rather than here, because the narrower
+// question cannot be answered honestly: a run that died mid-arming and a run
+// being armed right now write identical rows, and the journal carries no
+// heartbeat to tell them apart. Both callers make it — prose.RecoveryList and
+// doctor's journal check.
+//
+// It includes runs in StatePublishing, deliberately — those are the ones an
+// operator most needs to see, and the ones Run.AbortTarget will refuse to tear
+// down.
 func (j *Journal) Unfinished(ctx context.Context) ([]*Run, error) {
 	rows, err := j.db.QueryContext(ctx,
 		`SELECT id FROM runs WHERE state NOT IN (?, ?) ORDER BY created_at`,
