@@ -352,9 +352,10 @@ sizing this slice and not closed by it.**
 
 **Four more instances, found by the sweep after this slice's own copy was
 written, none of them fixed here.** Each is verified in source, and each is a
-decision rather than a typo, so each wants its own slice:
+decision rather than a typo, so each wants its own slice. Filed 2026-08-27 as
+**#24, #25, #26 and #27**, in that order:
 
-1. **`internal/doctor/doctor.go:611`** says *"%d runs stopped somewhere they
+1. **#24 · `internal/doctor/doctor.go:611`** says *"%d runs stopped somewhere they
    should not have"* off `journal.Unfinished`, which is
    `state NOT IN (published, aborted)` — a run is in that set from the moment
    `arm.Open` journals its first stream, so **a batch being armed in another
@@ -365,19 +366,19 @@ decision rather than a typo, so each wants its own slice:
    journal cannot make"* — and hedges with *"Unless something is driving one right
    now"*. `doctor` does not. **The journal's own doc comment carries the claim
    too**, so the fix is at two sites.
-2. **`internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
+2. **#25 · `internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
    error out of `SigningWallet.Signed` — a failed `os.Remove`, Ctrl-C, an
    unreadable file, and `combine.ErrIncompleteWitnesses`, which is the very
    refusal #22 just rewrote to *avoid* naming why a witness is missing. It
    persists: `internal/prose/recovery.go:578` renders it as *"1 declined"* on the
    recovery screen. `SignerAwaiting` is already written twelve lines up and is
    what the evidence supports.
-3. **`internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
+3. **#26 · `internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
    `Active`, which is **this node's link state** — false while our own node is
    bringing links up, and false by default for any channel point missing from the
    map. `State.Active`'s doc comment says *"whether the peer is currently
    connected"* and carries the same over-claim.
-4. **`internal/prose/recovery.go:388-391`** asserts a channel is *"still pending
+4. **#27 · `internal/prose/recovery.go:388-391`** asserts a channel is *"still pending
    here and on the peer"* where only this node's `PendingChannels` was read. The
    inference is sound and the paragraph 150 lines above shows its working; this
    one states it bare.
