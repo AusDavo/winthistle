@@ -35,9 +35,12 @@ func (w refusingWallet) Signed(context.Context, []byte) ([]byte, error) {
 // declined", and an operator who reads that looks at their signing device.
 //
 // Every error class below comes out of FileWallet.Signed, and not one of them is
-// a wallet saying no: there is no channel through which it could. The last is a
-// moved txid, which is an I-3 breach and the one failure where sending the
-// operator to their device instead of to the file costs the most.
+// a wallet saying no: there is no channel through which it could. A moved txid is
+// an I-3 breach, and the one failure where sending the operator to their device
+// instead of to the file costs the most. The last is issue #22's refusal, which
+// was rewritten specifically to avoid naming why a witness is missing — a signer
+// that was never asked and a signer that declined produce the same file — and
+// this frame used to write "declined" over the top of it, one call away.
 func TestAFailedSigningStepIsRecordedAsAwaitedAndNeverAsDeclined(t *testing.T) {
 	ctx := context.Background()
 
@@ -61,6 +64,10 @@ func TestAFailedSigningStepIsRecordedAsAwaitedAndNeverAsDeclined(t *testing.T) {
 		{
 			"the txid moved, which is I-3",
 			fmt.Errorf("batch-signed.txn: %w", combine.ErrTXIDMoved),
+		},
+		{
+			"some inputs came back short of a witness",
+			fmt.Errorf("batch-signed.txn: %w", combine.ErrIncompleteWitnesses),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
