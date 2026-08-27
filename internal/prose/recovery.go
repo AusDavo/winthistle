@@ -762,6 +762,31 @@ func signerNote(r *journal.Run) string {
 
 	var counts []string
 	if signed > 0 {
+		// Nothing is hedged here, and issue #37 is where that was decided rather
+		// than assumed. Until that fix run.sign wrote this value the moment the
+		// wallet handed bytes back, before anything had looked at them for
+		// signatures, so a journal an earlier build wrote can carry it for a file
+		// that was never signed — the same shape as "%d marked declined" below,
+		// and deliberately not treated the same way.
+		//
+		// The operator's next move does not change. A false row here belongs to a
+		// run that stopped at combine.Accept's refusal, and that refusal named the
+		// file and the missing signatures on the terminal at the time; nothing on
+		// the recovery path consults a signer row either, so the abort this screen
+		// offers is the same either way. The declined sentence was different in
+		// kind: it pointed at a signing device, which is a move.
+		//
+		// And a paragraph here would fire on the true case far more often than the
+		// false one. Every run that got past Accept and stopped afterwards — a
+		// refused publish, --stop-before-publish, Ctrl-C — carries a signed row
+		// meaning exactly what it says, so hedging it would teach the operator to
+		// distrust the one signer signal that is right, on the highest-stakes
+		// screen in the product. That is #21's conditionality mistake with the arms
+		// swapped. Nor can it be conditioned on the build that wrote the row: the
+		// journal has no version column and no migration table, and the narrower
+		// key that suggests itself — this value on a run still in StateSigning —
+		// admits true rows too, because a batch armed with --stop-before-publish
+		// reaches this screen in exactly that shape.
 		counts = append(counts, fmt.Sprintf("%d signed", signed))
 	}
 	if partial > 0 {
@@ -772,6 +797,15 @@ func signerNote(r *journal.Run) string {
 		counts = append(counts, fmt.Sprintf("%d returned a partial signature", partial))
 	}
 	if awaiting > 0 {
+		// Three situations and one true sentence, and #37 added the third. The
+		// wallet may be being awaited right now, because the row is written before
+		// the ask and this screen renders for a run that has not necessarily
+		// stopped. It may have been asked with nothing usable back — #25, which
+		// stopped a failure of step 7 overwriting this row with a cause. And since
+		// #37 the file may have come back and not survived combine.Accept, because
+		// the row that says otherwise is now written after that check rather than
+		// before it. All three are a signer asked and nothing established, which is
+		// what "still awaited" says and the whole of what it says.
 		counts = append(counts, fmt.Sprintf("%d still awaited", awaiting))
 	}
 	if declined > 0 {
