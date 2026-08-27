@@ -1,7 +1,7 @@
 # Winthistle. `make check` is the one you want.
 .RECIPEPREFIX := >
 .DEFAULT_GOAL := help
-.PHONY: help build test test-unit check harness fmt vet lint macaroon
+.PHONY: help build test test-unit check check-citations harness fmt vet lint macaroon
 
 help:  ## show this help
 > @grep -hE '^[a-z-]+:.*?##' $(MAKEFILE_LIST) | sed 's/:.*##/\t/' | expand -t14
@@ -43,6 +43,16 @@ lint:  ## refuse a tracked executable that has no shebang
 test-unit:  ## tests that need no harness (includes the macaroon registry check)
 > go test -short -count=1 ./...
 
+# Two checks, both against the module cache at the version go.mod pins: every
+# LND symbol named in a comment or a printed sentence still exists, and every
+# number transcribed out of LND still matches. A version bump moves line numbers
+# loudly and moves renamed symbols and changed constants silently, which is what
+# this catches. `make test` runs them too — they are ordinary tests in
+# internal/methods — but `check` runs them first, because three seconds of
+# citation failure beats three minutes of suite before the same failure.
+check-citations:  ## refuse a citation the pinned LND does not support
+> go test -count=1 -run 'TestEveryCitedLNDSymbolResolves|TestTranscribedConstantsMatchLND' ./internal/methods
+
 # -p 1 is not a performance knob. Several harness-backed packages exist, and
 # `go test ./...` runs package binaries concurrently by default — which puts two
 # test processes through the *same* alice, where one test's plain channel open
@@ -51,7 +61,7 @@ test-unit:  ## tests that need no harness (includes the macaroon registry check)
 test:  ## everything; harness-backed tests skip if regtest is down
 > go test -p 1 -count=1 -timeout 20m ./...
 
-check: lint vet test  ## lint, vet and test
+check: lint vet check-citations test  ## lint, vet, citations and test
 
 harness:  ## rebuild the regtest cluster from scratch (~1 min)
 > $(MAKE) -C regtest reset
