@@ -13,11 +13,20 @@ already have a wallet; keep using it.
 One batch has been opened on mainnet with Winthistle: five channels, published
 once, confirmed.
 
-| What was proved | Where | When | *n* | LND |
+| What was proved | Where | When | *n* | LND (client / node) |
 |---|---|---|---|---|
-| `chan_pending` over a transaction nothing had signed, mempool empty | regtest | 2026-08-25 | 2 | v0.19.3-beta |
-| The whole sequence against real peers, stopping before step 8 — the cold probe | mainnet | 2026-08-26 | 2 | client v0.19.3-beta, node TODO |
-| The whole sequence including step 8: 9,000,000 sat, txid `a1b2c3d4…e8f90` | mainnet | 2026-08-26 | 5 | client v0.21.2-beta, node TODO |
+| `chan_pending` over a transaction nothing had signed, mempool empty | regtest | 2026-08-25 | 2 | v0.19.3-beta / v0.19.3-beta |
+| The whole sequence against real peers, stopping before step 8 — the cold probe | mainnet | 2026-08-26 | 2 | v0.19.3-beta / **v0.21.2-beta** |
+| The whole sequence including step 8: 9,000,000 sat, txid `a1b2c3d4…e8f90` | mainnet | 2026-08-26 | 5 | v0.21.2-beta / v0.21.2-beta |
+
+**The mismatched row is not a typo.** The cold probe was run by a client pinned
+two minor releases behind the node it was arming — the pin had been
+`v0.19.3-beta` since the scaffold commit, with no rationale recorded anywhere,
+and catching it up was the next thing that happened that morning. Nothing in the
+safety model turned out to be wrong at v0.21.2-beta; about thirty line numbers
+were. The node's version is not journalled, so those two cells are established
+from the bump commit that names it and from asking the node today, rather than
+from a record written at the time.
 
 **Read the limits as carefully as the results.** That is one node, one operator,
 three runs. Nothing here has been run by anybody else, on anybody else's node,
