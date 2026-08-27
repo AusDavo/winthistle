@@ -398,14 +398,41 @@ func failureLine(err error) string {
 
 // ---- small helpers ----
 
+// stateMeans is the one paragraph that renders a run's state.
+//
+// Three of these states are written *before* the work they name — arming when
+// the streams open, signing before the wallet is asked, aborting before the
+// first call of the abort — because a crash must leave artifacts rather than
+// mystery. So a run holding any of them may be running right now, in another
+// terminal or in this process's own teardown, and this paragraph used to say
+// otherwise: "streams *were* open", "*had* gone out to be signed", and worst,
+// "an abort of this run was started and did not finish". That last is #24 one
+// state over — journal.go:86 and docs/design.html both hedge the same claim
+// correctly, and only this screen asserted it.
+//
+// The hedge is here rather than at the caller, which is where #24 put it, and
+// the difference is that here the narrower question can be answered honestly.
+// journal.Unfinished could not say which of its runs had stopped: a run that
+// died mid-arming and one being armed write identical rows, so the hedge had to
+// go where a sentence could carry it. This function is handed the state itself,
+// and each state has an honest reading — "in progress, or interrupted partway"
+// is exactly what aborting establishes. A blanket paragraph at the caller would
+// also over-apply: armed and published are *not* written ahead of their work,
+// and hedging them would weaken two sentences that are simply true.
+//
+// It renders one state per screen, so a clause in each of the three costs the
+// reader nothing.
 func stateMeans(s journal.State) string {
 	switch s {
 	case journal.StateArming:
-		return "Funding streams were open and no channel had reached chan_pending. " +
-			"Whatever is cancellable for free is listed below and most of it will " +
-			"be: a stream that only registered its shim costs nothing to release. " +
-			"Read the channel list rather than this line — psbt_verify starts the " +
-			"funding flow now, so a run can hold both kinds at once."
+		return "Funding streams are open and no channel has reached chan_pending. " +
+			"That state is written when the streams open and does not move again " +
+			"until the gate does, so it says where this run got to and not whether " +
+			"something is driving it right now. Whatever is cancellable for free is " +
+			"listed below and most of it will be: a stream that only registered its " +
+			"shim costs nothing to release. Read the channel list rather than this " +
+			"line — psbt_verify starts the funding flow now, so a run can hold both " +
+			"kinds at once."
 	case journal.StateArmed:
 		return "Every channel in this batch reached chan_pending, which means every " +
 			"one of them is already recoverable by force-close — and the publish " +
@@ -414,14 +441,20 @@ func stateMeans(s journal.State) string {
 			"blunt flag for each one."
 	case journal.StateSigning:
 		return "Every channel in this batch reached chan_pending and the unsigned " +
-			"transaction had gone out to be signed. Nothing was broadcast — the " +
+			"transaction is out with the signing wallet. That state is written " +
+			"before the wallet is asked for anything and holds until a signature " +
+			"comes back, so it says where this run got to and not whether somebody " +
+			"is at the wallet right now. Nothing was broadcast — the " +
 			"signing wallet may hold a complete transaction, and it front-runs " +
 			"nothing, because each of these channels was already recoverable before " +
 			"it was asked. Taking it apart costs what an armed run costs: each " +
 			"channel has to be abandoned, and LND wants its blunt flag for each one."
 	case journal.StateAborting:
-		return "An abort of this run was started and did not finish. What follows " +
-			"is what is left, not what there was."
+		return "An abort of this run is in progress, or one was interrupted " +
+			"partway. That state is written before the first call it describes, so " +
+			"a winthistle recover running in another terminal right now writes " +
+			"exactly this row, and so does an abort that stopped halfway through " +
+			"one. What follows is what is left, not what there was."
 	case "":
 		// Unreachable through this journal — see stateColumn — and written down
 		// anyway, because the default branch below would render it as a sentence

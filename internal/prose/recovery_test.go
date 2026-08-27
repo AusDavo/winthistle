@@ -2,6 +2,7 @@ package prose
 
 import (
 	"errors"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -368,6 +369,78 @@ func TestABlankStateIsNotRenderedAsAVerdict(t *testing.T) {
 	// And it must still price the abort off the channels, which are the only
 	// fact on the screen when the run's own state says nothing.
 	mustContain(t, one, "Abandon 1 channel")
+}
+
+// The three states a live run holds must not be rendered as a run that stopped.
+//
+// #30 items 1 and 2. arming is written when the streams open, signing before the
+// wallet is asked and aborting before the abort's first call — deliberately, so
+// that a crash leaves artifacts — so all three are written by a run that is
+// still going, including this process's own teardown, which prints this very
+// screen through run.recoverRun. The copy said "streams were open", "had gone
+// out to be signed" and "an abort of this run was started and did not finish".
+//
+// Keyed on the shape of the old claim rather than on a word, because the
+// replacements still contain most of the words: "did not finish" is the claim,
+// "in progress, or one was interrupted partway" is the hedge, and a bare grep
+// for "abort" matches both.
+func TestNoStateThatALiveRunHoldsIsRenderedAsARunThatStopped(t *testing.T) {
+	for _, tc := range []struct {
+		state journal.State
+		chans []journal.Channel
+		// asserted is the old bare claim, in the shape it was made.
+		asserted *regexp.Regexp
+		// hedged is what must be there instead.
+		hedged string
+	}{
+		{
+			state:    journal.StateArming,
+			chans:    []journal.Channel{channel(journal.ChanShimRegistered, false)},
+			asserted: regexp.MustCompile(`streams were open`),
+			hedged:   "Funding streams are open",
+		},
+		{
+			state:    journal.StateSigning,
+			chans:    []journal.Channel{channel(journal.ChanPending, true)},
+			asserted: regexp.MustCompile(`had gone out to be signed`),
+			hedged:   "is out with the signing wallet",
+		},
+		{
+			state:    journal.StateAborting,
+			chans:    []journal.Channel{channel(journal.ChanPending, true)},
+			asserted: regexp.MustCompile(`abort of this run was started and did not finish`),
+			hedged:   "in progress, or one was interrupted partway",
+		},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			got := flat(Recovery(run(tc.state, tc.chans...), time.Now()))
+			if tc.asserted.MatchString(got) {
+				t.Errorf("the %s screen asserts %q, which the journal cannot "+
+					"establish — that state is written before the work it names:\n%s",
+					tc.state, tc.asserted, got)
+			}
+			mustContain(t, got, tc.hedged)
+		})
+	}
+}
+
+// And the hedge has to say why, not just soften the verb.
+//
+// The reason is the same on all three and it is the only thing that makes the
+// hedge readable rather than evasive: the journal records what a run wrote, not
+// whether it is still writing. prose.RecoveryList says it in those words for the
+// list; this is the one-run screen saying it for the state it was asked about.
+func TestTheHedgedStateSaysWhatTheJournalEstablished(t *testing.T) {
+	for _, state := range []journal.State{
+		journal.StateArming, journal.StateSigning, journal.StateAborting,
+	} {
+		got := flat(Recovery(run(state, channel(journal.ChanPending, true)), time.Now()))
+		mustContain(t, got, "written")
+		if !strings.Contains(got, "right now") {
+			t.Errorf("the %s screen hedges without saying that a run in this "+
+				"state may be going right now:\n%s", state, got)
+		}
+	}
 }
 
 // halfAborted is the shape of a bad night: an abort that ran partway, so the
