@@ -16,11 +16,14 @@ import (
 // once with "received funding error from <pubkey>", and once — for a PSBT
 // reservation, which every one of ours is — with chanfunding.ErrRemoteCanceled.
 //
-// The amounts render through btcutil.Amount.String(), which formats BTC with
-// strconv.FormatFloat(v, 'f', -8, 64) and therefore trims trailing zeros: LND's
-// own MinChanFundingSize of 20,000 sat prints as "0.0002 BTC", not
-// "0.00020000 BTC". Getting that wrong is how a parser silently reports a
-// minimum of zero.
+// The amounts render through btcutil.Amount.String(), which is Format(AmountBTC)
+// (btcutil/amount.go:109). It trims with strconv.FormatFloat and then, for BTC
+// only, re-adds every trailing zero with %.8f whenever the trimmed form still has
+// a decimal point. So LND's own MinChanFundingSize of 20,000 sat arrives as
+// "0.00020000 BTC", and a whole number of BTC — no decimal point, so the padding
+// branch is skipped — arrives bare, as "20 BTC". Both shapes are below, measured
+// rather than assumed, because a parser tested only against the padded form and
+// only against the bare one are two different parsers.
 const testPeerKey = "02cca6c5c966fcf61d121e3a70e03a1cd9eeeea024b26ea666ce974d43b242e636"
 
 func wrapped(peerSaid string) error {
@@ -39,10 +42,10 @@ func TestUnwrapReadsThePeersOwnRefusal(t *testing.T) {
 	}{
 		{
 			name:    "too small names the peer's minimum",
-			err:     wrapped("chan size of 0.00001 BTC is below min chan size of 0.0002 BTC"),
+			err:     wrapped("chan size of 0.00001000 BTC is below min chan size of 0.00020000 BTC"),
 			kind:    TooSmall,
 			minSat:  20_000,
-			peerHas: "chan size of 0.00001 BTC is below min chan size of 0.0002 BTC",
+			peerHas: "chan size of 0.00001000 BTC is below min chan size of 0.00020000 BTC",
 		},
 		{
 			name:    "too large names the peer's maximum",
@@ -101,7 +104,7 @@ func TestUnwrapReadsThePeersOwnRefusal(t *testing.T) {
 // case that would mislead an operator most: an instant refusal, presented as a
 // ten-minute lapse.
 func TestUnwrapDoesNotBelieveTheTimeoutClaim(t *testing.T) {
-	r := Unwrap(wrapped("chan size of 0.00001 BTC is below min chan size of 0.0002 BTC"))
+	r := Unwrap(wrapped("chan size of 0.00001000 BTC is below min chan size of 0.00020000 BTC"))
 	if r.Kind != TooSmall {
 		t.Fatalf("kind = %v", r.Kind)
 	}
@@ -118,12 +121,17 @@ func TestUnwrapDoesNotBelieveTheTimeoutClaim(t *testing.T) {
 
 func TestSatFromBTCString(t *testing.T) {
 	cases := map[string]int64{
-		"0.0002":     20_000,
+		// What Amount.String() actually sends: eight places, or none.
+		"0.00020000": 20_000,
 		"0.00000001": 1,
 		"1":          100_000_000,
 		"20":         2_000_000_000,
 		"0.16777215": 16_777_215,
 		"0":          0,
+		// And the trimmed forms, which this must keep accepting for the reason
+		// satFromBTCString's doc gives.
+		"0.0002": 20_000,
+		"0.5":    50_000_000,
 	}
 	for in, want := range cases {
 		if got := satFromBTCString(in); got != want {
@@ -165,7 +173,7 @@ func TestReadyToArmWaitsOnlyForAcceptedProbes(t *testing.T) {
 	refused := Probe{Pubkey: testPeerKey, Rejection: Rejection{Kind: TooSmall}}
 	if err := ReadyToArm([]Probe{refused}, now); err != nil {
 		t.Fatalf("a refused probe held the gate: %v\n"+
-			"Every limit check in handleFundingOpen runs before "+
+			"Every limit check in fundeeProcessOpenChannel runs before "+
 			"InitChannelReservation, so a refusal leaves no reservation behind", err)
 	}
 
@@ -205,7 +213,7 @@ func TestHoldUpperBoundMatchesLNDsOwnConstants(t *testing.T) {
 // 66-character pubkey spliced into the middle of a sentence by LND, and an
 // unwrapped copy of it runs off the screen.
 func TestThePeerReportsStayInThePane(t *testing.T) {
-	long := wrapped("chan size of 0.00001 BTC is below min chan size of 0.0002 BTC")
+	long := wrapped("chan size of 0.00001000 BTC is below min chan size of 0.00020000 BTC")
 	notReachable := errors.New("opening the batch's funding streams (0 already " +
 		"open, and cancellable): channel 1 of 1: waiting for psbt_fund from " +
 		testPeerKey[:16] + "…: rpc error: code = Unknown desc = peer " +

@@ -128,10 +128,10 @@ func pendingSection(f Facts) string {
 	b.WriteString(prose.Para(fmt.Sprintf(
 		"This node already has %d channel%s pending open with this peer, before "+
 			"the batch adds one. A peer running LND's default of one pending "+
-			"channel has no room left: handleFundingOpen counts its reservations "+
-			"for us plus its pending channels with us, and refuses past "+
-			"--maxpendingchannels. That refusal would arrive at step 2, on the "+
-			"peers' clock, with the cold wallet out.",
+			"channel has no room left: fundeeProcessOpenChannel counts its "+
+			"reservations for us plus its pending channels with us, and refuses "+
+			"past --maxpendingchannels. That refusal would arrive at step 2, on "+
+			"the peers' clock, with the cold wallet out.",
 		len(f.Pending), prose.Plural(len(f.Pending)))))
 	b.WriteString("\n")
 
@@ -292,11 +292,11 @@ func (p Probe) Report(now time.Time) string {
 	if p.Rejection.Kind != NotConnected {
 		b.WriteString("\n")
 		b.WriteString(prose.Para(
-			"A refusal costs nothing. Every limit check in handleFundingOpen runs " +
-				"before the peer creates a reservation, so there is no slot held " +
-				"and no window to wait out — probing downwards to find a peer's " +
-				"minimum is free, and only the probe that succeeds has to be the " +
-				"last one."))
+			"A refusal costs nothing. Every limit check in " +
+				"fundeeProcessOpenChannel runs before the peer creates a " +
+				"reservation, so there is no slot held and no window to wait " +
+				"out — probing downwards to find a peer's minimum is free, and " +
+				"only the probe that succeeds has to be the last one."))
 	}
 
 	if strings.Contains(p.Rejection.Raw, remoteCanceled) {

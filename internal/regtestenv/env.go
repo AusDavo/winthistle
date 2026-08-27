@@ -203,10 +203,12 @@ func ensureWalletLoaded(ctx context.Context, node *bitcoind.Client, name string)
 // alice to catch up.
 //
 // The waiting is not tidiness. LND refuses to open a channel while its wallet is
-// behind — "channels cannot be created before the wallet is fully synced",
-// checked in handleFundingOpen and at the initiator too — so a test that mines
-// and then immediately opens a stream fails for a reason that has nothing to do
-// with what it was testing. One block is usually enough to trigger it; 2016 is
+// behind, at both ends of the flow and in different words: the initiator checks
+// first and says "channels cannot be created before the wallet is fully synced"
+// (rpcserver.go:2096), and fundeeProcessOpenChannel refuses with
+// "Synchronizing blockchain" (funding/manager.go:1516). So a test that mines and
+// then immediately opens a stream fails for a reason that has nothing to do with
+// what it was testing. One block is usually enough to trigger it; 2016 is
 // certainly enough.
 func (e *Env) Mine(t *testing.T, n int) {
 	t.Helper()
