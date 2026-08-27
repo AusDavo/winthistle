@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"encoding/hex"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/AusDavo/winthistle/internal/combine"
+	"github.com/btcsuite/btcd/btcutil/psbt"
+	"github.com/btcsuite/btcd/chaincfg/chainhash"
 	"github.com/btcsuite/btcd/wire"
 )
 
@@ -128,12 +131,140 @@ func TestAnUnsignedRawTransactionAtStepSevenIsRefused(t *testing.T) {
 	if err := b.packet.UnsignedTx.Serialize(&buf); err != nil {
 		t.Fatal(err)
 	}
+	// Re-keyed with the sentinel, which is ErrIncompleteWitnesses now: its old
+	// name and its old text — "this transaction carries no signatures" — were
+	// returned for the partly-signed case too, where both are false. Asserting
+	// on the identifier is why this failed to compile rather than passing in
+	// silence when the rename landed.
 	if _, err := combine.SignedFromTX(b.base, buf.Bytes()); !errors.Is(err,
-		combine.ErrNoWitnesses) {
+		combine.ErrIncompleteWitnesses) {
 
 		t.Fatalf("an unsigned transaction was accepted at step 7, or refused for "+
 			"another reason: %v", err)
 	}
+}
+
+// TestWhatIsSaidAboutAMissingWitnessIsWhatWasCounted is issue #22.
+//
+// Three states, all knowable from the bytes in hand, and the refusal used to
+// return from inside the lifting loop on the first witnessless input — so it
+// established "input i is short" and said "this transaction carries no
+// signatures … that is the transaction you built at step 4". For a transaction
+// with input 0 signed and input 3 not, both of those are false.
+//
+// Node-free on purpose. What is under test is the counting and the sentence, and
+// SignedFromTX validates no signature — combine.Accept is what executes a
+// witness against its script, and it runs after this. So the witnesses here are
+// bytes, and the fixture is a plain n-input transaction rather than the package's
+// single-input 2-of-2.
+func TestWhatIsSaidAboutAMissingWitnessIsWhatWasCounted(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		inputs  int
+		signed  []int
+		want    []string
+		notWant []string
+	}{
+		{
+			name: "none of them", inputs: 3, signed: nil,
+			want: []string{
+				"not one of its 3 inputs carries a witness",
+				"That is the transaction you built at step 4",
+				"sign it and save it again",
+			},
+		},
+		{
+			name: "one of four", inputs: 4, signed: []int{2},
+			want: []string{
+				"1 of its 4 inputs carries a witness",
+				"inputs 0, 1 and 3 do not",
+				"not the transaction you built at step 4",
+				"nothing here can see which signer is missing",
+				"finish signing it and save it again",
+			},
+			// The claims the count refutes.
+			notWant: []string{
+				"carries no signatures",
+				"there is nothing to take off it",
+			},
+		},
+		{
+			name: "all but the last", inputs: 2, signed: []int{0},
+			want: []string{"1 of its 2 inputs carries a witness", "input 1 does not"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			base, body := witnessFixture(t, tc.inputs, tc.signed)
+			_, err := combine.SignedFromTX(base, body)
+			if !errors.Is(err, combine.ErrIncompleteWitnesses) {
+				t.Fatalf("a transaction missing a witness was accepted, or refused "+
+					"for another reason: %v", err)
+			}
+			for _, want := range tc.want {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("the refusal does not say %q: %v", want, err)
+				}
+			}
+			for _, gone := range tc.notWant {
+				if strings.Contains(err.Error(), gone) {
+					t.Errorf("the refusal claims %q about a transaction that carries "+
+						"signatures: %v", gone, err)
+				}
+			}
+		})
+	}
+
+	// And the third state, which is the one that carries on.
+	t.Run("all of them", func(t *testing.T) {
+		base, body := witnessFixture(t, 3, []int{0, 1, 2})
+		signed, err := combine.SignedFromTX(base, body)
+		if err != nil {
+			t.Fatalf("a transaction with a witness on every input was refused: %v", err)
+		}
+		for i, in := range parse(t, signed).Inputs {
+			if len(in.FinalScriptWitness) == 0 {
+				t.Errorf("input %d's witness was not lifted onto the packet", i)
+			}
+		}
+	})
+}
+
+// witnessFixture is an n-input transaction and the base packet it was built
+// from, with a witness on the inputs named and nothing on the rest.
+func witnessFixture(t *testing.T, inputs int, signed []int) (base, body []byte) {
+	t.Helper()
+
+	tx := wire.NewMsgTx(2)
+	for i := 0; i < inputs; i++ {
+		tx.AddTxIn(&wire.TxIn{
+			PreviousOutPoint: wire.OutPoint{
+				Hash:  chainhash.Hash{0xab, byte(i)},
+				Index: uint32(i),
+			},
+			Sequence: wire.MaxTxInSequenceNum,
+		})
+	}
+	_, script := freshP2WPKH(t)
+	tx.AddTxOut(&wire.TxOut{Value: 500_000, PkScript: script})
+
+	packet, err := psbt.NewFromUnsignedTx(tx.Copy())
+	if err != nil {
+		t.Fatalf("building the base packet: %v", err)
+	}
+	for i := range packet.Inputs {
+		packet.Inputs[i].WitnessUtxo = &wire.TxOut{Value: 400_000, PkScript: script}
+	}
+
+	for _, i := range signed {
+		// Bytes, not a signature. Nothing between here and combine.Accept looks
+		// at what a witness says, and a real one would suggest otherwise.
+		tx.TxIn[i].Witness = wire.TxWitness{[]byte{0x30, 0x44}, []byte{0x02, 0xff}}
+	}
+	var buf bytes.Buffer
+	if err := tx.Serialize(&buf); err != nil {
+		t.Fatalf("serialising the fixture: %v", err)
+	}
+	return serialize(t, packet), buf.Bytes()
 }
 
 // TestSomethingThatIsNeitherIsNamedAsNeither. A refusal that says "not a PSBT"
