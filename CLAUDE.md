@@ -519,6 +519,36 @@ never appeared, one that could not be read, a moved txid, Ctrl-C. **Deleting the
 arm was not available**: those rows are on operators' disks and dropping them into
 the `unknown` bucket is the defect that function's doc comment was written about.
 
+**And the slice's own audit found six flagged sites out of 127 operator-reaching
+copy sites, which is the fifth sweep in a row to find what the previous one's
+vocabulary could not see.** The count is the point: #23's found four, #29's found
+six, #31's found three, and this one six — every one run *after* the previous
+slice's copy was written. **Do not write that this set is exhausted.** Where the
+six went:
+
+- **One was #27's own claim in the sibling function**, and #27's sweep did not
+  reach it because it grepped the wording `failureLine` used.
+  `RecoveryOutcome`'s **clean** path said *n* channels *"are still pending on the
+  other side"*, off `rep.Abandoned`, which establishes only that this node
+  abandoned them. **Fixed in the same slice**, on #24's precedent that the extra
+  sites of a claim belong with the issue that names it — otherwise #27 closes
+  with its own sentence standing sixty lines away on the same screen.
+- **One is #26**, with two corrections filed as a comment: the *"false by default
+  for a channel point missing from the map"* route **does not exist** — that
+  branch requires `s.Open`, and `open` and `active` are filled in one loop over
+  the same channels — and `Active == false` has **three** causes rather than two,
+  because LND computes it as `peerOnline && link.EligibleToForward()`. What the
+  field establishes is *this node's own link is not eligible to forward*.
+- **One is the screen half of #32's first item**, filed there.
+- **Three are one new class and are #33**: a figure that is **LND's own default**,
+  handed over as the peer's behaviour with no attribution — the eleven-minute
+  reservation and the 2016-block horizon, twice. `settle`'s `horizonNote` is the
+  model and says *"it binds a peer running stock LND and nobody else"* about the
+  same number, because #20 made it. **A real decision rather than a typo**: the
+  style rule requires recovery copy to name clock B **in blocks**, so whether
+  hedging the one number that rule insists on is an improvement or a cost is the
+  question, and it should be taken once for all three sites.
+
 **The sweep found nothing else false, and that is worth stating rather than
 leaving unmentioned.** `cmd/winthistle`'s package doc and its `recover` usage line
 already read *"the runs the journal never saw finish"*, and `README.md:472`
@@ -545,13 +575,15 @@ ends with `abort`'s or LND's own error text appended to a bullet. It fits.
 test in the tree asserts on a copy string, check name or map key the build no
 longer emits. PR #23's `doctor_regtest_test.go` fix held, and every surviving
 `Contains` against a dead sentence is a *negative* assertion with a comment
-saying so.
+saying so. **It has now come back clean three sweeps running** — #31's covered
+61 assertion loops across 30 files, and the #27 + #30 slice's covered **373
+assertion points across 29 test files**, including 160 string literals sitting
+inside table-driven blocks *away from* their `Contains` call, which the first
+pass of that sweep missed. A clean answer to this question is cheap and is
+evidence.
 
-**And PR #31's audit found two more of the rule and one of #21's, which makes
-four sweeps in a row.** Verified in source, none fixed there, filed 2026-08-27 as
-**#32**. The count is the point: #23's sweep found four, #29's found six, #31's
-found three, and each was run *after* the previous slice's copy was written.
-**Do not write that this set is exhausted.**
+**And PR #31's audit found two more of the rule and one of #21's, filed
+2026-08-27 as **#32**.** Verified in source, none fixed there.
 
 - **`recordAbort` writes `ChanCancelled` for a shim that was already gone**, and
   `ChanCancelled` is a cause with an actor in it: *"its shim was cancelled before
@@ -575,10 +607,19 @@ found three, and each was run *after* the previous slice's copy was written.
   *neighbouring* clause and not this one. **Narrower than it looks and filed
   anyway**: the wallet does hold the transaction, having built it at step 4; what
   has not happened is the request to sign.
-- **`prose/recovery.go:370` still credits Core's lock release** in the
-  safe-to-call-twice list, and item 5 removed Core and every coin lock the app
-  took. **#21's class rather than #6's** — copy crediting a deleted dependency —
-  and filed with the other two because one sweep found all three.
+- ~~**`prose/recovery.go:370` still credits Core's lock release**~~ **Done,
+  2026-08-27**, in the #27 + #30 slice, because it was a known-false sentence
+  three paragraphs from a line that slice was rewriting and `internal/prose` was
+  in scope already — #32's own slice is `internal/journal` plus `internal/abort`,
+  where this would have made a third package. **#21's class rather than #6's**,
+  copy crediting a deleted dependency. `abort.Run`'s own doc names two reasons
+  and the screen says two now. **`internal/abort/run.go:106` is the same class
+  and was left**, reported on the issue: its `Run` doc still cites *"a lock
+  release queued behind an abandon that failed"* as what an early return leaves
+  behind. **And #32's first item has a screen half**, also reported there —
+  `RecoveryOutcome`'s *"%d shims already gone … It is not a failure"* names two
+  causes for `AlreadyGone`, observed neither, and the third is the one where the
+  channel is **actually pending** with clock B running.
 
 **And the sweep's other half found a test that could only pass.**
 `internal/doctor/doctor_regtest_test.go`'s second loop still named `"Bitcoin
