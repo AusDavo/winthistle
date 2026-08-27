@@ -754,6 +754,101 @@ rather than a typo.
   **Step 4 is inside clock A, where waiting is the one thing that cannot
   help.**
 
+**PR #46's audit was pointed one layer out, and it found more than any sweep so
+far — six of them safety-adjacent and one with a direct operator cost.** The
+question was not the printed lines, which PR #36 had turned: it was **every place
+this build describes a mechanism inside LND, Bitcoin Core or a peer's node**,
+checked against source at v0.21.2-beta, with **doc comments as the unturned
+ground**. Denominator: **8,964 comment lines across 105+ files**, ~220 sites
+making checkable external claims, 153 verified correct, **~50 unverifiable
+because Bitcoin Core is not vendored**. Five findings were re-read in source
+before filing and are **#47, #48, #49, #50 and #51**; six smaller ones plus three
+comments stale against this build are batched as **#52**.
+
+**The dominant cause is the version bump, and that is the lesson.** `CLAUDE.md`'s
+standing instruction — *"On the next bump, re-cite before assuming"* — caught
+roughly thirty line numbers and missed **a new proto field, two constants and a
+dependency's formatting change**. **Line numbers move loudly; values and new
+fields do not.** Add that to the bump procedure.
+
+- **#47 · a peer's `minimum_depth` is readable, and the build says five times in
+  printed copy that it is not.** `PendingChannels`' `confirmations_until_active`
+  (`lightning.proto:2812`) is filled from `calcRemainingConfs`, which returns
+  `pendingChan.NumConfsRequired` verbatim while `ConfirmationHeight == 0`
+  (`rpcserver.go:4015-4019`); for an initiator that field is the peer's
+  `min_accept_depth`, set in `funderProcessAcceptChannel`
+  (`funding/manager.go:2129-2142`). **`PendingChannels` is already registered,
+  already called on the batch path and already in the baked macaroon**, so the
+  reading costs no call site, no registry entry and no permission. **It changes
+  #28's answer** — that issue's two options were *weaken the page* or *build it
+  from `GetTransactions`, which is a new call site, a registry entry and a
+  permission* — and it falsifies the memory that says no RPC reports it.
+- **#48 · `policy.MinTimeLockDelta` is 18 and `routing.MinCLTVDelta` is 24.** The
+  one finding with a direct operator cost: a delta of 18–23 passes `Validate()`,
+  arms, publishes, and is then refused **for the whole batch at once** by
+  `validateCltvDeltaBounds` (`config.go:287`) in the RPC handler — a gRPC error,
+  not a `failed_updates` entry — leaving every channel at LND's 1000 msat / 1 ppm
+  defaults, which is issue #6's cost exactly. **And
+  `TestPolicyValidateMatchesLNDsBounds` keys both arms on our own constant**, so
+  it can only pass: a third shape of the check-that-cannot-fail, self-referential
+  rather than stale.
+- **#49 · `INVALID_PARAMETER` is described as the one refusal that is not about
+  the channel, and it is the one that is entirely about the channel.** Both sites
+  in `routing/localchans/manager.go` (`:122`, `:273`) are `updateEdge` failing,
+  and `updateEdge` fetches the channel and measures against its **negotiated**
+  `LocalChanCfg` bounds (`:448-467`). The CLTV delta and inbound fees are checked
+  in the RPC handler and produce **no `failed_updates` entry at all**. The
+  `Terminal()` conclusion probably survives on a better argument — negotiated
+  bounds do not change — but **this sentence is the whole justification recorded
+  for issue #6's fix**, in the code and in this file.
+- **#50 · `handleFundingOpen` does not exist at v0.21.2-beta, and eight sites
+  cite it, two of them printed.** **This is `handleFundingSigned` again**, on the
+  fundee side, never looked for. The real name is `fundeeProcessOpenChannel`
+  (`funding/manager.go:1438`). `peers.go:27` is the sharpest, because it says
+  *"Reading handleFundingOpen at v0.21.2-beta"*. The `--probe` reasoning it
+  supports was proved against live peers and is not in question.
+- **#51 · `internal/reserve`'s package doc reasons from `psbt_finalize`**, which
+  this build removed — *"`CompleteReservation` runs … after `psbt_finalize`"* —
+  and the conclusion *"every verify in a batch sees the same pre-batch count"*
+  rests on it. Under the inversion `skip_finalize` at **verify** completes the
+  flow, so an earlier channel may be in the channel database before a later
+  channel's verify. **Not established: whether the conclusion still holds.** That
+  is a measurement on the harness at *n* = 3, and the cost if it does not is a
+  refused verify **inside clock A**. Second finding in two slices at the far end
+  of something the inversion moved; #40 is the other.
+- **#52 · six smaller citations plus three comments stale against this build.**
+  `peers.go:459` attributes an error to `rpcserver.go` when it is `server.go:174`
+  and denies a type that exists (behaviour right — the type does not cross gRPC);
+  `btcutil.Amount.String()` re-adds trailing zeros, so **no fixture uses what LND
+  actually sends**; a force-close broadcast ordering stated backwards; `chanfunding`
+  where it is `lnwallet`; and `dev`-tagged where the switch is `integration`-tagged
+  — **a trap, because LND has both tags driving different predicates**. Plus two
+  test comments still saying `Method.CallSites` is 2 and one still calling
+  `testmempoolaccept` the pre-flight.
+
+**The other half of the audit came back clean for the sixth sweep running**: no
+test asserts on a copy string, check name or map key the build no longer emits.
+Denominator: **2,511 comment-free, concatenation-folded literals across 56
+non-test files**, against **260 assertion call sites plus 43 comparison-position
+literals** across 51 test files; 336 assertion-position literals by the
+field-marker walk, **100 misses adjudicated by hand, zero stale**. All four
+literal-keyed map lookups checked and every key live. **Trap (iv) answered
+cleanly for the third sweep**: 16 assertion-position literals match production
+source only inside comments, and every one is a documented negative assertion, a
+runtime-formatted value or a fixture — **zero positive assertions matching only a
+doc comment**. One note, verified rather than taken: `doctor_test.go:240` builds
+`Check{Name: "the coins"}`, a name item 5 deleted, but it is **fixture position**
+— the test asserts on `r.OK()` and `r.Checks[0].Status` — so it cannot go quiet.
+
+**And the sweep of this slice's own screen filed #45**: the build's I-1
+shorthand, *"recoverable by force-close"*, is printed at **five sites, three of
+which say nothing has been broadcast in the same sentence**. `CLAUDE.md`'s own
+measurement is that force-closing a pending channel is not refused and broadcasts
+a commitment whose parent exists nowhere. No funds are at risk and the app cannot
+close a channel, but it is the one action this file names as the destructive
+ten-minute instinct, and **no screen says otherwise**. Two-sided across five
+sites, so filed rather than folded in.
+
 **And `internal/arm` prints nothing at all** — no `Fprint`, no `prose`, no
 writer, no logger, across 1,021 lines. Its whole operator-facing surface is
 error text and the doc comments on its journal writes, which is why #40 and #38
