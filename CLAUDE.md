@@ -419,7 +419,8 @@ that order. **#24 is closed; #25, #26 and #27 remain:**
 
 **And PR #29's own audit found six more, which is the third sweep in a row to
 find instances the previous one's vocabulary could not see.** Verified in source,
-none fixed there, and they are **not** a list to call complete:
+none fixed there, filed 2026-08-27 as **#30**, and **not** a list to call
+complete:
 
 - **`prose.stateMeans`' `StateAborting`** — *"An abort of this run was started
   and did not finish."* The state is written before the first RPC, so a live
