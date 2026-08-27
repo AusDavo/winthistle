@@ -132,10 +132,20 @@ const (
 //     recovery screen that could not name it would render somebody's real run as
 //     a state this build does not recognise.
 //
-// Anything reading these back must handle both, and prose.signerNote is the only
-// thing that does. There is no CHECK constraint and no migration table, so an
-// unrecognised value round-trips silently — which is why that function has a
-// default branch and says so.
+// SignerDeclined has no writer either, since issue #25, and a row carrying it is
+// not evidence that a wallet said no. The step-7 frame used to write it on every
+// error out of run.SigningWallet.Signed — a file that never appeared, one that
+// could not be read, a moved txid, Ctrl-C — over the top of the SignerAwaiting
+// row it had written a moment before, so a journal from before that fix carries
+// it wherever step 7 failed, whatever the reason. Nothing in this build can
+// observe a refusal: the file transport has no channel through which a wallet
+// declines, and whether a run is still going is the run's own state. The constant
+// stays renderable for those rows. Do not write it, and do not repurpose it.
+//
+// Anything reading these back must handle every one of them, writer or not, and
+// prose.signerNote is the only thing that does. There is no CHECK constraint and
+// no migration table, so an unrecognised value round-trips silently — which is
+// why that function has a default branch and says so.
 type SignerState string
 
 const (

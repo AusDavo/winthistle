@@ -600,11 +600,25 @@ func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, erro
 	started := time.Now()
 	signed, err := d.Signing.Signed(ctx, unsigned)
 	if err != nil {
-		if jerr := d.Journal.RecordSigner(ctx, o.RunID, label,
-			journal.SignerDeclined); jerr != nil {
-			return nil, fmt.Errorf("the batch was not signed (%v), and journalling "+
-				"that failed too: %w", err, jerr)
-		}
+		// Nothing is journalled here, and the row written above is left standing.
+		// Issue #25: this frame used to record journal.SignerDeclined, the one
+		// SignerState that names an intent, and RecordSigner upserts on
+		// (run_id, label) — so the true row was replaced by a false one, and the
+		// recovery screen read it back later as "1 declined". Every error out of
+		// Signed lands here: a failed os.Remove, before the wallet has been
+		// prompted at all; the context being cancelled, which is Ctrl-C; a file
+		// that is neither encoding; and combine's refusal of a moved txid, which
+		// is an I-3 breach and the one failure an operator must not be sent to
+		// their signing device over. Nothing in this build can observe a refusal
+		// — a file transport has no channel through which a wallet says no.
+		//
+		// What the frame established is that the wallet was asked and nothing
+		// usable came back, which is journal.SignerAwaiting in its own words. The
+		// distinction a second state would draw — asked and still waiting against
+		// asked and the answer was not usable — is the difference between a live
+		// run and a stopped one, and that is the run's state rather than a
+		// signer's. The cause is in the error below, on the terminal this step is
+		// already printing to.
 		return nil, fmt.Errorf("the batch was not signed: %w", err)
 	}
 	if err := d.Journal.RecordSigner(ctx, o.RunID, label,

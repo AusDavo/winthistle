@@ -353,7 +353,7 @@ sizing this slice and not closed by it.**
 **Four more instances, found by the sweep after this slice's own copy was
 written.** Each is verified in source, and each is a decision rather than a typo,
 so each wants its own slice. Filed 2026-08-27 as **#24, #25, #26 and #27**, in
-that order. **#24 is closed; #25, #26 and #27 remain:**
+that order. **#24 and #25 are closed; #26 and #27 remain:**
 
 1. ~~**#24 · `doctor` said unfinished runs had stopped.**~~ **Done, 2026-08-27.**
    `journal.Unfinished` is `state NOT IN (published, aborted)`, and a run is in
@@ -400,13 +400,49 @@ that order. **#24 is closed; #25, #26 and #27 remain:**
    `TestAnUnfinishedRunDoesNotStopABatch` are **node-free** — `checkJournal`
    takes the journal as a parameter and the test package is internal — and the
    first was verified to fail against the old copy rather than only to pass.
-2. **#25 · `internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
-   error out of `SigningWallet.Signed` — a failed `os.Remove`, Ctrl-C, an
-   unreadable file, and `combine.ErrIncompleteWitnesses`, which is the very
-   refusal #22 just rewrote to *avoid* naming why a witness is missing. It
-   persists: `internal/prose/recovery.go:578` renders it as *"1 declined"* on the
-   recovery screen. `SignerAwaiting` is already written twelve lines up and is
-   what the evidence supports.
+2. ~~**#25 · every step-7 failure was journalled as the signer having
+   declined.**~~ **Done, 2026-08-27.** `sign` wrote `journal.SignerDeclined` on
+   **any** error out of `SigningWallet.Signed` — a failed `os.Remove` *before the
+   wallet is prompted at all*, Ctrl-C, an unreadable file, and `combine`'s
+   refusal of a **moved txid, which is an I-3 breach**. And `RecordSigner` upserts
+   on `(run_id, label)`, so the true `SignerAwaiting` row written twelve lines
+   above was **replaced** by the false one; `prose.signerNote` then rendered it as
+   *"1 declined"* on the recovery screen. **It is the only instance of the rule
+   that persisted the wrong cause to disk**, which is why it was picked ahead of
+   the rest.
+
+   **The fix is to write nothing on the error path**, leaving the row already
+   there standing, so the screen says *"1 still awaited"* — which is what
+   happened. A new `SignerState` was rejected on two grounds worth keeping: the
+   distinction it would draw, *asked and still waiting* against *asked and the
+   answer was not usable*, is the difference between a live run and a stopped one,
+   and **that is the run's own state rather than a signer's**; and no honest name
+   for it could separate the classes anyway, because the `os.Remove` and Ctrl-C
+   cases have no answer to call unusable. **Nothing in this build can observe a
+   refusal at all** — a file transport has no channel through which a wallet says
+   no. So `internal/prose` needed no copy change, and none was made.
+
+   **`SignerDeclined` keeps its constant and gains `SignerPartial`'s treatment**:
+   its doc says it has no writer, that a row carrying it is **not** evidence a
+   wallet said no, and not to repurpose it. Journals written before this change
+   carry the value wherever step 7 failed, and `signerNote`'s switch names it
+   explicitly rather than dropping it into the `unknown` bucket — so **the screen
+   still renders those historical rows with the old wrong sentence**, which is
+   `internal/prose`'s to fix and is noted on #30.
+
+   **Decision 2 was taken separately and changed nothing**, which is the result:
+   *"the batch was not signed: %w"* is an outcome the frame established rather
+   than a cause, with the cause wrapped inside it, and the surrounding wrappers
+   name activities. The `jerr` branch's question went moot with the write.
+   `TestAFailedSigningStepIsRecordedAsAwaitedAndNeverAsDeclined` is **node-free** —
+   `sign` uses only `d.Out`, `d.Journal` and `d.Signing`, so `Deps.LND` stays nil
+   — five error classes keyed on `combine.ErrTXIDMoved`,
+   `combine.ErrIncompleteWitnesses` and `context.Canceled` rather than on
+   sentences, and verified to fail against the old code on all five. The last of
+   the five is the refusal **#22 rewrote one call away from this frame**, and it
+   is the instance the issue led with. **`docs/design.html` does not carry this claim and did not move**; its
+   four `signer` mentions are about BIP174 and QR scope, and both its `declin`
+   hits are LND's.
 3. **#26 · `internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
    `Active`, which is **this node's link state** — false while our own node is
    bringing links up, and false by default for any channel point missing from the
@@ -448,6 +484,39 @@ test in the tree asserts on a copy string, check name or map key the build no
 longer emits. PR #23's `doctor_regtest_test.go` fix held, and every surviving
 `Contains` against a dead sentence is a *negative* assertion with a comment
 saying so.
+
+**And PR #31's audit found two more of the rule and one of #21's, which makes
+four sweeps in a row.** Verified in source, none fixed there, filed 2026-08-27 as
+**#32**. The count is the point: #23's sweep found four, #29's found six, #31's
+found three, and each was run *after* the previous slice's copy was written.
+**Do not write that this set is exhausted.**
+
+- **`recordAbort` writes `ChanCancelled` for a shim that was already gone**, and
+  `ChanCancelled` is a cause with an actor in it: *"its shim was cancelled before
+  it ever reached pending."* `journal/recover.go:260-263` discards
+  `ShimOutcome.AlreadyGone` — whose **own doc comment names this consumer**,
+  *"which matters when reading a journal after the fact"* — and `setChannelState`
+  is an unguarded `UPDATE`, so the truthful `verified` row is overwritten. **The
+  case where the row is false is documented 76 lines above the write**, in
+  `AbortTarget`: a crashed process reports `AlreadyGone` for a channel that is
+  actually pending. The screen then says *"Nothing of this run is still standing
+  in LND"* and `AbortTarget` emits nothing for it, so **a second `Recover` cannot
+  pick it up**. `StateAborted` — *"the abort completed with nothing left
+  behind"* — is reached the same way, because `Report.Clean()` counts failures
+  and an `AlreadyGone` shim is not one. **The sharpest instance found so far and
+  the only safety-adjacent one**, and no test covers the path.
+- **`MarkSigning` at `run/run.go:522`** writes a state defined as *"the unsigned
+  transaction is out with the signing wallet"* before the ask is made — `sign()`
+  is the next statement and `FileWallet.Signed`'s `os.Remove` runs before the
+  prompt is even printed. `MarkPublishing` is written before its RPC too and
+  everything downstream hedges with *"may"*; `StateSigning`'s renderer hedges the
+  *neighbouring* clause and not this one. **Narrower than it looks and filed
+  anyway**: the wallet does hold the transaction, having built it at step 4; what
+  has not happened is the request to sign.
+- **`prose/recovery.go:370` still credits Core's lock release** in the
+  safe-to-call-twice list, and item 5 removed Core and every coin lock the app
+  took. **#21's class rather than #6's** — copy crediting a deleted dependency —
+  and filed with the other two because one sweep found all three.
 
 **And the sweep's other half found a test that could only pass.**
 `internal/doctor/doctor_regtest_test.go`'s second loop still named `"Bitcoin
