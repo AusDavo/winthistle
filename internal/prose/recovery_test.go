@@ -528,6 +528,19 @@ func TestTheHedgedStateSaysWhatTheJournalEstablished(t *testing.T) {
 	}
 }
 
+// #32 item 2, and the finding there is that the screen was already right and the
+// constant's doc was the silent half. journal.StateSigning is written before
+// sign() is called — it is run.armWindow's next statement — and FileWallet.Signed
+// runs an os.Remove over both watched paths before it prints the prompt naming
+// them, so a failure there is a wallet that was never asked at all. #30 put that
+// in the renderer; this pins that it stays there, because the constant's doc now
+// points at this sentence rather than repeating it.
+func TestTheSigningScreenSaysTheWalletHasNotBeenAsked(t *testing.T) {
+	got := flat(Recovery(run(journal.StateSigning,
+		channel(journal.ChanPending, true)), time.Now()))
+	mustContain(t, got, "written before the wallet is asked for anything")
+}
+
 // withSigners is a run carrying signer rows, which no test in this package built
 // until now — so every sentence signerNote writes about a signer had been
 // rendered by nothing, including its widths. #24 found the same gap in doctor's

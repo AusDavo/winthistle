@@ -539,7 +539,8 @@ six went:
   the same channels — and `Active == false` has **three** causes rather than two,
   because LND computes it as `peerOnline && link.EligibleToForward()`. What the
   field establishes is *this node's own link is not eligible to forward*.
-- **One is the screen half of #32's first item**, filed there.
+- **One is the screen half of #32's first item**, filed there and **closed with
+  it on 2026-08-27**.
 - **Three are one new class and are #33**: a figure that is **LND's own default**,
   handed over as the peer's behaviour with no attribution — the eleven-minute
   reservation and the 2016-block horizon, twice. `settle`'s `horizonNote` is the
@@ -547,7 +548,12 @@ six went:
   same number, because #20 made it. **A real decision rather than a typo**: the
   style rule requires recovery copy to name clock B **in blocks**, so whether
   hedging the one number that rule insists on is an improvement or a cost is the
-  question, and it should be taken once for all three sites.
+  question, and it should be taken once for all three sites. **There is a fourth
+  site now**, reported on the issue: #32's new standing-shim paragraph in `RecoveryOutcome`
+  names the same 2016 blocks. It was written **unattributed on purpose**,
+  matching the paragraph sixty lines above it on the same screen — one screen
+  saying the same number two ways would be worse than either way said once, and
+  #33 is where all four get the one decision.
 
 **The sweep found nothing else false, and that is worth stating rather than
 leaving unmentioned.** `cmd/winthistle`'s package doc and its `recover` usage line
@@ -583,7 +589,91 @@ pass of that sweep missed. A clean answer to this question is cheap and is
 evidence.
 
 **And PR #31's audit found two more of the rule and one of #21's, filed
-2026-08-27 as **#32**.** Verified in source, none fixed there.
+2026-08-27 as **#32**. All three are closed now** — item 3 in the #27 + #30
+slice, items 1 and 2 with the screen half on 2026-08-27. **Item 1 was the only
+instance found so far with a real operator cost, and the only one that was a
+*write* rather than copy**: every earlier instance put a wrong cause on a
+terminal, and this one put it on disk, where the next `Recover` read it back as
+fact.
+
+- ~~**`recordAbort` writes `ChanCancelled` for a shim that was already gone**~~
+  **Done, 2026-08-27.** The defect as filed is kept below, because the shape of
+  it is the thing to carry rather than the diff; what the slice decided is here.
+
+  **The three decisions.** (1) **The write is guarded by what the journal already
+  established, and `AlreadyGone` never writes `ChanCancelled`.** The narrower
+  question #24 asks — *can it be answered honestly?* — answers **yes** here for
+  the first time, and not because the caller has `AlreadyGone` in hand but
+  because of what it is paired with: `abort.ErrNoShim` establishes an *absence*
+  and nothing more, and what the absence **means** is decided by the row.
+  `ChanShimGone` is a new `ChannelState` — a value, not a column, so the
+  no-migrations rule permits it — written **only** over `ChanShimRegistered`,
+  where psbt_verify never ran, so LND created no channel and nothing is left. A
+  `ChanVerified` row is **left exactly as it stands**, because there the same
+  absence is what a channel that reached `chan_pending` looks like from here.
+  **The two rejected answers each cost the thing that separates the cases.**
+  Writing `ChanShimGone` unconditionally would have overwritten the one signal
+  that distinguishes benign from worrying — the journal has one state column and
+  no migrations, so a row cannot carry both. Leaving *every* already-gone row
+  alone would have left a benign run permanently unfinished with no exit through
+  this tool.
+
+  (2) **`StateAborted` is gated on `leftStanding()` as well as `Report.Clean()`.**
+  `Clean()` establishes that no step failed, which is a fact about the calls and
+  not about what they left. `leftStanding` re-reads the run and asks
+  **`AbortTarget`** — the same function an abort acts on, deliberately, so
+  *"nothing left behind"* cannot drift from *"nothing an abort would touch"*; a
+  second list of states here is exactly how it would. **The consequence is a
+  permanent nag and it is the right one**: a crashed-verified run stays in
+  `aborting` and keeps appearing in `winthistle recover` forever, because nothing
+  this program can read will ever say otherwise — and that is the case where a
+  peer holds its side until clock B runs out. The benign case clears through
+  `ChanShimGone`, so the nag is aimed only at the channel that warrants it, and
+  the screen says outright that it will not clear.
+
+  (3) **The screen names the third cause and stops calling the set
+  not-a-failure.** `RecoveryOutcome` prints the two halves apart, off
+  `alreadyGoneSplit`, which keys the report's shims on the run's own rows — `r`
+  is the load taken **before** the abort ran, which both callers already do, so
+  those are the states the abort found. A shim whose channel the run does not
+  know falls to the **standing** side, because the zero `ChannelState` is not
+  `ChanShimRegistered` and an unknown must not be the thing that gets waved away.
+  The standing paragraph names the peer's full pubkey — greppable against
+  `remote_node_pub`, not `shortKey`'s sixteen characters — and hands over `lncli
+  pendingchannels` and `lncli abandonchannel`, because **this build cannot do
+  it**: the journal never recorded the outpoint. **Closing that window is still
+  not on offer** and was not attempted; `AbortTarget`'s comment says why, and
+  saying it honestly was the slice.
+
+  **`internal/abort` did not change at all**, which was the stated test of
+  whether decision 1 landed in the right place: the distinction was already in
+  `ShimOutcome`.
+
+  **Three controls, all proved to fail against the old code** — nine assertions
+  in `internal/journal`, twenty in `internal/prose`.
+  `TestACrashBetweenVerifyAndTheReceiptIsNotRecordedAsACancelledShim` is the
+  deliverable and it is **node-backed**: it produces the crashed-process shape
+  for real — verify with `skip_finalize`, never call `MarkPending`, read the
+  receipt only so the *test* knows an outpoint the journal never learned — and
+  asserts the channel is **still pending in LND after the recovery**, which is
+  the cost the old row denied. Two node-free ones cover both sides of the guard.
+
+  **Two more were found by rendering the screens and reading them, by no grep.**
+  `recoveryPlan` printed *"An abort of this run would:"* with no bullets under it
+  for a run with nothing left — a heading with nothing under it reads as a
+  rendering fault, and `ChanShimGone` makes that shape ordinary rather than rare.
+  And `stateMeans` had **no arm for `StateAborted`**, so it fell to the default's
+  bare restatement of the value; it says what the state now establishes.
+
+  **And one README sentence this slice's own node test falsified.**
+  `README.md:235` said *"`shim_cancel` still works after a successful
+  `psbt_verify`"*. It does not, once the channel goes on to reach `chan_pending`:
+  `skip_finalize` completes LND's funding flow, `CompleteReservation` consumes
+  the intent, and the cancel comes back with nothing to cancel — which is exactly
+  what the new regtest control measures. The paragraph is about blowing clock A,
+  where nothing got that far, so the reassurance survives with its scope named.
+
+  <details><summary>The defect, as filed</summary>
 
 - **`recordAbort` writes `ChanCancelled` for a shim that was already gone**, and
   `ChanCancelled` is a cause with an actor in it: *"its shim was cancelled before
@@ -599,14 +689,26 @@ evidence.
   behind"* — is reached the same way, because `Report.Clean()` counts failures
   and an `AlreadyGone` shim is not one. **The sharpest instance found so far and
   the only safety-adjacent one**, and no test covers the path.
-- **`MarkSigning` at `run/run.go:522`** writes a state defined as *"the unsigned
-  transaction is out with the signing wallet"* before the ask is made — `sign()`
-  is the next statement and `FileWallet.Signed`'s `os.Remove` runs before the
-  prompt is even printed. `MarkPublishing` is written before its RPC too and
-  everything downstream hedges with *"may"*; `StateSigning`'s renderer hedges the
-  *neighbouring* clause and not this one. **Narrower than it looks and filed
-  anyway**: the wallet does hold the transaction, having built it at step 4; what
-  has not happened is the request to sign.
+
+  </details>
+
+- ~~**`MarkSigning` at `run/run.go:522`** writes a state defined as *"the
+  unsigned transaction is out with the signing wallet"* before the ask is
+  made.~~ **Done, 2026-08-27, and it changed no emitted copy — which is the
+  finding.** The #27 + #30 slice had already taken the renderer's over-claim out,
+  so `prose.stateMeans` says *"That state is written before the wallet is asked
+  for anything"* and is right. What was left was **the constant's own doc**, and
+  it was silent about the ordering where `StatePublishing`'s doc declares it — a
+  gap against the package's own convention, on the one state whose neighbours all
+  keep it. It says it now, along with what *is* established at the write (the
+  wallet holds the transaction because `SigningWallet.Built` is where the
+  transaction came from, at step 4) and what is not (the request to sign, which
+  is the next statement and can fail before the wallet is prompted at all).
+  **`internal/run` did not change**: `run.go:520`'s comment already says
+  *"written before the round rather than after it"* and claims nothing further. A
+  doc comment cannot be asserted on, so the control is
+  `TestTheSigningScreenSaysTheWalletHasNotBeenAsked`, which pins the rendered
+  sentence the doc now points at.
 - ~~**`prose/recovery.go:370` still credits Core's lock release**~~ **Done,
   2026-08-27**, in the #27 + #30 slice, because it was a known-false sentence
   three paragraphs from a line that slice was rewriting and `internal/prose` was

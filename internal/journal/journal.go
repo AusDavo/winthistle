@@ -81,6 +81,16 @@ const (
 	// its channels still in ChanVerified rather than ChanPending, which is what
 	// tells the two apart on an operator's existing file — the channel rows, not
 	// the run state.
+	//
+	// Written *before* the wallet is asked for anything, the way StatePublishing
+	// is written before its RPC, and this line is here because the absence of it
+	// was the whole of #32 item 2. What run.armWindow has established at the
+	// write is that every channel reached chan_pending; the transaction is with
+	// the wallet because the wallet is where it came from — SigningWallet.Built
+	// returned it at step 4 — and the request to sign is the next statement,
+	// which can fail before the wallet is prompted at all. So this state says
+	// where the run got to, not that anybody was asked. prose.stateMeans says
+	// the same to the operator.
 	StateSigning State = "signing"
 
 	// StatePublishing is written *before* PublishTransaction is called, and
