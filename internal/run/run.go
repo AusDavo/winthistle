@@ -655,10 +655,12 @@ func settlePhase(ctx context.Context, d Deps, o Options, armed *arm.Armed,
 	ctx, cancel := context.WithTimeout(ctx, window)
 	defer cancel()
 
-	// No Chain: that was Bitcoin Core, and this build dials no Bitcoin node. LND
-	// moving a channel out of pending_open_channels is the authoritative signal
-	// and needs nobody's help; what is lost is the "2 of an expected 3" depth
-	// line, and settle.Options says so.
+	// No Chain, here or anywhere: that was Bitcoin Core, and this build dials no
+	// Bitcoin node. LND moving a channel out of pending_open_channels is the
+	// authoritative signal and needs nobody's help; what is lost is the "2 of an
+	// expected 3" depth line, and the report now says that as a design fact
+	// rather than as a Core that failed to connect (issue #21). settle.Chain's
+	// own comment says who does fill it — the harness, and only the harness.
 	result, err := settle.Settle(ctx, d.LND.Lightning, members(armed, p, o),
 		settle.Options{FundingTxID: armed.TxID})
 	if result != nil {

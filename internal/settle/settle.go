@@ -147,13 +147,33 @@ type Client interface {
 		opts ...grpc.CallOption) (*lnrpc.PolicyUpdateResponse, error)
 }
 
-// Chain is the optional Core connection that turns "not open yet" into a number
-// of confirmations.
+// Chain turns "not open yet" into a number of confirmations.
 //
-// Optional because assisted mode has no Core. Without it the settlement still
-// works — LND moving a channel out of pending_open_channels is the authoritative
-// signal and needs nobody's help — but the operator sees "not yet" rather than
-// "2 of an expected 3", and the peer's real minimum_depth cannot be learned.
+// Nothing in the application fills it, and nothing may. Item 5 removed Bitcoin
+// Core from this build entirely, and the no-third-party rule forbids the obvious
+// substitute for the same reason it forbids a fee API: a block explorer asked
+// how deep this transaction is has been handed the transaction. So on every
+// production path this is nil, no depth is reported, and depthNote says so as a
+// design fact rather than as a fault.
+//
+// What fills it is the harness. internal/regtestenv keeps a Core — the same way
+// it keeps the simulated cold wallet, as the stand-in item 5 left inside the
+// test environment rather than in the application — and
+// TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth uses it to read a live
+// peer's minimum_depth from above, one block at a time. That reading is the only
+// authoritative one an initiator can get, and it is verified against a running
+// node, which is the kind of evidence this repository does not delete to tidy a
+// shape away.
+//
+// The doc comment this replaces justified the field by "assisted mode has no
+// Core", and assisted mode dissolved with I-2. Stale twice over, which is what
+// issue #21 was really about: a seam nobody fills grows copy nobody checks.
+//
+// If a production depth reading is ever wanted, this is not the seam for it. It
+// would come from LND, which this build already dials — GetTransactions reports
+// num_confirmations for a wallet transaction, and the funding transaction is
+// ours — and it would be a new call site, a registry entry and a decision, not a
+// field somebody fills in.
 type Chain interface {
 	Confirmations(ctx context.Context, txid string) (confs int64, present bool, err error)
 }
@@ -369,13 +389,18 @@ type State struct {
 	Open   bool
 	Active bool
 
-	// Confs is how deep the funding transaction is, from Core. -1 means Core was
-	// not available or has never seen the transaction.
+	// Confs is how deep the funding transaction is, according to Options.Chain.
+	//
+	// -1 on every production run, and that is the rule rather than the exception:
+	// the application sets no Chain and cannot. Only the harness ever sees a
+	// number here. Reports must read -1 as "this build does not count blocks",
+	// never as "the count is unavailable just now".
 	Confs int64
 
 	// ExpectedDepth is the prediction; ObservedDepth is the depth at the moment
 	// the channel first appeared open, which is the peer's real minimum_depth
-	// from above. Zero until that happens, and it stays zero without Core.
+	// from above. Zero until that happens, and — since it is read off Confs — it
+	// stays zero on every run the harness is not driving.
 	ExpectedDepth int64
 	ObservedDepth int64
 
@@ -534,12 +559,15 @@ type Options struct {
 	// Interval is how often to poll. Zero means DefaultInterval.
 	Interval time.Duration
 
-	// Chain is Core, optionally. Without it depth is not reported and the peers'
-	// real minimum_depth cannot be learned.
+	// Chain is a source of confirmation counts, and the application never sets
+	// it — see the Chain type. Nil on every production path; the harness fills
+	// it with regtest's Core.
 	Chain Chain
 
-	// FundingTxID is the batch's transaction, needed only to ask Core how deep
-	// it is. It is the same txid every member's channel point carries.
+	// FundingTxID is the batch's transaction, and it is only ever used to ask
+	// Chain how deep it is. It is the same txid every member's channel point
+	// carries, and run.settlePhase passes it so that a Chain wired in for a test
+	// has something to ask about.
 	FundingTxID string
 
 	// RetryWindow overrides the default patience with an unexplained refusal.

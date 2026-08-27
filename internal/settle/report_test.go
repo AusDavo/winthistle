@@ -254,6 +254,58 @@ func TestThePastHorizonReportDoesNotSayWhatThePeerDid(t *testing.T) {
 	}
 }
 
+// TestTheDepthNoteSaysTheDesignRatherThanAFault is issue #21.
+//
+// The branch under test is the only one an operator has ever seen: Confs is -1
+// on every production run because the application sets no Chain and cannot, so
+// `known` is always false. It named a Bitcoin Core this build has not dialled
+// since item 5 — which reads as something to go and fix — and then offered a
+// second cause, "or it has not seen the transaction", that nothing here asked
+// anything about.
+//
+// The prediction paragraph is asserted on the same report, because that is the
+// other half: State.line prints "expect ~6" on this branch, and the hedge that
+// explains the number used to live on the branch that never fires.
+func TestTheDepthNoteSaysTheDesignRatherThanAFault(t *testing.T) {
+	report := paneCases()["pending with no depth reading"].Report()
+	t.Logf("\n%s", report)
+	rep := flat(report)
+
+	for _, want := range []string{
+		"expect ~6",
+		"The expected depth is a prediction, not a reading",
+		"binds a peer running stock LND and nobody else",
+		"this build dials no Bitcoin node",
+		"not a fault to go and fix",
+		"The channel leaving LND's pending list is the authoritative signal",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Errorf("the report does not say %q:\n%s", want, report)
+		}
+	}
+	for _, gone := range []string{
+		"Core is not connected",
+		"has not seen the transaction",
+		"without Core there is no way",
+	} {
+		if strings.Contains(rep, gone) {
+			t.Errorf("the report still says %q, about a component this build "+
+				"removed and a question it never asked:\n%s", gone, report)
+		}
+	}
+
+	// And with a depth reading — which only the harness can produce — the
+	// prediction is still explained and the design paragraph is not printed.
+	withDepth := flat(paneCases()["pending with a depth reading, and everything in the detail row"].Report())
+	if !strings.Contains(withDepth, "not a reading") {
+		t.Error("the prediction is unexplained when a depth count is present")
+	}
+	if strings.Contains(withDepth, "dials no Bitcoin node") {
+		t.Error("a report carrying a confirmation count still says there is " +
+			"nothing here that can count blocks")
+	}
+}
+
 // flat collapses the wrapping so an assertion can be keyed on a sentence rather
 // than on where prose.Wrap happened to break it. Without it these checks pass
 // and fail on the column the copy was written to, which is not what any of them

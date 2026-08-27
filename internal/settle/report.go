@@ -245,6 +245,21 @@ func policyNote(r *Result) string {
 }
 
 // depthNote says what is being waited for, and admits what cannot be known.
+//
+// Two paragraphs, and which one is conditional was the whole of issue #21.
+//
+// The prediction paragraph is unconditional because State.line prints "expect
+// ~6" unconditionally, and a prediction shown without its hedge is the same
+// defect as an asserted cause. It used to sit on the branch that has never
+// fired on a production run, so the one number an operator actually sees was
+// the one never explained.
+//
+// The depth paragraph is the conditional one, and it says the design fact
+// rather than a fault. It used to say "Core is not connected, or it has not
+// seen the transaction": the first half read as something to go and fix and
+// sent the operator to debug a bitcoind this application has not dialled since
+// item 5, and the second was a cause nothing here established — no question was
+// asked of anything about the transaction's propagation.
 func depthNote(r *Result) string {
 	stalled := r.Stalled()
 	if len(stalled) == 0 {
@@ -253,21 +268,6 @@ func depthNote(r *Result) string {
 	var b strings.Builder
 	b.WriteString("\n")
 
-	known := false
-	for _, s := range stalled {
-		if s.Confs >= 0 {
-			known = true
-		}
-	}
-	if !known {
-		b.WriteString(prose.Para(
-			"No confirmation count is being reported: Core is not connected, or it " +
-				"has not seen the transaction. The channel leaving LND's pending " +
-				"list is still the authoritative signal and needs nobody's help — " +
-				"but without Core there is no way to say how close it is."))
-		return b.String()
-	}
-
 	b.WriteString(prose.Para(
 		"The expected depth is a prediction, not a reading. A peer states its " +
 			"minimum_depth in accept_channel; LND stores it and exposes it over no " +
@@ -275,6 +275,23 @@ func depthNote(r *Result) string {
 			"which is the responder's side of somebody else's channel. So the " +
 			"figure shown is LND's own default policy for a channel of this size, " +
 			"which binds a peer running stock LND and nobody else."))
+
+	known := false
+	for _, s := range stalled {
+		if s.Confs >= 0 {
+			known = true
+		}
+	}
+	if !known {
+		b.WriteString("\n")
+		b.WriteString(prose.Para(
+			"No confirmation count is reported, and none will be: this build dials " +
+				"no Bitcoin node, so there is nothing in it that can count blocks " +
+				"over the funding transaction. That is what this program is, not a " +
+				"fault to go and fix. The channel leaving LND's pending list is the " +
+				"authoritative signal and needs nobody's help — it simply arrives " +
+				"without a countdown in front of it."))
+	}
 	return b.String()
 }
 
