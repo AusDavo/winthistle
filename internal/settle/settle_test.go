@@ -214,32 +214,17 @@ func TestAnInvalidPolicyIsNotRetryable(t *testing.T) {
 	}
 }
 
-func TestPolicyValidateMatchesLNDsBounds(t *testing.T) {
-	ok := Policy{TimeLockDelta: MinTimeLockDelta}
-	if err := ok.Validate(); err != nil {
-		t.Errorf("LND's own minimum was refused: %v", err)
-	}
-	for name, p := range map[string]Policy{
-		"delta below routing.MinCLTVDelta": {TimeLockDelta: MinTimeLockDelta - 1},
-		"negative base fee":                {TimeLockDelta: 80, BaseFeeMsat: -1},
-		"positive inbound base fee":        {TimeLockDelta: 80, InboundBaseFeeMsat: 1},
-		"positive inbound rate":            {TimeLockDelta: 80, InboundFeeRatePPM: 1},
-	} {
-		if err := p.Validate(); err == nil {
-			t.Errorf("%s: accepted", name)
-		}
-	}
-}
-
-// ExpectedDepth reproduces the NumRequiredConfs closure wired up in server.go:
-// 6 for anything above MaxFundingAmount, otherwise 6*stake/MaxFundingAmount
-// clamped into [3, 6]. It is a prediction about a peer running stock LND and the
-// reports say so; this pins the arithmetic, not the claim.
+// ExpectedDepth reproduces lnwallet.ScaleNumConfs: 6 for anything above
+// MaxFundingAmount, otherwise 6*stake/MaxFundingAmount clamped into
+// [MinDepth, MaxDepth]. It is a prediction about a peer running stock LND and
+// the reports say so; this pins the arithmetic, not the claim. That the two
+// bounds are LND's own is TestTranscribedConstantsMatchLND's to say.
 func TestExpectedDepthReproducesLNDsDefaultPolicy(t *testing.T) {
 	cases := map[int64]int64{
-		20_000:               MinDepth, // LND's own MinChanFundingSize
-		250_000:              MinDepth, // the harness fixtures
-		MaxFundingAmount / 2: MinDepth, // 3 exactly, at the clamp
+		20_000:  MinDepth, // LND's own MinChanFundingSize, far under the clamp
+		250_000: MinDepth, // the harness fixtures
+		// 6*8,388,607/16,777,215 = 2.99, and the closure truncates.
+		MaxFundingAmount / 2: 2,
 		MaxFundingAmount:     MaxDepth,
 		MaxFundingAmount + 1: MaxDepth, // wumbo
 		1_000_000_000:        MaxDepth,

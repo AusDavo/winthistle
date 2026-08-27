@@ -34,6 +34,10 @@ func TestLNDsDefaultsAreRecognisedAsSuch(t *testing.T) {
 	}
 }
 
+// TestValidateRefusesWhatLNDRefuses pins that Validate enforces the bounds, not
+// that the bounds are LND's — every case here is keyed on this package's own
+// constant, so it would pass against any value. What the constants are is
+// TestTranscribedConstantsMatchLND's question, and it reads LND to answer it.
 func TestValidateRefusesWhatLNDRefuses(t *testing.T) {
 	ok := Policy{TimeLockDelta: MinTimeLockDelta}
 	if err := ok.Validate(); err != nil {
