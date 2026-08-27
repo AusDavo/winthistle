@@ -614,7 +614,13 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		c.say("no unfinished runs")
 		return
 	}
-	c.fail("%d unfinished run%s in the journal: neither published nor aborted. "+
+	// Warn, not Fail. Fail is "this has to be fixed before a batch can be
+	// opened", and an unfinished run does not stop one: nothing on the run path
+	// consults the journal's other runs before arming, and j.Unfinished has
+	// exactly two callers, neither of them in it. So a Fail here put "Not ready"
+	// at the top of a report about a node that is fine — and, given the sentence
+	// below, most often one that is fine because a batch is running on it.
+	c.warn("%d unfinished run%s in the journal: neither published nor aborted. "+
 		"A run is in this list from the moment its streams open, so unless "+
 		"something is driving one right now it stopped somewhere it should not "+
 		"have and is waiting for a decision:",

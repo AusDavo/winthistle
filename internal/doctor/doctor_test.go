@@ -99,6 +99,33 @@ func TestAnUnfinishedRunIsNotReportedAsStopped(t *testing.T) {
 	}
 }
 
+// TestAnUnfinishedRunDoesNotStopABatch.
+//
+// Fail is "this has to be fixed before a batch can be opened" and Warn is
+// "usable, and the operator should know". Nothing on the run path consults the
+// journal's other runs before arming, so an unfinished one blocks nothing: this
+// is a Warn, and Report.OK() stays true. It failed the pre-flight against a
+// healthy node until #24, which is the half of that issue the copy fix does not
+// reach.
+func TestAnUnfinishedRunDoesNotStopABatch(t *testing.T) {
+	j, cfg := journalWithRuns(t, 2)
+
+	r := &Report{}
+	checkJournal(context.Background(), r, cfg, j, nil)
+
+	if got := r.Checks[0].Status; got != Warn {
+		t.Errorf("the journal check is %v, want %v", got, Warn)
+	}
+	if !r.OK() {
+		t.Errorf("a node with unfinished runs and nothing else wrong is not "+
+			"ready to open a batch:\n%s", r.Report())
+	}
+	if strings.Contains(r.Report(), "Not ready") {
+		t.Errorf("the report opens by saying the node is not ready:\n%s",
+			r.Report())
+	}
+}
+
 func mustRuns(t *testing.T, j *journal.Journal) []*journal.Run {
 	t.Helper()
 	runs, err := j.Unfinished(context.Background())
