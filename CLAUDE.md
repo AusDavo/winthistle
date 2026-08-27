@@ -353,7 +353,7 @@ sizing this slice and not closed by it.**
 **Four more instances, found by the sweep after this slice's own copy was
 written.** Each is verified in source, and each is a decision rather than a typo,
 so each wants its own slice. Filed 2026-08-27 as **#24, #25, #26 and #27**, in
-that order. **#24 is closed; #25, #26 and #27 remain:**
+that order. **#24 and #25 are closed; #26 and #27 remain:**
 
 1. ~~**#24 · `doctor` said unfinished runs had stopped.**~~ **Done, 2026-08-27.**
    `journal.Unfinished` is `state NOT IN (published, aborted)`, and a run is in
@@ -400,13 +400,47 @@ that order. **#24 is closed; #25, #26 and #27 remain:**
    `TestAnUnfinishedRunDoesNotStopABatch` are **node-free** — `checkJournal`
    takes the journal as a parameter and the test package is internal — and the
    first was verified to fail against the old copy rather than only to pass.
-2. **#25 · `internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
-   error out of `SigningWallet.Signed` — a failed `os.Remove`, Ctrl-C, an
-   unreadable file, and `combine.ErrIncompleteWitnesses`, which is the very
-   refusal #22 just rewrote to *avoid* naming why a witness is missing. It
-   persists: `internal/prose/recovery.go:578` renders it as *"1 declined"* on the
-   recovery screen. `SignerAwaiting` is already written twelve lines up and is
-   what the evidence supports.
+2. ~~**#25 · every step-7 failure was journalled as the signer having
+   declined.**~~ **Done, 2026-08-27.** `sign` wrote `journal.SignerDeclined` on
+   **any** error out of `SigningWallet.Signed` — a failed `os.Remove` *before the
+   wallet is prompted at all*, Ctrl-C, an unreadable file, and `combine`'s
+   refusal of a **moved txid, which is an I-3 breach**. And `RecordSigner` upserts
+   on `(run_id, label)`, so the true `SignerAwaiting` row written twelve lines
+   above was **replaced** by the false one; `prose.signerNote` then rendered it as
+   *"1 declined"* on the recovery screen. **It is the only instance of the rule
+   that persisted the wrong cause to disk**, which is why it was picked ahead of
+   the rest.
+
+   **The fix is to write nothing on the error path**, leaving the row already
+   there standing, so the screen says *"1 still awaited"* — which is what
+   happened. A new `SignerState` was rejected on two grounds worth keeping: the
+   distinction it would draw, *asked and still waiting* against *asked and the
+   answer was not usable*, is the difference between a live run and a stopped one,
+   and **that is the run's own state rather than a signer's**; and no honest name
+   for it could separate the classes anyway, because the `os.Remove` and Ctrl-C
+   cases have no answer to call unusable. **Nothing in this build can observe a
+   refusal at all** — a file transport has no channel through which a wallet says
+   no. So `internal/prose` needed no copy change, and none was made.
+
+   **`SignerDeclined` keeps its constant and gains `SignerPartial`'s treatment**:
+   its doc says it has no writer, that a row carrying it is **not** evidence a
+   wallet said no, and not to repurpose it. Journals written before this change
+   carry the value wherever step 7 failed, and `signerNote`'s switch names it
+   explicitly rather than dropping it into the `unknown` bucket — so **the screen
+   still renders those historical rows with the old wrong sentence**, which is
+   `internal/prose`'s to fix and is noted on #30.
+
+   **Decision 2 was taken separately and changed nothing**, which is the result:
+   *"the batch was not signed: %w"* is an outcome the frame established rather
+   than a cause, with the cause wrapped inside it, and the surrounding wrappers
+   name activities. The `jerr` branch's question went moot with the write.
+   `TestAFailedSigningStepIsRecordedAsAwaitedAndNeverAsDeclined` is **node-free** —
+   `sign` uses only `d.Out`, `d.Journal` and `d.Signing`, so `Deps.LND` stays nil
+   — four error classes keyed on `combine.ErrTXIDMoved` and `context.Canceled`
+   rather than on sentences, and verified to fail against the old code on all
+   four. **`docs/design.html` does not carry this claim and did not move**; its
+   four `signer` mentions are about BIP174 and QR scope, and both its `declin`
+   hits are LND's.
 3. **#26 · `internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
    `Active`, which is **this node's link state** — false while our own node is
    bringing links up, and false by default for any channel point missing from the
