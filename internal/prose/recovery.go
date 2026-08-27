@@ -37,8 +37,14 @@ import (
 // Register, per CLAUDE.md: say what happened and what to do, and never
 // euphemise a risk.
 
-// RecoveryList is the screen shown at startup when the journal has runs that
-// stopped somewhere they should not have.
+// RecoveryList is the screen shown at startup when the journal has runs it has
+// not seen finish — neither published nor aborted.
+//
+// It used to say "runs that stopped somewhere they should not have", which is
+// the claim the comment below it exists to explain the screen cannot make.
+// Issue #24 found this line and deliberately left it, to hold that slice to
+// doctor and journal; it is the second of the two internal/prose sites that
+// issue named, and the other was stateMeans' aborting copy.
 func RecoveryList(runs []*journal.Run, now time.Time) string {
 	if len(runs) == 0 {
 		return Para("No unfinished runs. Nothing to recover.")
@@ -335,13 +341,20 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 				"nothing was spent."))
 		if len(rep.Abandoned) > 0 {
 			b.WriteString("\n")
+			// This is #27's claim one function over, and it was found by the
+			// audit rather than by that issue's own sweep, which grepped the
+			// wording failureLine used. What was read here is rep.Abandoned:
+			// this node abandoned n channels. The peer's side is the mechanism's
+			// conclusion, so the mechanism is shown — the way recoveryPlan's own
+			// paragraph shows it, which is this file's model.
 			b.WriteString(Para(fmt.Sprintf(
-				"Your peers are not clean. %d channel%s %s abandoned here and "+
-					"%s still pending on the other side, for 2016 blocks from the "+
-					"funding height. Re-arming against those peers costs another of "+
-					"their pending-channel slots.",
+				"Your peers are not clean. %d channel%s %s abandoned here, and an "+
+					"abandon tells the peer nothing at all — so each of those peers "+
+					"keeps its side pending, and goes on holding one of its own "+
+					"pending-channel slots until 2016 blocks pass from the funding "+
+					"height. Re-arming against those peers costs another slot again.",
 				len(rep.Abandoned), Plural(len(rep.Abandoned)),
-				WasWere(len(rep.Abandoned)), IsAre(len(rep.Abandoned)))))
+				WasWere(len(rep.Abandoned)))))
 		}
 		if alreadyGone > 0 {
 			b.WriteString("\n")
@@ -363,12 +376,17 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 		b.WriteString(Bullet(failureLine(f)))
 	}
 	b.WriteString("\n")
+	// The list is abort.Run's own "safe to call twice" doc, and it has two items
+	// in it. It had three until here: "Core's lock release only ever frees what
+	// Core is actually holding" — issue #32's third item, and #21's class rather
+	// than #6's, which is copy crediting a dependency that was deleted. Item 5
+	// removed Bitcoin Core from the application and every coin lock it took, so
+	// that clause named a step this abort does not have.
 	b.WriteString(Para(
-		"Running the recovery again is safe and is the right next step. Every step " +
-			"in it is written to be safe to call twice: an already-cancelled shim " +
-			"reports itself as already gone, an already-abandoned channel is not an " +
-			"error in LND, and Core's lock release only ever frees what Core is " +
-			"actually holding."))
+		"Running the recovery again is safe and is the right next step. Both steps " +
+			"in it are written to be safe to call twice: an already-cancelled shim " +
+			"reports itself as already gone, and an already-abandoned channel is " +
+			"not an error in LND."))
 	b.WriteString("\n")
 	b.WriteString(Para(
 		"The run stays marked as aborting until it completes cleanly, so it will " +
@@ -386,9 +404,20 @@ func failureLine(err error) string {
 			"have removed it, and a confirmed channel removed that way has its funds " +
 			"stranded. Look at that channel before doing anything else — " + err.Error()
 	case errors.Is(err, abort.ErrBluntNotConfirmed):
+		// "It is still pending here and on the peer" — #27. The first half is
+		// what abort read, in this node's PendingChannels. The second was an
+		// inference, and a sound one, asserted bare on the screen this file's
+		// own comment calls the highest-stakes copy in the build. What is
+		// established is narrower and is enough: nothing was done, so nothing
+		// changed anywhere. Pointing at the paragraph that shows the working was
+		// the other candidate and is not available — that paragraph is on the
+		// Recovery screen and this is RecoveryOutcome, and a screen may not point
+		// at a section it does not have (TestNoScreenPointsBelowItself).
 		return "An abandon needed LND's blunt flag and it was not authorised, so " +
-			"nothing was done to that channel. It is still pending here and on the " +
-			"peer — " + err.Error()
+			"nothing was done to that channel. This node still has it pending, " +
+			"which is what was read. And an abandon tells the peer nothing either " +
+			"way, so this refusal changed nothing on the peer's side: whatever it " +
+			"was holding, it still is — " + err.Error()
 	case errors.Is(err, abort.ErrNoShim):
 		return "There was no funding intent to cancel — " + err.Error()
 	default:
@@ -398,14 +427,41 @@ func failureLine(err error) string {
 
 // ---- small helpers ----
 
+// stateMeans is the one paragraph that renders a run's state.
+//
+// Three of these states are written *before* the work they name — arming when
+// the streams open, signing before the wallet is asked, aborting before the
+// first call of the abort — because a crash must leave artifacts rather than
+// mystery. So a run holding any of them may be running right now, in another
+// terminal or in this process's own teardown, and this paragraph used to say
+// otherwise: "streams *were* open", "*had* gone out to be signed", and worst,
+// "an abort of this run was started and did not finish". That last is #24 one
+// state over — journal.go:86 and docs/design.html both hedge the same claim
+// correctly, and only this screen asserted it.
+//
+// The hedge is here rather than at the caller, which is where #24 put it, and
+// the difference is that here the narrower question can be answered honestly.
+// journal.Unfinished could not say which of its runs had stopped: a run that
+// died mid-arming and one being armed write identical rows, so the hedge had to
+// go where a sentence could carry it. This function is handed the state itself,
+// and each state has an honest reading — "in progress, or interrupted partway"
+// is exactly what aborting establishes. A blanket paragraph at the caller would
+// also over-apply: armed and published are *not* written ahead of their work,
+// and hedging them would weaken two sentences that are simply true.
+//
+// It renders one state per screen, so a clause in each of the three costs the
+// reader nothing.
 func stateMeans(s journal.State) string {
 	switch s {
 	case journal.StateArming:
-		return "Funding streams were open and no channel had reached chan_pending. " +
-			"Whatever is cancellable for free is listed below and most of it will " +
-			"be: a stream that only registered its shim costs nothing to release. " +
-			"Read the channel list rather than this line — psbt_verify starts the " +
-			"funding flow now, so a run can hold both kinds at once."
+		return "Funding streams are open and no channel has reached chan_pending. " +
+			"That state is written when the streams open and does not move again " +
+			"until the gate does, so it says where this run got to and not whether " +
+			"something is driving it right now. Whatever is cancellable for free is " +
+			"listed below and most of it will be: a stream that only registered its " +
+			"shim costs nothing to release. Read the channel list rather than this " +
+			"line — psbt_verify starts the funding flow now, so a run can hold both " +
+			"kinds at once."
 	case journal.StateArmed:
 		return "Every channel in this batch reached chan_pending, which means every " +
 			"one of them is already recoverable by force-close — and the publish " +
@@ -414,14 +470,20 @@ func stateMeans(s journal.State) string {
 			"blunt flag for each one."
 	case journal.StateSigning:
 		return "Every channel in this batch reached chan_pending and the unsigned " +
-			"transaction had gone out to be signed. Nothing was broadcast — the " +
+			"transaction is out with the signing wallet. That state is written " +
+			"before the wallet is asked for anything and holds until a signature " +
+			"comes back, so it says where this run got to and not whether somebody " +
+			"is at the wallet right now. Nothing was broadcast — the " +
 			"signing wallet may hold a complete transaction, and it front-runs " +
 			"nothing, because each of these channels was already recoverable before " +
 			"it was asked. Taking it apart costs what an armed run costs: each " +
 			"channel has to be abandoned, and LND wants its blunt flag for each one."
 	case journal.StateAborting:
-		return "An abort of this run was started and did not finish. What follows " +
-			"is what is left, not what there was."
+		return "An abort of this run is in progress, or one was interrupted " +
+			"partway. That state is written before the first call it describes, so " +
+			"a winthistle recover running in another terminal right now writes " +
+			"exactly this row, and so does an abort that stopped halfway through " +
+			"one. What follows is what is left, not what there was."
 	case "":
 		// Unreachable through this journal — see stateColumn — and written down
 		// anyway, because the default branch below would render it as a sentence
@@ -463,9 +525,17 @@ func channelBreakdown(r *journal.Run, indent string) string {
 		}
 	}
 	if len(parts) == 0 {
-		// Not a blank line. A run with no channels journalled is a run that
-		// stopped before Begin wrote any, and saying so beats an empty column
-		// that reads as a row the renderer gave up on.
+		// Not a blank line, for the reason stateColumn renders "(no state)": a
+		// row that says nothing is read as a rendering fault rather than as a
+		// fact.
+		//
+		// #30 item 5. This comment used to call it "a run that stopped before
+		// Begin wrote any", which asserts a cause twice over. Begin refuses a
+		// batch with no channels in it and writes the run row and the channel
+		// rows in one transaction (journal/write.go), and nothing deletes a
+		// channel row, so a journalled run with no channels is not reachable
+		// through this build at all — which is the reason to render it rather
+		// than a story about how it got here. The emitted copy was always fine.
 		return indent + "no channels\n"
 	}
 
@@ -543,7 +613,15 @@ func split(r *journal.Run) (pending, shims []journal.Channel) {
 // journal, or a newer one's.
 func signerNote(r *journal.Run) string {
 	if len(r.Signers) == 0 {
-		return Para("No signer had been asked for anything when this stopped.")
+		// "No signer had been asked for anything when this stopped" — #30 item 3.
+		// The second half was a claim about the run, not about the signers, and
+		// this screen renders for a run that may be going right now. The first
+		// half survives because the narrower question *can* be answered here:
+		// run.sign writes the SignerAwaiting row before it calls
+		// SigningWallet.Signed, so no row at all means step 7 was never entered.
+		return Para("No signer row was written for this run, and step 7 writes " +
+			"one before it asks a wallet for anything — so nothing has been asked " +
+			"of a wallet.")
 	}
 	var awaiting, signed, partial, declined, unknown int
 	for _, s := range r.Signers {
@@ -576,16 +654,36 @@ func signerNote(r *journal.Run) string {
 		counts = append(counts, fmt.Sprintf("%d still awaited", awaiting))
 	}
 	if declined > 0 {
-		counts = append(counts, fmt.Sprintf("%d declined", declined))
+		counts = append(counts, fmt.Sprintf("%d marked declined", declined))
 	}
 	if unknown > 0 {
 		counts = append(counts, fmt.Sprintf("%d in a state this build does not "+
 			"recognise", unknown))
 	}
 
-	return Para(fmt.Sprintf(
+	out := Para(fmt.Sprintf(
 		"Signers: %s. No key material, PSBT or descriptor is stored in the journal "+
 			"— a signer here is a label and a state.", andList(counts)))
+
+	if declined > 0 {
+		// "%d declined" was the whole of it, and it said a wallet refused.
+		// Nothing in this build can observe a refusal — a file transport has no
+		// channel through which a wallet says no — and since issue #25 nothing
+		// writes the value either. So every row this branch will ever see was
+		// written by the frame that fix removed, which recorded it on *any*
+		// failure of step 7. It stays renderable, because those rows are on
+		// operators' disks; what it may not do is name a cause that was never
+		// observed. See journal.SignerDeclined, which documents the same thing
+		// at the value.
+		out += "\n" + Para(
+			"That declined count comes off a journal an earlier build wrote, and it "+
+				"never meant a wallet said no. The old step 7 recorded it whenever "+
+				"the signing step failed at all — a file that never appeared, one "+
+				"that could not be read, a txid that had moved, or Ctrl-C. Read it "+
+				"as a signing step that did not finish, and the error the run "+
+				"printed at the time for why.")
+	}
+	return out
 }
 
 // andList renders a list the way a sentence wants it.

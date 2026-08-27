@@ -1,5 +1,13 @@
-// Package journal is the run journal: the record of what a batch did, in the
-// order it did it.
+// Package journal is the run journal: the record of what a run wrote, in the
+// order it wrote it.
+//
+// Not "what a batch did", which is what this line used to say. The distinction
+// is the contract issue #24 wrote over three files and #30 filed this line
+// under: every state change is written *before* the call it describes, so the
+// journal records what a run wrote and not whether it is still writing. A run
+// in arming, signing or aborting may be running right now — see
+// Unfinished's doc comment, and prose.stateMeans, which renders these states
+// to an operator.
 //
 // It exists for one moment in particular. Between finalizing the transaction and
 // its confirmation there is a window in which the app holds the only

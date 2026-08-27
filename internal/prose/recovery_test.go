@@ -2,6 +2,8 @@ package prose
 
 import (
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
@@ -147,6 +149,31 @@ func TestTheOutcomeScreenReportsAPartialAbortHonestly(t *testing.T) {
 
 // A clean abort still leaves the peers holding their side, and a screen that
 // said "clean" without saying that would be producing the next incident.
+// #27's claim one function over, which that issue's sweep did not reach.
+//
+// The success path said n channels "are still pending on the other side" off
+// rep.Abandoned, which establishes only that this node abandoned them. Found by
+// the audit run after this slice's copy was written, because the sweep grepped
+// the wording failureLine used. It shows the mechanism now, the way
+// recoveryPlan's own paragraph does.
+func TestTheCleanOutcomeShowsWhyThePeersAreNotClean(t *testing.T) {
+	rep := &abort.Report{Abandoned: []abort.AbandonOutcome{
+		{Channel: lnd.ChannelPoint{TxID: fakeTxID, Index: 0}},
+		{Channel: lnd.ChannelPoint{TxID: fakeTxID, Index: 1}},
+	}}
+	got := flat(RecoveryOutcome(run(journal.StateAborting), rep, nil))
+
+	if regexp.MustCompile(`still pending on the other side`).MatchString(got) {
+		t.Errorf("the outcome screen states the peers' side bare, where only "+
+			"this node's abandons were read:\n%s", got)
+	}
+	mustContain(t, got, "2 channels were abandoned here")
+	mustContain(t, got, "an abandon tells the peer nothing at all")
+	mustContain(t, got, "keeps its side pending")
+	// Clock B still in blocks, which the style rule requires of recovery copy.
+	mustContain(t, got, "until 2016 blocks pass from the funding height")
+}
+
 func TestACleanAbortStillWarnsAboutThePeers(t *testing.T) {
 	rep := &abort.Report{
 		Abandoned: []abort.AbandonOutcome{{
@@ -171,6 +198,56 @@ func TestTheOutcomeScreenNamesTheRefusalThatProtectedYou(t *testing.T) {
 	got := RecoveryOutcome(run(journal.StateAborting), rep, errors.New("x"))
 	mustContain(t, got, "That is the refusal working")
 	mustContain(t, got, "stranded")
+}
+
+// A failure line may say what was read and not what it implies.
+//
+// #27. internal/abort looked the channel up in *this node's* PendingChannels and
+// the abandon did not run, so "it is still pending here" is exactly that — and
+// the arm went on to say "and on the peer", which nothing here asked. The
+// inference is sound, which is what made it a copy decision, and the paragraph
+// in recoveryPlan makes the same claim with its working shown and clock B named
+// in blocks. That paragraph is on a different screen, so this line has to be
+// self-contained: it says the mechanism instead of the mechanism's conclusion.
+func TestTheBluntRefusalSaysWhatWasReadAndNotWhatItImplies(t *testing.T) {
+	rep := &abort.Report{Failures: []error{errWrap(abort.ErrBluntNotConfirmed)}}
+	got := flat(RecoveryOutcome(run(journal.StateAborting), rep, errors.New("x")))
+
+	// The old claim, in the shape it was made. "pending" survives in the
+	// replacement, so the assertion is on the peer clause and not on the word.
+	if regexp.MustCompile(`pending here and on the peer`).MatchString(got) {
+		t.Errorf("the failure line asserts the channel is pending on the peer, "+
+			"where only this node's PendingChannels was read:\n%s", got)
+	}
+	// What was read, named as the thing that was read.
+	mustContain(t, got, "This node still has it pending, which is what was read")
+	// And the mechanism, so the reader can carry the inference themselves.
+	mustContain(t, got, "an abandon tells the peer nothing either way")
+	mustContain(t, got, "changed nothing on the peer's side")
+	// The other arms are unchanged: ErrNotPending's copy was checked in the
+	// same sweep and is sound.
+	notPending := flat(RecoveryOutcome(run(journal.StateAborting),
+		&abort.Report{Failures: []error{errWrap(abort.ErrNotPending)}},
+		errors.New("x")))
+	mustContain(t, notPending, "That is the refusal working")
+}
+
+// The safe-to-call-twice list may not credit a step this abort does not have.
+//
+// #32's third item, and #21's class: copy crediting a deleted dependency. Item 5
+// removed Bitcoin Core and every coin lock the app took, and the list still
+// offered Core's lock release as one of its three reasons. abort.Run's own doc
+// names two, and two is what the screen says now.
+func TestTheSafeToCallTwiceListDoesNotCreditCore(t *testing.T) {
+	got := flat(RecoveryOutcome(run(journal.StateAborting),
+		&abort.Report{Failures: []error{errWrap(abort.ErrNoShim)}},
+		errors.New("x")))
+	if regexp.MustCompile(`(?i)core`).MatchString(got) {
+		t.Errorf("the outcome screen credits Bitcoin Core, which item 5 removed "+
+			"from this application along with every coin lock it took:\n%s", got)
+	}
+	mustContain(t, got, "Both steps in it are written to be safe to call twice")
+	mustContain(t, got, "an already-abandoned channel is not an error in LND")
 }
 
 func TestRecoveryListSaysWhenSomethingMustNotBeTouched(t *testing.T) {
@@ -370,6 +447,141 @@ func TestABlankStateIsNotRenderedAsAVerdict(t *testing.T) {
 	mustContain(t, one, "Abandon 1 channel")
 }
 
+// The three states a live run holds must not be rendered as a run that stopped.
+//
+// #30 items 1 and 2. arming is written when the streams open, signing before the
+// wallet is asked and aborting before the abort's first call — deliberately, so
+// that a crash leaves artifacts — so all three are written by a run that is
+// still going, including this process's own teardown, which prints this very
+// screen through run.recoverRun. The copy said "streams were open", "had gone
+// out to be signed" and "an abort of this run was started and did not finish".
+//
+// Keyed on the shape of the old claim rather than on a word, because the
+// replacements still contain most of the words: "did not finish" is the claim,
+// "in progress, or one was interrupted partway" is the hedge, and a bare grep
+// for "abort" matches both.
+func TestNoStateThatALiveRunHoldsIsRenderedAsARunThatStopped(t *testing.T) {
+	for _, tc := range []struct {
+		state journal.State
+		chans []journal.Channel
+		// asserted is the old bare claim, in the shape it was made.
+		asserted *regexp.Regexp
+		// hedged is what must be there instead.
+		hedged string
+	}{
+		{
+			state:    journal.StateArming,
+			chans:    []journal.Channel{channel(journal.ChanShimRegistered, false)},
+			asserted: regexp.MustCompile(`streams were open`),
+			hedged:   "Funding streams are open",
+		},
+		{
+			state:    journal.StateSigning,
+			chans:    []journal.Channel{channel(journal.ChanPending, true)},
+			asserted: regexp.MustCompile(`had gone out to be signed`),
+			hedged:   "is out with the signing wallet",
+		},
+		{
+			state:    journal.StateAborting,
+			chans:    []journal.Channel{channel(journal.ChanPending, true)},
+			asserted: regexp.MustCompile(`abort of this run was started and did not finish`),
+			hedged:   "in progress, or one was interrupted partway",
+		},
+	} {
+		t.Run(string(tc.state), func(t *testing.T) {
+			got := flat(Recovery(run(tc.state, tc.chans...), time.Now()))
+			if tc.asserted.MatchString(got) {
+				t.Errorf("the %s screen asserts %q, which the journal cannot "+
+					"establish — that state is written before the work it names:\n%s",
+					tc.state, tc.asserted, got)
+			}
+			mustContain(t, got, tc.hedged)
+		})
+	}
+}
+
+// And the hedge has to say why, not just soften the verb.
+//
+// The reason is the same on all three and it is the only thing that makes the
+// hedge readable rather than evasive: the journal records what a run wrote, not
+// whether it is still writing. prose.RecoveryList says it in those words for the
+// list; this is the one-run screen saying it for the state it was asked about.
+func TestTheHedgedStateSaysWhatTheJournalEstablished(t *testing.T) {
+	for _, state := range []journal.State{
+		journal.StateArming, journal.StateSigning, journal.StateAborting,
+	} {
+		got := flat(Recovery(run(state, channel(journal.ChanPending, true)), time.Now()))
+		mustContain(t, got, "written")
+		if !strings.Contains(got, "right now") {
+			t.Errorf("the %s screen hedges without saying that a run in this "+
+				"state may be going right now:\n%s", state, got)
+		}
+	}
+}
+
+// withSigners is a run carrying signer rows, which no test in this package built
+// until now — so every sentence signerNote writes about a signer had been
+// rendered by nothing, including its widths. #24 found the same gap in doctor's
+// journal check.
+func withSigners(state journal.State, states ...journal.SignerState) *journal.Run {
+	r := run(state, channel(journal.ChanPending, true))
+	for i, st := range states {
+		r.Signers = append(r.Signers, journal.Signer{
+			Label: fmt.Sprintf("wallet-%d", i),
+			State: st,
+		})
+	}
+	return r
+}
+
+// The signer note may not say what the run was doing, and it may not say a
+// wallet refused.
+//
+// Two halves of #30, one function. The zero branch said "No signer had been
+// asked for anything when this stopped" — the first half is establishable,
+// because run.sign writes the awaiting row before it calls Signed, and the
+// second is a claim about a run that may be going right now. And "%d declined"
+// says a wallet said no, which nothing in this build can observe: PR #31 stopped
+// sign() writing the value, so every row this will ever see was written by the
+// defect that fix removed.
+func TestTheSignerNoteSaysOnlyWhatTheJournalHolds(t *testing.T) {
+	t.Run("no rows", func(t *testing.T) {
+		got := flat(Recovery(run(journal.StateArming,
+			channel(journal.ChanShimRegistered, false)), time.Now()))
+		if regexp.MustCompile(`asked for anything when this stopped`).MatchString(got) {
+			t.Errorf("the signer note says the run stopped, which it cannot "+
+				"know:\n%s", got)
+		}
+		mustContain(t, got, "No signer row was written for this run")
+		mustContain(t, got, "step 7 writes one before it asks a wallet")
+	})
+
+	t.Run("declined", func(t *testing.T) {
+		got := flat(Recovery(withSigners(journal.StateSigning,
+			journal.SignerDeclined), time.Now()))
+		// The count stays — the row is on disk and dropping the arm would put it
+		// in the unknown bucket — and it must not stand alone as a verdict.
+		mustContain(t, got, "1 marked declined")
+		mustContain(t, got, "never meant a wallet said no")
+		mustContain(t, got, "whenever the signing step failed at all")
+		// The four things the old step 7 actually had in hand when it wrote it.
+		mustContain(t, got, "Ctrl-C")
+		mustContain(t, got, "a txid that had moved")
+	})
+
+	t.Run("every state adds up", func(t *testing.T) {
+		got := flat(Recovery(withSigners(journal.StateSigning,
+			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,
+			journal.SignerDeclined, journal.SignerState("from-the-future")), time.Now()))
+		for _, want := range []string{
+			"1 signed", "1 returned a partial signature", "1 still awaited",
+			"1 marked declined", "1 in a state this build does not recognise",
+		} {
+			mustContain(t, got, want)
+		}
+	})
+}
+
 // halfAborted is the shape of a bad night: an abort that ran partway, so the
 // same run carries channels on both sides of it and in every state at once.
 //
@@ -423,6 +635,29 @@ func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 		"empty list":             RecoveryList(nil, time.Now()),
 		"list of a run with no channels": RecoveryList(
 			[]*journal.Run{run(journal.StateArming)}, time.Now()),
+		// RecoveryOutcome was missing from this map, and it is the screen whose
+		// width is least under this file's control: every failureLine ends with
+		// LND's or abort's own error text, appended to a bullet. Added when #27
+		// lengthened one of those bullets.
+		"outcome, clean": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
+			Abandoned: []abort.AbandonOutcome{{
+				Channel:   lnd.ChannelPoint{TxID: fakeTxID, Index: 0},
+				UsedBlunt: true,
+			}},
+			Cancelled: []abort.ShimOutcome{{ID: lnd.PendingChanID{1, 2, 3}}},
+		}, nil),
+		// signerNote's own sentences, which nothing measured before: the counts
+		// line at its widest, and the declined paragraph under it.
+		"signing, every signer state": Recovery(withSigners(journal.StateSigning,
+			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,
+			journal.SignerDeclined, journal.SignerState("from-the-future")), time.Now()),
+		"outcome, partial": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
+			Failures: []error{
+				errWrap(abort.ErrBluntNotConfirmed),
+				errWrap(abort.ErrNotPending),
+				errWrap(abort.ErrNoShim),
+			},
+		}, errors.New("the abort did not complete")),
 	}
 	for name, text := range screens {
 		for i, line := range strings.Split(text, "\n") {
