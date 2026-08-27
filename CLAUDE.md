@@ -663,25 +663,59 @@ row to find what the previous one's vocabulary could not see.** Denominator:
 `fmt.Fprint*` and 15 `prose` calls plus 41 operator-reaching errors in `run`,
 and 50 errors in `arm`. All five verified in source, and the LND half of the
 sharpest one re-read at v0.21.2-beta. Filed 2026-08-27 as **#39, #40, #41, #42
-and #43**; none is fixed, and each is a decision rather than a typo.
+and #43**; **#39 is closed and the other four remain**, and each is a decision
+rather than a typo.
 
-- **#39 · `reportArmed` puts the commitment signature on the peer, and says the
-  funds come back without this node.** The sharpest, because it is the screen
-  the operator reads with one call left and because **the same function
-  contradicts it eighteen lines later**. `funderProcessFundingSigned` parses
-  `commitSig` from **the peer's `funding_signed`**
-  (`msg.CommitSig.ToSignature()`, `:2805`) and hands it to
-  `CompleteReservation(nil, commitSig)` — so **this node** stored **the
-  peer's** signature, which is what `CLAUDE.md`'s own I-1 citation and
-  `arm.go:756-757` both say. The screen has the custodian inverted, and *"even
-  if this node vanished"* is denied by the backup paragraph below it: *"lives
-  in this node's channel database … the backup plus the peer's data-loss
-  protection is what recovers them"*. **The safety conclusion is not in
-  question** — recoverable by force-close is I-1 and is executed by a test. The
-  clause an operator acts on is the one that is wrong, at the moment the copy
-  is telling them to store the backup off the box. **And nothing renders this
-  screen and asserts on it**, which is #24's `checkJournal` finding in a third
-  package. - **#40 · `arm.Verify`'s doc still describes the ordering PR #35
+- ~~**#39 · `reportArmed` puts the commitment signature on the peer, and says
+  the funds come back without this node.**~~ **Done, 2026-08-27.** The first
+  instance of the rule found in copy describing **a mechanism inside LND's own
+  code**, so getting it right meant reading LND rather than reading this build.
+  `funderProcessFundingSigned` parses `commitSig` from **the peer's
+  `funding_signed`** (`msg.CommitSig.ToSignature()`, `:2805`) and hands it to
+  `CompleteReservation(nil, commitSig)` at `:2813`, before `chan_pending` at
+  `:2897` — so **this node** stored **the peer's** signature. The screen had the
+  custodian inverted and **the same function denied its second clause eighteen
+  lines later**, in the backup paragraph.
+
+  **The screen says `"this node has stored the peer's commitment signature"`
+  now**, one clause, copying `arm.go:756-757` — which is the model rather than
+  the thing to edit, and `internal/arm` did not change. **Saying nothing about
+  custody was the other available answer and was rejected**: the backup
+  paragraph depends on the custody fact, so a screen that never states it leaves
+  *"already recoverable"* as a bare assertion and makes the paragraph below it a
+  non-sequitur. *"even if this node vanished"* is **deleted rather than
+  rescoped** — it is the clause an operator acts on and it says the backup is
+  optional at the moment the copy is telling them to store it off the box.
+  **I-1 did not move**: *"a force-close would get the funds back"* stands.
+
+  **Decision 2 was the shape question and the fix to decision 1 dissolved it.**
+  The two paragraphs stay apart. The backup one is **conditional** — it renders
+  only when the export carried single-channel backups — and #21's mistake is a
+  claim whose correction sits on a branch; the answer is to make the
+  unconditional paragraph true standing alone, not to merge them. **Whether that
+  branch can be false is now stated rather than assumed**, in `reportArmed`'s
+  doc: `armWindow` guards `MultiChanBackup` and that guard **does not reach the
+  singles this screen keys on**, because LND's `createBackupSnapshot` packs the
+  multi from the same slice and `Multi.PackToWriter` writes a version byte and a
+  count for zero backups. In practice it is true — every channel here reached
+  `chan_pending`, and `FetchStaticChanBackups` reads pending-open channels too —
+  and in practice is not the same as checked.
+
+  **The control is the fix**, because `reportArmed` was printed into two live
+  transcripts and asserted on by neither, which is #24's `checkJournal` finding
+  in a third package. `report_internal_test.go` is **node-free** — every field
+  `reportArmed` reads is exported or in-package — keys on the *shape* of the old
+  claim rather than on a bare word, renders both sides of the conditional, and
+  **measures the pane, which nothing had done for this screen**. Five assertions
+  fail against the old copy.
+
+  **`README.md` and `docs/design.html` were checked and are right**, which is
+  why neither moved and why the page was not republished. `README.md:165`
+  (*"has stored the peer's commitment signature"*), `:209` and `:345`, and
+  `docs/design.html:686`, `:726` and `:748` all say what LND does; **the screen
+  never matched the citation the rest of the repository already carried.** The
+  one site of *"even if this node vanished"* in the tree was this one.
+- **#40 · `arm.Verify`'s doc still describes the ordering PR #35
   reversed.** A hole left **inside #35's own slice**, at the other end of the
   write it moved: the doc says *"each success is journalled as it happens"* and
   *"a channel recorded as verified is one LND has committed an outpoint for"*,
