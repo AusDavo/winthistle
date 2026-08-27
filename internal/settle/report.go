@@ -36,7 +36,9 @@ func (r *Result) Summary() string {
 	}
 	line := fmt.Sprintf("%d of %d open, %d policied", open, len(r.States), policied)
 	if n, ok := r.NearestExpiry(); ok {
-		line += fmt.Sprintf("; %d blocks before the first peer gives up", n)
+		// "left on the horizon" and not "before the peer gives up". The count
+		// is this node's own; see horizonNote for whose number it is not.
+		line += fmt.Sprintf("; %d blocks left on the funding horizon", n)
 	}
 	return line
 }
@@ -69,7 +71,26 @@ func (r *Result) Report() string {
 	return b.String()
 }
 
+// detailIndent is the column the rows' second line and their continuations
+// start at: two spaces, the eighteen the peer column is wide, and the space
+// after it. Written out rather than computed because the row above is a format
+// string and the two have to agree by eye.
+const detailIndent = "                     "
+
 // line is one channel's row.
+//
+// The third column is LND's own refusal text and nothing bounds it: "invalid
+// parameter (time lock delta of 4 is too small)" renders this row at 93 columns
+// against a 78-column pane, measured off a real refusal. So it wraps under the
+// row when it does not fit, the way prose.Table puts an over-wide note on its
+// own line.
+//
+// Wrapped rather than truncated, and that is the decision rather than the
+// obvious tidier one. A truncated refusal is a cause the operator cannot read at
+// all, which is the defect this whole file was just audited for; a line this
+// program wrapped on purpose is merely wider than it wanted to be. The emulator
+// would wrap it anyway, at whatever column the pane happens to be, and at that
+// point the alignment of every row below it is gone too.
 func (s State) line() string {
 	var b strings.Builder
 
@@ -80,8 +101,14 @@ func (s State) line() string {
 	case s.Open:
 		where = "open, peer offline"
 	}
-	b.WriteString(fmt.Sprintf("  %-18s %-20s %s\n", short(s.Member.Peer), where,
-		s.Policy))
+	row := fmt.Sprintf("  %-18s %-20s", short(s.Member.Peer), where)
+	outcome := s.Policy.String()
+	if len([]rune(row))+1+len([]rune(outcome)) <= prose.PaneWidth {
+		b.WriteString(row + " " + outcome + "\n")
+	} else {
+		b.WriteString(strings.TrimRight(row, " ") + "\n")
+		b.WriteString(prose.Wrap(outcome, detailIndent, detailIndent))
+	}
 
 	detail := []string{}
 	if s.Confs >= 0 {
@@ -100,7 +127,7 @@ func (s State) line() string {
 		detail = append(detail, fmt.Sprintf("%d policy attempts", s.Attempts))
 	}
 	if len(detail) > 0 {
-		b.WriteString(fmt.Sprintf("  %-18s %s\n", "", strings.Join(detail, ", ")))
+		b.WriteString(prose.Wrap(strings.Join(detail, ", "), detailIndent, detailIndent))
 	}
 	return b.String()
 }
@@ -282,6 +309,19 @@ func depthLesson(r *Result) string {
 }
 
 // horizonNote is the warning about LND's funding horizon.
+//
+// Every figure here is ours. The countdown is funding_expiry_blocks off
+// PendingChannels, which is this node's own arithmetic against LND's own
+// default, and ForgetHorizonBlocks is that default written down. Nothing in this
+// build has heard from the peer about any of it, and no RPC reports a peer's
+// horizon to the initiator any more than one reports its minimum_depth.
+//
+// So this used to quote LND's proto hedge — "very likely cancelled" — and
+// override it in the same sentence with "and that is what has happened", then
+// print our own constant as the number of blocks the peer waited. Both are
+// causes the program cannot know, and it said them at the moment the operator is
+// under the most pressure and the remedy is still live. The remedy did not
+// change; the certainty did.
 func horizonNote(r *Result) string {
 	blocks, ok := r.NearestExpiry()
 	if !ok {
@@ -294,18 +334,26 @@ func horizonNote(r *Result) string {
 	switch {
 	case blocks < 0:
 		b.WriteString(prose.Para(fmt.Sprintf(
-			"The funding horizon has passed: %d block%s past it. LND's own proto "+
-				"says a negative value means the responder has very likely "+
-				"cancelled the funding, and that is what has happened — the peer "+
-				"waited %d blocks from the broadcast height and closed its side as "+
-				"FundingCanceled.", -blocks, prose.Plural(int(-blocks)),
-			ForgetHorizonBlocks)))
+			"This node's count of the funding horizon has run out: %d block%s past "+
+				"it. The count is ours — funding_expiry_blocks off PendingChannels, "+
+				"measured against LND's own default of %d blocks from the broadcast "+
+				"height — and LND's proto says a negative value means the responder "+
+				"has very likely cancelled the funding.", -blocks,
+			prose.Plural(int(-blocks)), ForgetHorizonBlocks)))
+		b.WriteString("\n")
+		b.WriteString(prose.Para(
+			"Very likely is as far as this goes. Nothing here has heard from the " +
+				"peer, and its horizon is its own: another implementation, another " +
+				"version, or a non-default --maxwaitnumblocksfundingconf gives up " +
+				"somewhere else, and this build can no more read that figure than " +
+				"it can read a peer's minimum_depth."))
 		b.WriteString("\n")
 		b.WriteString(prose.Para(
 			"This node has not given up, and will not: waitForFundingWithTimeout " +
 				"only starts the timeout when we are NOT the initiator, and we are. " +
-				"So if the transaction confirms now, this node opens a channel the " +
-				"peer has forgotten, and the only way out of that is a force-close."))
+				"So if the transaction confirms now and the peer has in fact " +
+				"stopped waiting, this node opens a channel with nobody on the " +
+				"other side of it, and the only way out of that is a force-close."))
 		b.WriteString("\n")
 		b.WriteString(prose.Bullet(
 			"Get the transaction confirmed anyway if it is close, and expect to " +
@@ -319,12 +367,12 @@ func horizonNote(r *Result) string {
 
 	case blocks < HorizonUrgent:
 		b.WriteString(prose.Para(fmt.Sprintf(
-			"%d blocks — roughly a day — before the first peer gives up on this "+
-				"funding transaction. Act now.", blocks)))
+			"%d blocks — roughly a day — left on this funding transaction's "+
+				"horizon. Act now.", blocks)))
 	case blocks < HorizonWarn:
 		b.WriteString(prose.Para(fmt.Sprintf(
-			"%d blocks before the first peer gives up on this funding transaction. "+
-				"There is time, and there is no reason to leave it.", blocks)))
+			"%d blocks left on this funding transaction's horizon. There is time, "+
+				"and there is no reason to leave it.", blocks)))
 	default:
 		b.WriteString(prose.Para(fmt.Sprintf(
 			"%d blocks before the funding horizon, which is a long way off. The "+
@@ -335,11 +383,14 @@ func horizonNote(r *Result) string {
 
 	b.WriteString("\n")
 	b.WriteString(prose.Para(fmt.Sprintf(
-		"After %d blocks from its broadcast height the responder stops waiting and "+
-			"closes its side as FundingCanceled. This node does not — it is the "+
-			"initiator, and waitForFundingWithTimeout only arms the timeout for the "+
-			"other side. A transaction that confirms after that leaves this node "+
-			"holding a channel the peer has forgotten.", ForgetHorizonBlocks)))
+		"That %d is LND's own default: a responder running stock LND stops waiting "+
+			"that far from the broadcast height and closes its side as "+
+			"FundingCanceled. It binds a peer running stock LND and nobody else — "+
+			"a peer's real horizon is its own, and no RPC reports it to the "+
+			"initiator. This node has no horizon at all: waitForFundingWithTimeout "+
+			"arms the timeout only for the other side, so a transaction that "+
+			"confirms after a peer has stopped waiting leaves this node holding a "+
+			"channel with nobody on the other side of it.", ForgetHorizonBlocks)))
 	b.WriteString("\n")
 	b.WriteString(prose.Bullet(
 		"Build a CPFP child spending the change output, in your own wallet. It is " +
