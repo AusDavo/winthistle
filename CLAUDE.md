@@ -46,7 +46,11 @@ node it is meant to arm was two minor releases ahead. Nothing in the safety mode
 turned out to be wrong at v0.21.2-beta; roughly thirty line numbers were, which
 is the same way `handleFundingSigned` happened. **On the next bump, re-cite
 before assuming**: `go.mod`, `regtest/.env` and the citations are three separate
-pins and only the first moves by itself.
+pins and only the first moves by itself. **The one citation that now fails rather
+than waiting to be re-read is I-1's ordering** —
+`TestTheReceiptIsProvedByForceClosingTheChannel` force-closes an armed channel
+and makes Bitcoin Core check the commitment's witness, so `make test` is the
+first step of a bump and the re-read is the second.
 
 **What is built and exercised against live regtest**, and is the guide to what
 exists: `winthistle run`, `doctor` and `recover` work against the cluster in
@@ -54,8 +58,9 @@ exists: `winthistle run`, `doctor` and `recover` work against the cluster in
 `example-*` printers are the whole command set. `internal/arm` runs the
 **inverted** sequence — `skip_finalize` at verify, the *n* receipts before
 anything is signed, one publish — and the I-1 gate is observed at *n* = 3 with
-nothing signed when it opens. `run` **builds nothing and signs nothing**: it
-prints the recipients, writes them to `FILE-recipients.csv`, reads the unsigned
+nothing signed when it opens, with what the receipt is *worth* observed
+separately by force-closing an armed channel. `run` **builds nothing and signs
+nothing**: it prints the recipients, writes them to `FILE-recipients.csv`, reads the unsigned
 transaction back from `--psbt FILE`, and reads the signed one from
 `FILE-signed.psbt` or `FILE-signed.txn`. `internal/combine` has twenty
 adversarial tests on inbound PSBTs. `internal/plan` has the batch verifier. None
@@ -216,6 +221,24 @@ appears in exactly one place in `internal/`, and `run.writeRecipients` is it.
   the trust boundary moved, and no copy may imply the CSV is *why* the addresses
   are right.
 
+**The `chan_pending` receipt is observed now, and "inferred from source" was a
+stated property.** Issue #16, landed 2026-08-27: an armed channel is published,
+mined and then force-closed, and its commitment transaction is watched into a
+block. `README.md` said no test in this repository force-closes a pending channel
+"so recoverability is inferred from the source and never exercised end to end",
+and that paragraph is deleted rather than softened. **The rule it leaves behind:
+the test that proves what the app promises cannot be written with the app's own
+capabilities, and that is the right way round.** `CloseChannel` is never-listed —
+one of the ten refusals `doctor` makes LND confirm — and
+`TestEveryLNDCallSiteIsRegistered` scans `_test.go` and the harness too, so the
+force-close goes through `regtest/bin/lncli` and
+`regtestenv.ForceCloseOutOfBand` is the one place it does. **Do not register
+`CloseChannel` to quiet the guard**: the credential's inability to close a
+channel is a product claim, and trading it for a test's convenience would be
+trading the thing for the evidence of the thing. No `docker` control was added
+either; the harness shells out to the wrapper an operator would run and nothing
+more.
+
 **Three things item 5 decided, which the code now depends on:**
 
 1. **There is no fee rate anywhere in this build.** Item 5 made it declared
@@ -247,7 +270,8 @@ What survives, and what `internal/run` imports: `arm` · `plan` · `combine` ·
 
 **The mainnet cold probe passed on 2026-08-26**, run
 `20260826-043441-9a8f28`. The safety model below is verified against LND source,
-against a running regtest node, **and now against mainnet**: two real peers, two
+against a running regtest node — including the one claim that used to be source
+only, see issue #16 below — **and now against mainnet**: two real peers, two
 of two `chan_pending` over an unsigned transaction, backups exported off pending
 channels (7, 4,738 bytes), a signed transaction whose txid had not moved, step 8
 withheld, and a teardown that left nothing on this node.
@@ -319,7 +343,8 @@ cannot know.**
 ## The three invariants
 
 These are the product, not preferences. Each carries a source citation so you can
-verify it rather than trust this file.
+verify it rather than trust this file, and I-1's ordering carries a test that
+executes it.
 
 **If you believe an invariant is wrong, say so and stop. Do not work around one,
 and do not weaken one to make a test pass.**
@@ -337,6 +362,19 @@ guarded by `completeChan.ChanType.HasFundingTx()`, and emits `chan_pending` at
 `:2897`, after it. So each `chan_pending` is a receipt that the channel is
 recoverable by force-close. `no_publish` sets `NoFundingTxBit`
 (`lnwallet/reservation.go:415`), which clears `HasFundingTx()`.
+
+**And that consequence is executed rather than inferred, since issue #16.**
+`TestTheReceiptIsProvedByForceClosingTheChannel` in
+`internal/arm/force_close_regtest_test.go` arms one channel through `drive()`,
+publishes, mines the batch to confirmation, and force-closes the channel through
+`regtest/bin/lncli` — out of band of the Go client, because `CloseChannel` is
+never-listed and `TestEveryLNDCallSiteIsRegistered` scans `_test.go` too. The
+commitment reaches the mempool and then a block, spending the outpoint
+`chan_pending` named, with the four-element P2WSH witness of a 2-of-2. **Bitcoin
+Core is the judge, not LND**: consensus checked both signatures and this node
+holds one of the two keys, so the peer's was stored before the receipt arrived.
+This is what closes the silent failure — the ordering moving is the one break
+that leaves every other assertion in the repository passing.
 
 **The function is `funderProcessFundingSigned`.** This file used to cite
 `handleFundingSigned`, which does not exist at any version and never did. The
@@ -383,6 +421,18 @@ calls and requires zero.
 in `internal/arm/skip_finalize_regtest_test.go`: *n* = 2 streams reached
 `chan_pending` at the outpoints of an **unsigned** transaction, with nothing
 signed and the mempool clear. Both receipts arrived inside 0.55 s.
+
+**And the receipt cashed on regtest, 2026-08-27** — issue #16.
+`TestTheReceiptIsProvedByForceClosingTheChannel` in
+`internal/arm/force_close_regtest_test.go`: one armed channel, published, mined,
+force-closed through `regtest/bin/lncli`, and its commitment mined. 1.34 s, and
+**not gated behind `WINTHISTLE_SLOW`** — that gate is for clock A, which is
+wall-clock; this is all mining, and a gated test is a test that does not run.
+**Where it stops is a decision**: the issue's shape ended by mining past
+`to_self_delay` and asserting the swept output comes back, and that is LND's
+sweeper rather than the funding ordering. A test that can fail for two unrelated
+reasons names neither. `to_self_delay` is read off `ListChannels` and logged, so
+the number it does not wait out cannot rot.
 
 NEVER change this to "all but the last", **even though that is what LND's own
 docs recommend** (`docs/psbt.md:643`). That idiom exists because `lncli` has no
@@ -564,6 +614,17 @@ unspent, in a transaction only we could have signed. Every channel reached
 `chan_pending`, which makes it recoverable by force-close *once the funding
 transaction confirms* — before that there is no channel yet, only a promise.
 
+**LND will still force-close that promise if asked, and it is the wrong move.**
+Measured at v0.21.2-beta while building issue #16's test: `closechannel --force`
+on a *pending* channel is not refused. LND marks it
+`ChanStatusBorked|ChanStatusCommitBroadcasted` and broadcasts the commitment,
+which Core accepts as a child of the unconfirmed funding transaction — and on a
+batch that was never published, that commitment's parent does not exist anywhere.
+So the ten-minute-window instinct to "close it and start again" destroys the
+channel and recovers nothing. `internal/abort` abandons rather than closes, and
+`CloseChannel` is never-listed, which is why the app cannot make this mistake on
+an operator's behalf.
+
 **But it cannot be abandoned either.** An unconfirmed funding transaction never
 becomes safe to abandon on its own: its inputs stay unspent, so it stays valid
 indefinitely, and eviction from mempools does not invalidate it. `run.RecoverOne`
@@ -740,9 +801,10 @@ abort path*.
   shim, which costs nothing because the state lives in named volumes and
   `docker cp` still lands the credentials owned by you.
 
-  Confirmation depth, stuck transactions, CPFP and LND's ~2016-block forget
-  horizon are all testable in seconds — the horizon is about ten seconds of
-  mining. **The peers' ten-minute window is not**, and this file used to list it
+  Confirmation depth, stuck transactions, CPFP, a force-close of an armed
+  channel and LND's ~2016-block forget horizon are all testable in seconds — the
+  horizon is about ten seconds of mining, and the force-close about one. **The
+  peers' ten-minute window is not**, and this file used to list it
   among them. That clock is wall-clock and cannot be mined forward:
   `internal/arm/clock_regtest_test.go` is gated behind `WINTHISTLE_SLOW` and
   calls itself "the one test in this repository that takes longer than a coffee".
