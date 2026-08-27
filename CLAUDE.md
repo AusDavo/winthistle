@@ -485,6 +485,39 @@ longer emits. PR #23's `doctor_regtest_test.go` fix held, and every surviving
 `Contains` against a dead sentence is a *negative* assertion with a comment
 saying so.
 
+**And PR #31's audit found two more of the rule and one of #21's, which makes
+four sweeps in a row.** Verified in source, none fixed there, filed 2026-08-27 as
+**#32**. The count is the point: #23's sweep found four, #29's found six, #31's
+found three, and each was run *after* the previous slice's copy was written.
+**Do not write that this set is exhausted.**
+
+- **`recordAbort` writes `ChanCancelled` for a shim that was already gone**, and
+  `ChanCancelled` is a cause with an actor in it: *"its shim was cancelled before
+  it ever reached pending."* `journal/recover.go:260-263` discards
+  `ShimOutcome.AlreadyGone` — whose **own doc comment names this consumer**,
+  *"which matters when reading a journal after the fact"* — and `setChannelState`
+  is an unguarded `UPDATE`, so the truthful `verified` row is overwritten. **The
+  case where the row is false is documented 76 lines above the write**, in
+  `AbortTarget`: a crashed process reports `AlreadyGone` for a channel that is
+  actually pending. The screen then says *"Nothing of this run is still standing
+  in LND"* and `AbortTarget` emits nothing for it, so **a second `Recover` cannot
+  pick it up**. `StateAborted` — *"the abort completed with nothing left
+  behind"* — is reached the same way, because `Report.Clean()` counts failures
+  and an `AlreadyGone` shim is not one. **The sharpest instance found so far and
+  the only safety-adjacent one**, and no test covers the path.
+- **`MarkSigning` at `run/run.go:522`** writes a state defined as *"the unsigned
+  transaction is out with the signing wallet"* before the ask is made — `sign()`
+  is the next statement and `FileWallet.Signed`'s `os.Remove` runs before the
+  prompt is even printed. `MarkPublishing` is written before its RPC too and
+  everything downstream hedges with *"may"*; `StateSigning`'s renderer hedges the
+  *neighbouring* clause and not this one. **Narrower than it looks and filed
+  anyway**: the wallet does hold the transaction, having built it at step 4; what
+  has not happened is the request to sign.
+- **`prose/recovery.go:370` still credits Core's lock release** in the
+  safe-to-call-twice list, and item 5 removed Core and every coin lock the app
+  took. **#21's class rather than #6's** — copy crediting a deleted dependency —
+  and filed with the other two because one sweep found all three.
+
 **And the sweep's other half found a test that could only pass.**
 `internal/doctor/doctor_regtest_test.go`'s second loop still named `"Bitcoin
 Core"`, `"the cold wallet"`, `"the coins"` and `"the fee rate"` — four checks
