@@ -369,12 +369,17 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 		b.WriteString(Bullet(failureLine(f)))
 	}
 	b.WriteString("\n")
+	// The list is abort.Run's own "safe to call twice" doc, and it has two items
+	// in it. It had three until here: "Core's lock release only ever frees what
+	// Core is actually holding" — issue #32's third item, and #21's class rather
+	// than #6's, which is copy crediting a dependency that was deleted. Item 5
+	// removed Bitcoin Core from the application and every coin lock it took, so
+	// that clause named a step this abort does not have.
 	b.WriteString(Para(
-		"Running the recovery again is safe and is the right next step. Every step " +
-			"in it is written to be safe to call twice: an already-cancelled shim " +
-			"reports itself as already gone, an already-abandoned channel is not an " +
-			"error in LND, and Core's lock release only ever frees what Core is " +
-			"actually holding."))
+		"Running the recovery again is safe and is the right next step. Both steps " +
+			"in it are written to be safe to call twice: an already-cancelled shim " +
+			"reports itself as already gone, and an already-abandoned channel is " +
+			"not an error in LND."))
 	b.WriteString("\n")
 	b.WriteString(Para(
 		"The run stays marked as aborting until it completes cleanly, so it will " +

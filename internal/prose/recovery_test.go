@@ -207,6 +207,24 @@ func TestTheBluntRefusalSaysWhatWasReadAndNotWhatItImplies(t *testing.T) {
 	mustContain(t, notPending, "That is the refusal working")
 }
 
+// The safe-to-call-twice list may not credit a step this abort does not have.
+//
+// #32's third item, and #21's class: copy crediting a deleted dependency. Item 5
+// removed Bitcoin Core and every coin lock the app took, and the list still
+// offered Core's lock release as one of its three reasons. abort.Run's own doc
+// names two, and two is what the screen says now.
+func TestTheSafeToCallTwiceListDoesNotCreditCore(t *testing.T) {
+	got := flat(RecoveryOutcome(run(journal.StateAborting),
+		&abort.Report{Failures: []error{errWrap(abort.ErrNoShim)}},
+		errors.New("x")))
+	if regexp.MustCompile(`(?i)core`).MatchString(got) {
+		t.Errorf("the outcome screen credits Bitcoin Core, which item 5 removed "+
+			"from this application along with every coin lock it took:\n%s", got)
+	}
+	mustContain(t, got, "Both steps in it are written to be safe to call twice")
+	mustContain(t, got, "an already-abandoned channel is not an error in LND")
+}
+
 func TestRecoveryListSaysWhenSomethingMustNotBeTouched(t *testing.T) {
 	runs := []*journal.Run{
 		run(journal.StateArming, channel(journal.ChanShimRegistered, false)),
