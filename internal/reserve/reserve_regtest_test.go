@@ -180,8 +180,8 @@ func TestAnAllPrivateBatchIsNotJudgedAtAll(t *testing.T) {
 // psbt_verify said, then takes the stream back down.
 //
 // Nothing is finalized, so nothing reaches chan_pending and no peer spends one of
-// its pending-channel slots — see HANDOFF.md, finding 6, for why that matters to
-// a suite that runs repeatedly.
+// its pending-channel slots — see HANDOFF.md's "the peers do not forget an
+// aborted batch", for why that matters to a suite that runs repeatedly.
 func tryVerifyOneChannel(t *testing.T, env *regtestenv.Env, peer string) error {
 	t.Helper()
 
