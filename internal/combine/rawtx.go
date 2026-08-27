@@ -5,6 +5,8 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
+	"strings"
 
 	"github.com/btcsuite/btcd/btcutil/psbt"
 	"github.com/btcsuite/btcd/wire"
@@ -15,13 +17,21 @@ var (
 	// transaction, in either hex or binary.
 	ErrNotATransaction = errors.New("that is not a raw transaction")
 
-	// ErrNoWitnesses means a raw transaction arrived with nothing signed on it.
+	// ErrIncompleteWitnesses means a raw transaction arrived without a witness on
+	// every input.
 	//
 	// A raw transaction is only useful at step 7 because of what it carries that
-	// the base PSBT does not, which is the completed witnesses. One with no
-	// witnesses carries nothing at all: it is the same transaction the app
-	// already has, spelled differently.
-	ErrNoWitnesses = errors.New("this transaction carries no signatures")
+	// the base PSBT does not, which is the completed witnesses. One missing any
+	// of them cannot be published, and the two ways it can be missing them are
+	// different situations for the operator — see SignedFromTX, which
+	// distinguishes them in the sentence it writes.
+	//
+	// One sentinel and not two, because no caller tells them apart: step 7's only
+	// caller refuses. Its text was "this transaction carries no signatures",
+	// which was the over-claim at the sentinel level — it was returned for the
+	// partial case too, where it is plainly false — and the name said the same
+	// thing, which is why the name moved with it.
+	ErrIncompleteWitnesses = errors.New("this transaction is not completely signed")
 )
 
 // ParseTX reads a network-serialized transaction that arrived as either hex text
@@ -159,15 +169,57 @@ func SignedFromTX(base, body []byte) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rebuilding the base's transaction: %w", err)
 	}
+	// Counted before anything is said about it, which is issue #22. This used to
+	// return from inside the lifting loop on the first witnessless input, so what
+	// it had established was "input i carries no witness" and what it said was
+	// "this transaction carries no signatures … that is the transaction you built
+	// at step 4". Both are false of a transaction whose input 0 is signed and
+	// whose input 3 is not, and the error named the input in its own device label
+	// while the sentence beside it contradicted that.
+	//
+	// The txid check above makes the claim sharper rather than softer: these
+	// bytes *are* the transaction LND committed to, so "that is the step-4 file"
+	// is a specific claim about which file the operator saved, made from evidence
+	// covering one input.
+	var missing []int
 	for i, in := range tx.TxIn {
 		if len(in.Witness) == 0 {
-			return nil, deviceErr(SigningWalletLabel, fmt.Sprintf("input %d",
-				i), fmt.Errorf("%w: it carries no witness, so there is nothing to "+
-				"take off it. That is the transaction you built at step 4, not the "+
-				"one you signed. Nothing is lost — every channel is already "+
-				"recoverable and nothing has been broadcast — so sign it and save it "+
-				"again", ErrNoWitnesses))
+			missing = append(missing, i)
 		}
+	}
+	switch {
+	case len(missing) == len(tx.TxIn):
+		// The likely case, and the one the old sentence was written for: the
+		// operator saved the unsigned transaction rather than the signed one.
+		none := fmt.Sprintf("not one of its %d inputs carries a witness", len(tx.TxIn))
+		if len(tx.TxIn) == 1 {
+			none = "it carries no witness"
+		}
+		return nil, deviceErr(SigningWalletLabel, "", fmt.Errorf("%w: %s, so there "+
+			"is nothing to take off it. That is the transaction you built at step "+
+			"4, not the one you signed. Nothing is lost — every channel is already "+
+			"recoverable and nothing has been broadcast — so sign it and save it "+
+			"again", ErrIncompleteWitnesses, none))
+
+	case len(missing) > 0:
+		// Partly signed. It is demonstrably not the step-4 transaction — that one
+		// carries nothing and this one carries something — so the sentence says
+		// which inputs are short and stops. Why they are short is not in these
+		// bytes: a signer that was never asked and a signer that declined produce
+		// the same file, and naming either would be the defect this is fixing.
+		return nil, deviceErr(SigningWalletLabel, inputList(missing),
+			fmt.Errorf("%w: %d of its %d inputs %s a witness and %s %s not. "+
+				"That is not the transaction you built at step 4 — it has "+
+				"signatures on it — but it cannot be published as it stands, and "+
+				"nothing here can see which signer is missing. Nothing is lost — "+
+				"every channel is already recoverable and nothing has been "+
+				"broadcast — so finish signing it and save it again",
+				ErrIncompleteWitnesses, len(tx.TxIn)-len(missing), len(tx.TxIn),
+				agree(len(tx.TxIn)-len(missing), "carries", "carry"),
+				inputList(missing), agree(len(missing), "does", "do")))
+	}
+
+	for i, in := range tx.TxIn {
 		// Only the witness is lifted, and the txid check above is why there is
 		// nothing else to lift: a scriptSig is inside the txid, so an input that
 		// carried one would have failed that check rather than reached here.
@@ -183,4 +235,38 @@ func SignedFromTX(base, body []byte) ([]byte, error) {
 		return nil, fmt.Errorf("serialising the signed packet: %w", err)
 	}
 	return buf.Bytes(), nil
+}
+
+// inputList names the inputs a refusal is about, in the operator's terms.
+//
+// The whole of issue #22 is that this program knew exactly which inputs were
+// short while telling the operator something else, so the list is the fix and
+// not a decoration.
+func inputList(idx []int) string {
+	switch len(idx) {
+	case 0:
+		return ""
+	case 1:
+		return fmt.Sprintf("input %d", idx[0])
+	}
+	parts := make([]string, len(idx))
+	for i, n := range idx {
+		parts[i] = strconv.Itoa(n)
+	}
+	return "inputs " + strings.Join(parts[:len(parts)-1], ", ") + " and " +
+		parts[len(parts)-1]
+}
+
+// agree keeps a counted refusal grammatical. Not prose.Plural: this package
+// renders no reports, and importing prose for a word would be the wrong
+// dependency.
+//
+// Worth its own function. These sentences exist to say exactly how many inputs
+// were short, and "1 of its 4 inputs carry a witness" undermines the count in
+// the same breath as making it.
+func agree(n int, one, many string) string {
+	if n == 1 {
+		return one
+	}
+	return many
 }

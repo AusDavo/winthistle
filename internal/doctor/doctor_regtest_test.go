@@ -51,20 +51,32 @@ func TestDoctorReadsTheWholeSetup(t *testing.T) {
 	// Six checks, not nine. "Bitcoin Core", "the cold wallet" and "the coins"
 	// went with the Bitcoin node this build no longer dials, and "the fee rate"
 	// went with the declared rate itself — there is no target to report.
-	for _, name := range []string{
+	//
+	// One list, used twice, and that is the fix rather than tidiness: the second
+	// loop below still named all four of the removed checks. byName returns the
+	// zero Check for a name that does not exist and the zero Status is OK, so
+	// four sevenths of it could only pass — the exact failure this file warns
+	// about forty lines down, where a Contains against a string the build no
+	// longer emits is called a check that can only pass. The first loop was
+	// updated for item 5 and the second was not.
+	checks := []string{
 		"winthistle.toml", "LND", "the macaroon", "the anchor reserve",
 		"the peers", "the run journal",
-	} {
+	}
+	for _, name := range checks {
 		if _, ok := byName[name]; !ok {
 			t.Errorf("no check called %q ran", name)
 		}
 	}
 
 	// The setup itself is sound: everything except the credential should be
-	// usable against a harness that other packages drive successfully.
-	for _, name := range []string{"LND", "Bitcoin Core", "the cold wallet",
-		"the coins", "the anchor reserve", "the fee rate", "the run journal"} {
-
+	// usable against a harness that other packages drive successfully. The
+	// macaroon is the one this test expects to fail, and it is asserted on
+	// directly below.
+	for _, name := range checks {
+		if name == "the macaroon" {
+			continue
+		}
 		if c := byName[name]; c.Status == doctor.Fail {
 			t.Errorf("%q failed against a working harness:\n%s", name,
 				strings.Join(c.Lines, "\n"))

@@ -2,6 +2,7 @@ package settle_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -366,8 +367,40 @@ func TestTheFundingHorizonIsReachedByMining(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Tick: %v", err)
 	}
-	t.Logf("\n%s", res.Report())
+	report := res.Report()
+	t.Logf("\n%s", report)
+
+	// Issue #20, on the live branch that produces it. This test *knows* the peer
+	// gave up, because it asked the peer's own node forty lines above — and that
+	// is exactly the evidence the application does not have. Alice can see her
+	// own count run out and nothing else, so the report may say what has run out
+	// and may not say what the counterparty did.
+	rep := flatten(report)
+	for _, want := range []string{
+		"This node's count of the funding horizon has run out",
+		"funding_expiry_blocks off PendingChannels",
+		"Very likely is as far as this goes",
+		"expect to force-close what opens",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Errorf("the report does not say %q:\n%s", want, report)
+		}
+	}
+	for _, gone := range []string{
+		"and that is what has happened",
+		"the peer waited",
+		"a channel the peer has forgotten",
+	} {
+		if strings.Contains(rep, gone) {
+			t.Errorf("the report asserts %q, which alice has not observed:\n%s",
+				gone, report)
+		}
+	}
 }
+
+// flatten collapses prose.Wrap's line breaks so an assertion can be keyed on a
+// sentence rather than on the column it was written to.
+func flatten(report string) string { return strings.Join(strings.Fields(report), " ") }
 
 func expiryBlocks(t *testing.T, ctx context.Context, cli lnrpc.LightningClient,
 	cp lnd.ChannelPoint) int32 {

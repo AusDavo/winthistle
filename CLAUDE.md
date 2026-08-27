@@ -290,19 +290,122 @@ rule verbatim: **do not assert a cause the program cannot know.**
   `CheckMacaroonPermissions` remains the only authority on what a credential is
   allowed to do. This proves the bytes are a macaroon and stops.
 
-**And #13 is not the last instance of that rule being broken.** An audit of every
-place this build renders a cause found three more, none of them touched by this
-slice and all worth their own issue: `internal/settle/report.go:296` tells the
-operator the peer *has* cancelled the funding when all it has is a negative block
-count off `PendingChannels`; `internal/settle/report.go:237` blames a Bitcoin
-Core this build has not dialled since item 5, on a branch that now always fires
-because `run.settlePhase` passes no `Chain` at all; and
-`internal/combine/rawtx.go:165` calls a partially-signed transaction *"the one
-you built at step 4"* because it returns on the first witnessless input.
-**`internal/peers` is the package the rest should be held to** — it strips LND's
-misleading `remote canceled … possibly timed out` prefix, labels *"The peer
-said"* against *"This node said"*, and says in terms when a refusal is not a
-verdict.
+**#13's audit found three more instances, and issues #20, #21 and #22 closed all
+three on 2026-08-27. That list is finished; the class is not, and the difference
+is the news.** The rule was recorded at #13. What this slice adds is that
+`internal/peers` is now the register the whole build is held to rather than the
+one package that got it right — and that a fresh sweep run *after* these three
+landed found four more, so **do not write "exhausted" about this rule again**.
+A sweep finds what the last sweep's vocabulary could see. It strips LND's misleading
+`remote canceled … possibly timed out` prefix, labels *"The peer said"* against
+*"This node said"*, and says in terms when a refusal is not a verdict. Doing the
+three together was the point: the shared question is *what this program is
+entitled to say about a failure it did not diagnose*, and answering it three
+times separately would have produced three answers.
+
+- **#20** · `horizonNote` quoted LND's proto hedge and overrode it in the same
+  sentence — *"very likely cancelled … and that is what has happened"* — then
+  printed `ForgetHorizonBlocks`, **our own constant**, as the blocks *the peer*
+  waited. The worst of the three, because it says a channel is dead at the moment
+  the remedy is still live. LND's hedge is LND's now, the count is named as ours
+  (`funding_expiry_blocks` off `PendingChannels`), and the figure is named the way
+  `depthNote` names its own: **LND's default policy, binding stock LND and nobody
+  else.** The remedy did not change — it is right either way, which is what made
+  all three copy-shaped. `Summary`, both warn branches and the shared trailing
+  paragraph carried the same claim and got the same treatment.
+- **#21** · `depthNote` blamed a Bitcoin Core removed in item 5, on the branch
+  that **cannot not fire**: `Confs` comes only from `Options.Chain`, which is set
+  in two tests and nowhere else. It says the design fact now — this build dials no
+  Bitcoin node, so it counts no blocks — and *"or it has not seen the
+  transaction"*, a cause nothing here asked about, is gone. **And the two
+  paragraphs swapped conditionality**, which is the half the issue did not name:
+  `State.line` prints *"expect ~6"* unconditionally while the hedge explaining it
+  sat on the branch nobody has seen, so the one number an operator reads was the
+  one never explained.
+- **#22** · `SignedFromTX` returned from inside the lifting loop on the first
+  witnessless input, so it established *"input i is short"* and said *"this
+  transaction carries no signatures … that is the transaction you built at step
+  4"*. It counts first now: none signed keeps the old sentence, some signed names
+  the inputs that are short and says **why they are short is not in these bytes**,
+  all signed carries on. `ErrNoWitnesses` is **`ErrIncompleteWitnesses`** — its
+  text was the over-claim at the sentinel level and its name said the same thing.
+  One sentinel, because no caller tells the two apart. Nothing relaxed: a partly
+  signed transaction is still refused, and the raw-transaction relaxation stays at
+  step 7's call site.
+
+**`Options.Chain` survives, and it is the harness's seam — say so, do not delete
+it.** Its old doc comment justified it by *"assisted mode has no Core"*, and
+assisted mode dissolved with I-2; the comments now say that the application fills
+it on no path and may not, that `internal/regtestenv`'s Core fills it, and that
+`Confs == -1` is **the rule rather than the exception**. Deleting it would take
+`State.ObservedDepth`, `depthLesson` and
+`TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth` with it — a live peer's
+`minimum_depth` read from above, one block at a time, which is the only
+authoritative reading an initiator can get — and this repository does not delete
+node-verified evidence to tidy a shape away. **If a production depth reading is
+ever wanted it does not come through this field**: it comes from LND, which this
+build already dials (`GetTransactions` reports `num_confirmations` and the
+funding transaction is ours), and that is a call site, a registry entry and a
+decision. `docs/design.html:808` still says step 9 *observes* `minimum_depth`,
+and without a `Chain` no production run ever does — **a real gap, found while
+sizing this slice and not closed by it.**
+
+**Four more instances, found by the sweep after this slice's own copy was
+written, none of them fixed here.** Each is verified in source, and each is a
+decision rather than a typo, so each wants its own slice. Filed 2026-08-27 as
+**#24, #25, #26 and #27**, in that order:
+
+1. **#24 · `internal/doctor/doctor.go:611`** says *"%d runs stopped somewhere they
+   should not have"* off `journal.Unfinished`, which is
+   `state NOT IN (published, aborted)` — a run is in that set from the moment
+   `arm.Open` journals its first stream, so **a batch being armed in another
+   terminal right now is in this list**. It is a `Fail`, so `Report.OK()` goes
+   false against a healthy node, and its `fix` is `winthistle recover`, which on
+   a run in `StateArming` cancels live shims. `internal/prose/recovery.go:48-59`
+   already fixed exactly this and says so — *"Saying they stopped was a claim the
+   journal cannot make"* — and hedges with *"Unless something is driving one right
+   now"*. `doctor` does not. **The journal's own doc comment carries the claim
+   too**, so the fix is at two sites.
+2. **#25 · `internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
+   error out of `SigningWallet.Signed` — a failed `os.Remove`, Ctrl-C, an
+   unreadable file, and `combine.ErrIncompleteWitnesses`, which is the very
+   refusal #22 just rewrote to *avoid* naming why a witness is missing. It
+   persists: `internal/prose/recovery.go:578` renders it as *"1 declined"* on the
+   recovery screen. `SignerAwaiting` is already written twelve lines up and is
+   what the evidence supports.
+3. **#26 · `internal/settle/report.go`'s `"open, peer offline"`** is `ListChannels`'
+   `Active`, which is **this node's link state** — false while our own node is
+   bringing links up, and false by default for any channel point missing from the
+   map. `State.Active`'s doc comment says *"whether the peer is currently
+   connected"* and carries the same over-claim.
+4. **#27 · `internal/prose/recovery.go:388-391`** asserts a channel is *"still pending
+   here and on the peer"* where only this node's `PendingChannels` was read. The
+   inference is sound and the paragraph 150 lines above shows its working; this
+   one states it bare.
+
+**And the sweep's other half found a test that could only pass.**
+`internal/doctor/doctor_regtest_test.go`'s second loop still named `"Bitcoin
+Core"`, `"the cold wallet"`, `"the coins"` and `"the fee rate"` — four checks
+item 5 deleted. `byName[name]` returns the zero `Check` and the zero `Status` is
+`OK`, so four sevenths of it asserted nothing, eleven lines under a comment
+naming those same four as removed. Fixed in this slice, off one shared list used
+by both loops. **This is the failure the file itself warns about at
+`doctor_regtest_test.go:98`**, and it is the standing reason to key an assertion
+on an identifier where one exists: #22's rename broke the build instead.
+
+**`internal/settle` has a pane test now, and it found the report over the pane in
+seven of its eight branches** — the worst at 144 columns. `State.line`
+hand-rolled a three-column row with no width check and the third column is LND's
+own unbounded refusal text. It wraps under the row now, the way `prose.Table`
+puts an over-wide note on its own line. **Wrapped rather than truncated, and that
+is the decision**: a truncated refusal is a cause the operator cannot read at
+all, which is the defect the file was being audited for, while a line this
+program wrapped on purpose is only wider than it wanted to be — and the emulator
+would wrap it anyway, taking every row's alignment with it. Runes, not bytes.
+`TestTheFundingHorizonIsReachedByMining` logged the report on a live channel one
+block past the horizon and asserted nothing about it; it asserts now, and it is
+the one place that *may* say the peer gave up, because it asked the peer's own
+node — which is exactly the evidence the application does not have.
 
 **Three things item 5 decided, which the code now depends on:**
 
