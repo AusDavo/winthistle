@@ -17,7 +17,7 @@ once, confirmed.
 |---|---|---|---|---|
 | `chan_pending` over a transaction nothing had signed, mempool empty | regtest | 2026-08-25 | 2 | v0.19.3-beta / v0.19.3-beta |
 | The whole sequence against real peers, stopping before step 8 — the cold probe | mainnet | 2026-08-26 | 2 | v0.19.3-beta / **v0.21.2-beta** |
-| The whole sequence including step 8: 9,000,000 sat, txid `a1b2c3d4…e8f90` | mainnet | 2026-08-26 | 5 | v0.21.2-beta / v0.21.2-beta |
+| The whole sequence including step 8: 9,000,000 sat, txid `a1b2c3d4…e8f90`, signed from a 2-of-3 cold-storage multisig | mainnet | 2026-08-26 | 5 | v0.21.2-beta / v0.21.2-beta |
 | What the receipt is worth: an armed channel force-closed, its commitment mined | regtest | 2026-08-27 | 1 | v0.21.2-beta / v0.21.2-beta |
 
 **The mismatched row is not a typo.** The cold probe was run by a client pinned

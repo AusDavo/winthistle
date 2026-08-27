@@ -46,9 +46,12 @@ on 2026-08-26 (run `20260826-043441-9a8f28`, two channels, both to
 `chan_pending` with nothing signed), and the first live batch published the same
 evening: run `20260826-191016-d9407c`, five channels, 9,000,000 sat, txid
 `a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90`, five of five
-`chan_pending` with nothing signed, published once, confirmed. **No issue is
-open.** What remains is real channels running in production, then a polish pass,
-then the public flip.
+`chan_pending` with nothing signed, published once, confirmed — **signed from a
+2-of-3 cold-storage multisig**, which is the mainnet instance behind "which kind
+of wallet does not matter"; until then that claim rested on the harness's
+simulated `wsh(sortedmulti(2,…))` alone. **That batch was the production run,
+not a rehearsal**, and **no issue is open.** What remains is a polish pass, then
+the public flip.
 
 ### What exists
 
