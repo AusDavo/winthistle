@@ -46,8 +46,9 @@ on 2026-08-26 (run `20260826-043441-9a8f28`, two channels, both to
 `chan_pending` with nothing signed), and the first live batch published the same
 evening: run `20260826-191016-d9407c`, five channels, 9,000,000 sat, txid
 `a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90`, five of five
-`chan_pending` with nothing signed, published once, confirmed. What remains is
-real channels running in production, then a polish pass, then the public flip.
+`chan_pending` with nothing signed, published once, confirmed. **No issue is
+open.** What remains is real channels running in production, then a polish pass,
+then the public flip.
 
 ### What exists
 
@@ -62,7 +63,9 @@ cluster in `regtest/`.
 
 `internal/arm` runs the inverted sequence — `skip_finalize` at verify, the *n*
 receipts before anything is signed, one publish. There is **no `psbt_finalize`
-call anywhere in this build**. `run` builds nothing and signs nothing: it prints
+call anywhere in this build**. It imports `abort` for one call, in
+`cancelUnreadable`; `abort` imports only `lnd`, so the direction is the only one
+that has ever been available. `run` builds nothing and signs nothing: it prints
 the recipients, writes `FILE-recipients.csv`, reads the unsigned transaction back
 from `--psbt FILE`, and reads the signed one from `FILE-signed.psbt` or
 `FILE-signed.txn`. `internal/combine` is the acceptance check on an inbound
@@ -90,15 +93,20 @@ The bump procedure, in order:
    claim false**. The first two are what step 2 catches; the third is not
    mechanically detectable and is what the v0.21.2-beta bump missed.
 
-### Known gaps, with issues open
+### Settled behaviour, with no issue left open
 
-- **#57** · `arm.open` discards the pending channel id on failure, and on two of
-  its three paths LND has not errored, so the reservation is live and the
-  hang-up is ours: a shim nothing can reach. The realistic path is safe — LND
-  cancels its own refusals (`funding/manager.go:5301` → `:5308` →
-  `lnwallet/wallet.go:1488`) — and a hung-up stream does *not* release a shim,
-  measured by `TestAShimSurvivesItsStreamBeingHungUp`. Cancelling inline is
-  probably the fix; it is an abort-path decision, not a signature change.
+- **`arm.open` cancels the shim it cannot journal, and only there.** On its two
+  "LND sent something unreadable" branches LND has not errored, so nothing on its
+  side releases the reservation and a hang-up does not either
+  (`TestAShimSurvivesItsStreamBeingHungUp`). `cancelUnreadable` hangs the stream
+  up and *then* cancels the shim — that order, because it is the one that test
+  measured — and journals nothing, because a stream that never opened has no
+  channel row to hang an id on. `ErrNoShim` is success; a cancel that genuinely
+  fails is reported alongside LND's own complaint, with the pending channel id in
+  it and no claim about what LND still holds. **The `Recv` error path is excluded on purpose**: LND cancels its own
+  refusals (`funding/manager.go:5301` → `:5308` → `lnwallet/wallet.go:1488`), and
+  the commonest way to reach that branch is Ctrl-C, where a cancel on a dead
+  context would print a sentence about a shim nobody needs to chase.
 - **The armed window reports the refusal it observed, never a journalling
   complaint about it.** `arm.Open` returns its `Streams` on a first-channel
   failure too, so `NewChannels()` is empty there and `journal.Begin` — which
