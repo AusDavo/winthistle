@@ -274,7 +274,7 @@ func remove(ids []lnd.PendingChanID, id lnd.PendingChanID) []lnd.PendingChanID {
 }
 
 // fundingOutputs is the harness reading the recipients off the open streams, the
-// way an operator reads them off the terminal at step 4.
+// way an operator's wallet gets them at step 4.
 func fundingOutputsIn(streams *Streams) []coldwallet.Output {
 	addrs := make([]string, 0, len(streams.All))
 	amounts := make([]int64, 0, len(streams.All))

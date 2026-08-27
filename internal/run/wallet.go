@@ -16,7 +16,7 @@ import (
 )
 
 // SigningWallet is Sparrow, or anything that builds a transaction to addresses
-// you paste in and exports a PSBT.
+// you hand it and exports a PSBT.
 //
 // Two calls, because after the inversion the wallet is asked for two different
 // things at two moments that are not adjacent. Step 4 wants the funded, unsigned
@@ -45,11 +45,11 @@ type SigningWallet interface {
 	// tidiness.
 	//
 	// pay is data, and the table an operator reads is copy: internal/run prints
-	// the addresses in full to Out before calling this, because they are
-	// copy-pasted from a terminal. A transport with a human at the other end
-	// ignores the argument, and one with a program at the other end is the reason
-	// it is there — a fixture or a future transport should not have to scrape the
-	// transcript to find out what the batch pays.
+	// the addresses in full to Out before calling this, because a terminal is
+	// where they can be read and selected. A transport with a human at the other
+	// end could ignore the argument; FileWallet does not, because it renders pay a
+	// second time as the CSV Sparrow loads. A fixture or a future transport should
+	// not have to scrape the transcript to find out what the batch pays.
 	Built(ctx context.Context, pay []Recipient) ([]byte, error)
 
 	// Signed is step 7: the same transaction with signatures on it. unsigned is
@@ -87,6 +87,21 @@ type FileWallet struct {
 // transaction for it. Reading one would arm a batch against somebody else's
 // outputs and find out at step 5. Refusing here costs nothing, because nothing
 // has been opened yet.
+//
+// RecipientsPath is refused on the same rule, for the same reason turned around:
+// a batch-recipients.csv already on disk was written for some other set of
+// funding addresses, and the operator loading it into Sparrow builds a
+// transaction paying them. That transaction is refused at step 5 — every one of
+// its outputs is unnamed — but it is refused inside clock A, and a refusal here
+// is free.
+//
+// It is refused rather than overwritten, which is where it parts company with
+// SignedPaths. Signed clears the names it is about to watch one line before it
+// starts watching them, and those are names this program has spent the whole run
+// telling the wallet to write. The CSV is a name this program invents out of the
+// operator's own --psbt stem, in the operator's own directory, and quietly
+// truncating a file we did not create and were not asked about is not something
+// to do at all, let alone to do silently.
 func NewFileWallet(path string, out io.Writer) (*FileWallet, error) {
 	if strings.TrimSpace(path) == "" {
 		return nil, errors.New("no PSBT path: --psbt FILE is where the transaction " +
@@ -109,13 +124,47 @@ func NewFileWallet(path string, out io.Writer) (*FileWallet, error) {
 	if out == nil {
 		out = os.Stdout
 	}
-	return &FileWallet{Unsigned: path, Out: out}, nil
+	w := &FileWallet{Unsigned: path, Out: out}
+	if csv := w.RecipientsPath(); csv != "" {
+		if _, err := os.Stat(csv); err == nil {
+			return nil, fmt.Errorf("%s already exists, and this run writes that file: "+
+				"it is the recipients list Sparrow loads, named from --psbt. The one "+
+				"that is there was written for funding addresses that are not this "+
+				"batch's, and loading it would build a transaction paying them. Name a "+
+				"different --psbt path, or move that one aside", csv)
+		} else if !os.IsNotExist(err) {
+			return nil, fmt.Errorf("looking at %s: %w", csv, err)
+		}
+	}
+	return w, nil
+}
+
+// RecipientsSuffix is what the generated recipients file's name ends in.
+//
+// "-recipients" rather than the issue's batch.csv, because this repository
+// already has a batch file — the peers and amounts --batch names — and two files
+// called the batch would be one too many. The extension is fixed rather than
+// inherited from --psbt: it says what the file is to every program that opens it,
+// which is the whole point of generating it.
+const RecipientsSuffix = "-recipients.csv"
+
+// RecipientsPath is where the Send to Many CSV goes: the --psbt stem with
+// RecipientsSuffix on it.
+//
+// Derived, for SignedPath's reason and one more. The operator is never asked for
+// a second path, so there is no second path to get wrong; and because the suffix
+// carries its own extension, no --psbt value can make this collide with Unsigned
+// or with either of SignedPaths. A --psbt of batch-recipients.csv derives
+// batch-recipients-recipients.csv, which is ugly and is not the same file.
+func (w *FileWallet) RecipientsPath() string {
+	ext := filepath.Ext(w.Unsigned)
+	return strings.TrimSuffix(w.Unsigned, ext) + RecipientsSuffix
 }
 
 // SignedPath is where the signed transaction goes: the unsigned path with
 // "-signed" before the extension.
 //
-// Derived rather than asked for, so the two paths cannot be given the same value.
+// Derived rather than asked for, so the paths cannot be given the same value.
 // A wallet that wrote the signed transaction over the unsigned one would leave
 // nothing to compare it against, and "is this the file I already read" is a
 // question this transport should not have to answer.
@@ -173,10 +222,26 @@ func (w *FileWallet) SignedPaths() []string {
 //
 // So the copy says do not sign yet, and this refuses the file if the copy was not
 // read. It costs a redo inside clock A, which is what every step-4 mistake costs.
-func (w *FileWallet) Built(ctx context.Context, _ []Recipient) ([]byte, error) {
-	// The recipients are not repeated here. internal/run has already printed them
-	// to the same writer, in full and aligned, and a second rendering of the
-	// addresses would be a second thing to keep in step with the plan.
+//
+// # The recipients file
+//
+// This is the one file this application writes outside its journal, and it is
+// written here rather than earlier because here is where pay arrives. It is a
+// convenience and it is scoped like one: it removes the typing at step 4, which
+// is the only part of clock A that takes any time, and it removes nothing from
+// step 5, which is still the whole check on what comes back.
+//
+// The addresses *are* rendered twice now — once as the table internal/run has
+// already printed to this same writer, once as the CSV. That used to be an
+// argument against doing it, and what makes it safe is that both renderings come
+// off the same []Recipient in the same call, so they cannot say different things.
+// The table is not replaced by the file: the table is the attribution, which is
+// what this program is for, and a "see the CSV" line in its place would move the
+// one screen where an operator can see which peer gets which output into a file
+// they may never open.
+func (w *FileWallet) Built(ctx context.Context, pay []Recipient) ([]byte, error) {
+	w.writeRecipients(pay)
+
 	fmt.Fprint(w.Out, prose.Bullet("Save it here, unsigned. Binary or base64, "+
 		"either is read:"))
 	fmt.Fprintf(w.Out, "      %s\n", w.Unsigned)
@@ -205,6 +270,36 @@ func (w *FileWallet) Built(ctx context.Context, _ []Recipient) ([]byte, error) {
 			w.Unsigned, err)
 	}
 	return raw, nil
+}
+
+// writeRecipients writes the Send to Many CSV and says where it is.
+//
+// A failure to write it is reported and not returned, which is the one place this
+// transport swallows an error on purpose. The file saves typing; the table above
+// it says the same thing and is already on screen. Aborting the run over it would
+// end a batch inside clock A — n peers holding reservations — because a
+// convenience could not be produced, and that trade is the wrong way round. What
+// must not happen is the copy naming a file that is not there, so the failure
+// says so in the same place the path would have been.
+func (w *FileWallet) writeRecipients(pay []Recipient) {
+	path := w.RecipientsPath()
+	if err := os.WriteFile(path, recipientsCSV(pay), 0o600); err != nil {
+		fmt.Fprint(w.Out, prose.Bullet(fmt.Sprintf("The recipients file could not be "+
+			"written (%v), so enter the recipients from the table above instead. "+
+			"Nothing else about this run changes: step 5 checks the transaction you "+
+			"build either way.", err)))
+		return
+	}
+	fmt.Fprint(w.Out, prose.Bullet("You do not have to type any of that. Sparrow's "+
+		"Send to Many → Load CSV reads this file, which has just been written with "+
+		"exactly the recipients above — this saves you typing; step 5 is still what "+
+		"checks it:"))
+	fmt.Fprintf(w.Out, "      %s\n", path)
+	fmt.Fprint(w.Out, prose.Bullet("The amounts in it are BTC, not sats, and the "+
+		"file cannot say so for itself — set Sparrow's unit to BTC before you load "+
+		"it. In sats mode it finds no recipients at all and tells you why, which is "+
+		"the failure worth having: sats read in BTC mode would load a hundred "+
+		"million times too large without a word."))
 }
 
 // Signed waits for the signed transaction, in either encoding a signing wallet

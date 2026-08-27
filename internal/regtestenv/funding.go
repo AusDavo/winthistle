@@ -165,8 +165,8 @@ func (e *Env) BuildFundingPSBT(t *testing.T, wallet *bitcoind.Client,
 //
 // That caller is the harness playing Sparrow: after the inversion the app prints
 // the recipients and something else builds the transaction, so a fixture standing
-// in for that something else is handed a list of outputs exactly the way an
-// operator is handed a table to paste in. It is the same builder underneath —
+// in for that something else is handed a list of outputs the way an operator's
+// Sparrow is handed the recipients CSV. It is the same builder underneath —
 // coldwallet.Build, with the app's own non-negotiable options — because a fixture
 // with its own builder is a fixture that can drift from the thing it is testing.
 func (e *Env) BuildPSBTPaying(t *testing.T, wallet *bitcoind.Client,
@@ -559,10 +559,12 @@ func (e *Env) AwaitStreamFailure(t *testing.T, s *Stream, timeout time.Duration)
 //
 // It exists because after the inversion the app prints a table and something else
 // builds the transaction — so a fixture standing in for that something else has to
-// read the table, and reading it is a property worth asserting. The table *is* the
-// interface at step 4: the addresses are copy-pasted out of a terminal, which is
-// why they are printed in full on a line of their own, and a table that could not
-// be read back would be a broken product however green the seam's own tests were.
+// read the table, and reading it is a property worth asserting. The table is not
+// how the recipients travel any more; FileWallet writes them as a CSV Sparrow
+// loads. It is still what an operator reads to see which peer is getting which
+// output, which is the attribution the program exists for, so a table that could
+// not be read back would be a broken product however green the seam's own tests
+// were. Scraping it here is the only test there is that it is legible.
 //
 // Anchored on the section heading rather than scanning the whole transcript,
 // because everything above it is full of amounts too — the anchor reserve's

@@ -958,3 +958,114 @@ func TestAnInvalidFileStillFailsLoudly(t *testing.T) {
 		}
 	})
 }
+
+// TestTheRecipientsFileSitsBesideTheUnsignedOne, derived from --psbt the way the
+// signed path is, and carrying its own extension so no --psbt value can make it
+// collide with a path this transport reads.
+func TestTheRecipientsFileSitsBesideTheUnsignedOne(t *testing.T) {
+	dir := t.TempDir()
+	for _, psbtName := range []string{"batch.psbt", "batch", "batch-recipients.csv"} {
+		w, err := run.NewFileWallet(filepath.Join(dir, psbtName), new(bytes.Buffer))
+		if err != nil {
+			t.Fatalf("--psbt %s: %v", psbtName, err)
+		}
+		csv := w.RecipientsPath()
+		if !strings.HasSuffix(csv, run.RecipientsSuffix) {
+			t.Errorf("--psbt %s derives %q, which does not end in %q",
+				psbtName, csv, run.RecipientsSuffix)
+		}
+		// The one that must never happen: writing the recipients over a path this
+		// transport is going to read a transaction back from.
+		if csv == w.Unsigned {
+			t.Errorf("--psbt %s derives its own path for the recipients file", psbtName)
+		}
+		for _, p := range w.SignedPaths() {
+			if csv == p {
+				t.Errorf("--psbt %s derives the recipients file onto %q", psbtName, p)
+			}
+		}
+	}
+}
+
+// TestTheFileTransportRefusesAnExistingRecipientsFile.
+//
+// The same rule as the unsigned path, arrived at from the other side. A
+// batch-recipients.csv already on disk was written for funding addresses that are
+// not this batch's — LND had not issued this batch's yet — so an operator who
+// loads it builds a transaction paying somebody else's outputs. Step 5 refuses
+// that transaction, but it refuses it inside clock A with n peers holding
+// reservations, and this refusal is made before LND is dialled.
+//
+// Refused rather than overwritten, which is where it parts from SignedPaths: this
+// is a name invented out of the operator's own --psbt stem, in the operator's own
+// directory, and truncating a file we did not create is not something to do
+// silently.
+func TestTheFileTransportRefusesAnExistingRecipientsFile(t *testing.T) {
+	dir := t.TempDir()
+	stale := filepath.Join(dir, "batch"+run.RecipientsSuffix)
+	if err := os.WriteFile(stale, []byte("address,amount_btc,label\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// The PSBT path itself is clear, so the existing refusal cannot be what fires.
+	_, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), new(bytes.Buffer))
+	if err == nil {
+		t.Fatal("a run was allowed to start over a recipients file from another batch")
+	}
+	if !strings.Contains(err.Error(), stale) {
+		t.Errorf("the refusal does not name the file it is about: %v", err)
+	}
+	if _, err := os.ReadFile(stale); err != nil {
+		t.Errorf("the refused run touched the file anyway: %v", err)
+	}
+}
+
+// TestStepFourWritesTheRecipientsAndSaysWhere.
+//
+// The file is the convenience and the printed path is what makes it one: a file
+// under a name the operator is never told is the same defect as no file, which is
+// issue #5's standing lesson. The table stays on screen either way — it is the
+// attribution, and the CSV does not replace it.
+func TestStepFourWritesTheRecipientsAndSaysWhere(t *testing.T) {
+	dir := t.TempDir()
+	out := new(bytes.Buffer)
+	w, err := run.NewFileWallet(filepath.Join(dir, "batch.psbt"), out)
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Poll = 5 * time.Millisecond
+
+	pay := []run.Recipient{
+		{Label: "channel 1  ACINQ, Inc.", Address: "bcrt1qexample", AmountSat: 250_000},
+		{Label: "anchor reserve", Address: "bcrt1qreserve", AmountSat: 50_000},
+	}
+
+	if err := os.WriteFile(w.Unsigned, packetBytes(t, unsignedPacket(t)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if _, err := w.Built(ctx, pay); err != nil {
+		t.Fatalf("step 4: %v", err)
+	}
+
+	body, err := os.ReadFile(w.RecipientsPath())
+	if err != nil {
+		t.Fatalf("the recipients file was not written: %v", err)
+	}
+	want := "address,amount_btc,label\n" +
+		"bcrt1qexample,0.00250000,\"channel 1  ACINQ, Inc.\"\n" +
+		"bcrt1qreserve,0.00050000,\"anchor reserve\"\n"
+	if string(body) != want {
+		t.Errorf("the recipients file is\n%q\nwant\n%q", body, want)
+	}
+	if !strings.Contains(out.String(), w.RecipientsPath()) {
+		t.Errorf("step 4 wrote a file it never named:\n%s", out.String())
+	}
+	// The unit cannot be read off the file, so the copy has to carry it, and the
+	// trust boundary has to stay said out loud.
+	for _, phrase := range []string{"BTC", "step 5"} {
+		if !strings.Contains(out.String(), phrase) {
+			t.Errorf("step 4's copy never says %q:\n%s", phrase, out.String())
+		}
+	}
+}

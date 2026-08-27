@@ -24,8 +24,8 @@ import (
 // — and it went with the UI.
 //
 // What it deliberately does not fill in is Out, Confirm and Signing. Those are
-// the terminal's own: stdout, the prompts that read stdin, and the two files
-// --psbt names.
+// the terminal's own: stdout, the prompts that read stdin, and the three files
+// --psbt names — the two it reads back, and the recipients CSV it writes.
 func Connect(ctx context.Context, cfg *config.Config) (Deps, func(), error) {
 	var d Deps
 

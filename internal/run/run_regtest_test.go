@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -550,6 +551,12 @@ func runTheFilePath(t *testing.T,
 	// save it where the app said.
 	waitFor(t, out, "Step 4")
 	pay := regtestenv.RecipientsIn(t, out.String())
+	// The table and the CSV are two renderings of one []Recipient, and this is
+	// the only place both exist at once against a real batch. A drift between
+	// them is the failure the CSV could introduce that nothing else would catch:
+	// the operator loads the file, reads the table, and they disagree about which
+	// peer gets what. Step 5 would refuse the transaction, inside clock A.
+	assertCSVMatchesTable(t, wallet.RecipientsPath(), pay)
 	funded := env.BuildPSBTPaying(t, env.Cold, pay, fixtureFeeRate)
 	if err := os.WriteFile(wallet.Unsigned, funded.Raw, 0o600); err != nil {
 		t.Fatalf("saving the unsigned transaction: %v", err)
@@ -603,5 +610,51 @@ func runTheFilePath(t *testing.T,
 		t.Errorf("the wallet is recorded as %q, want %q. \"partial\" is what an "+
 			"earlier build wrote and it is not what one file with complete witnesses "+
 			"is", jr.Signers[0].State, journal.SignerSigned)
+	}
+}
+
+// assertCSVMatchesTable reads the recipients file the app wrote at step 4 and
+// requires it to name the same outputs, in the same order, as the printed table
+// the harness just scraped.
+//
+// The amounts are compared after converting the file's BTC back to sats, which is
+// the conversion Sparrow performs and therefore the one worth asserting: it is
+// what makes "0.00250000" and "250,000 sat" the same claim rather than two
+// numbers that happen to be near each other.
+func assertCSVMatchesTable(t *testing.T, path string, pay []coldwallet.Output) {
+	t.Helper()
+
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("the recipients file the run named was not written: %v", err)
+	}
+	lines := strings.Split(strings.TrimSuffix(string(body), "\n"), "\n")
+	if len(lines) != len(pay)+1 {
+		t.Fatalf("the recipients file has %d rows plus a header for %d table "+
+			"entries:\n%s", len(lines)-1, len(pay), body)
+	}
+	if lines[0] != "address,amount_btc,label" {
+		t.Errorf("the header row is %q", lines[0])
+	}
+	for i, want := range pay {
+		cols := strings.SplitN(lines[i+1], ",", 3)
+		if len(cols) != 3 {
+			t.Fatalf("row %d is not three columns: %q", i+1, lines[i+1])
+		}
+		if cols[0] != want.Address {
+			t.Errorf("row %d pays %s and the table says %s", i+1, cols[0], want.Address)
+		}
+		var btc, sat int64
+		if _, err := fmt.Sscanf(cols[1], "%d.%08d", &btc, &sat); err != nil {
+			t.Fatalf("row %d's amount %q is not BTC to eight places: %v",
+				i+1, cols[1], err)
+		}
+		if got := btc*100_000_000 + sat; got != want.AmountSat {
+			t.Errorf("row %d pays %d sat and the table says %d sat",
+				i+1, got, want.AmountSat)
+		}
+		if !strings.HasPrefix(cols[2], `"`) || !strings.HasSuffix(cols[2], `"`) {
+			t.Errorf("row %d's label is not quoted: %q", i+1, cols[2])
+		}
 	}
 }

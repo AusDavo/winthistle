@@ -9,8 +9,10 @@ import (
 	"github.com/AusDavo/winthistle/internal/prose"
 )
 
-// Recipient is one output the wallet is asked to pay: an address to paste in, an
-// amount, and what it is for.
+// Recipient is one output the wallet is asked to pay: an address, an amount, and
+// what it is for. It is rendered twice — recipientTable for the operator's screen
+// and recipientsCSV for their wallet — and both come off the same slice, so the
+// two cannot disagree.
 type Recipient struct {
 	// Label is what this output is, in the operator's terms — "channel 2 acinq",
 	// or the anchor reserve. It is for the screen; nothing matches on it.
@@ -20,7 +22,7 @@ type Recipient struct {
 	AmountSat int64
 }
 
-// recipientsOf is what the operator has to enter in their wallet.
+// recipientsOf is every output the batch has to pay for itself.
 //
 // Every output the plan will name except the change, which is theirs. The reserve
 // top-up is in the list because it is an output the batch has to pay and a
@@ -59,10 +61,13 @@ func recipientsOf(streams *arm.Streams, p *prepared) []Recipient {
 // operator has to reassemble by hand at the one step where a wrong character
 // costs a channel. Alone on a line it is also one double-click to select.
 //
-// Printed in full for the same reason: they are copy-pasted from the terminal,
-// never typed, and an abbreviated address is one somebody might reconstruct.
-// Amounts aligned, so a swapped pair is visible — which is one of the things
-// step 5 catches after the fact and this is the chance to catch before it.
+// Printed in full for the same reason, and an abbreviated address is one somebody
+// might reconstruct. That the recipients also go out as a CSV does not soften any
+// of this: the file is how they get into the wallet, and this table is how the
+// operator sees which peer is getting which output — the attribution the program
+// exists for, which no other screen shows. Amounts aligned, so a swapped pair is
+// visible, which is one of the things step 5 catches after the fact and this is
+// the chance to catch before it.
 func recipientTable(rs []Recipient) string {
 	width := 0
 	for _, r := range rs {
@@ -79,6 +84,98 @@ func recipientTable(rs []Recipient) string {
 		fmt.Fprintf(&b, "      %s\n\n", r.Address)
 	}
 	return b.String()
+}
+
+// satsPerBTC is the divisor, and the only place in this build that the two units
+// meet. Nothing else converts, because nothing else needs to: the batch file is
+// in sats, LND is in sats, the plan is in sats, and the one consumer that is not
+// is a text file read by another program.
+const satsPerBTC = 100_000_000
+
+// recipientsCSV is the same recipients again, for Sparrow's Send to Many → Load
+// CSV. Three columns, address first, amount second, label third, which is the
+// order SendToManyDialog reads them in — get(0), get(1), get(2) — and the label
+// it reads goes straight onto the Payment, so the peer alias lands on the output.
+//
+// # Why this is a second renderer and not a shared one
+//
+// recipientTable prints 250,000 sat, with a grouping separator, because a human
+// reading a terminal is helped by one. This file must not have one under any
+// circumstances, and the two facts are not in tension — they are two audiences.
+// Unifying them would mean making the table worse to serve a file format.
+//
+// # BTC, eight decimal places, and the reason is which way the failure falls
+//
+// The amount column carries no unit and Sparrow reads it in whatever unit the
+// operator's preference is set to, which this program cannot see. The two
+// readings are 10^8 apart, so one of them is always wrong — the question is only
+// which wrong is survivable. Measured on Sparrow 2.5.3, both ways round (issue
+// #15):
+//
+//   - Sat integers loaded in BTC mode become 10^8 too large, silently. 250000
+//     loads as 250000.00000000 BTC. That is under the supply cap, so nothing on
+//     screen looks absurd, and Sparrow only objects much later at coin selection
+//     with insufficient funds — by which point the operator has stopped reading
+//     amounts.
+//   - BTC decimals loaded in sats mode throw on Long.parseLong, and Sparrow skips
+//     the row. If every row goes, which it does, Sparrow says "No recipients
+//     found. Use a CSV file with three columns, and ensure amounts are in sats."
+//
+// The second names its own cause. The first does not. So this emits BTC.
+//
+// The formatting is integer arithmetic. A float and a %.8f gives the same answer
+// for every value an int64 of sats can hold — they are all inside float64's
+// 53-bit mantissa — so this is not a bug that was found, it is an argument that
+// does not have to be made.
+//
+// # No grouping separator, quoted or not
+//
+// Sparrow strips the grouping separator rather than rejecting it, so a quoted
+// "250,000" and a bare 250000 converge on the same wrong value. An *unquoted*
+// 250,000 is worse still: it shifts the columns, so get(1) is 250, get(2) is 000,
+// and the alias is discarded — a row that loads clean and pays 250 BTC to an
+// unlabelled output. That is what a generator lifting amounts off the table above
+// would have emitted.
+//
+// # The label is always quoted
+//
+// Peer aliases contain commas — ACINQ, Inc. — and an unquoted one shifts the
+// columns exactly as above. Quoted unconditionally rather than when needed, so
+// there is no case analysis to get wrong, and a stray quote inside an alias is
+// doubled per RFC 4180. A carriage return or newline in an alias becomes a space:
+// a quoted line break is legal CSV, but a row that spans two lines in a file the
+// operator may open in a text editor is not worth the fidelity.
+//
+// # The header row
+//
+// Skipped by Sparrow, and by accident rather than by design — the amount throws
+// NumberFormatException and the catch is commented "ignore and continue -
+// probably a header line". Confirmed on a live load: the header row vanished. It
+// is here because the file cannot otherwise say what unit it is in, and a human
+// who opens it should not have to guess.
+//
+// None of this is a check on anything. Every failure above is caught at step 5,
+// by the same verifier that catches a mis-paste: a 10^8 amount is WrongAmount, a
+// dropped row is MissingOutput, and a shifted column is both. This saves typing;
+// it does not move the trust boundary an inch.
+func recipientsCSV(rs []Recipient) []byte {
+	var b strings.Builder
+	b.WriteString("address,amount_btc,label\n")
+	for _, r := range rs {
+		fmt.Fprintf(&b, "%s,%s,%s\n", r.Address, btcAmount(r.AmountSat), csvQuoted(r.Label))
+	}
+	return []byte(b.String())
+}
+
+// btcAmount renders sats as BTC with eight decimal places and no separators.
+func btcAmount(sat int64) string {
+	return fmt.Sprintf("%d.%08d", sat/satsPerBTC, sat%satsPerBTC)
+}
+
+// csvQuoted wraps a field in quotes, always, and doubles any quote inside it.
+func csvQuoted(s string) string {
+	s = strings.NewReplacer("\r", " ", "\n", " ").Replace(s)
+	return `"` + strings.ReplaceAll(s, `"`, `""`) + `"`
 }
 
 // reportArmed is the screen at the last reversible moment: every channel is
