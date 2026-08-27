@@ -656,8 +656,8 @@ func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, erro
 	// The printed line says the same and no more. It used to read "signed", which
 	// was this claim one output earlier — and the honest version of it is already
 	// printed ninety lines up, after the check: "signed and checked".
-	fmt.Fprintf(d.Out, "a file came back (%s elapsed); nothing has looked at it "+
-		"for signatures yet.\n", time.Since(started).Round(time.Second))
+	fmt.Fprintf(d.Out, "a file came back after %s; nothing has checked it for "+
+		"signatures yet.\n", time.Since(started).Round(time.Second))
 	return signed, nil
 }
 

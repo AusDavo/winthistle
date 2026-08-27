@@ -206,7 +206,7 @@ func TestASuccessfulSigningStepIsNotRecordedAsSigned(t *testing.T) {
 	if regexp.MustCompile(`\bsigned \(`).MatchString(flat) {
 		t.Errorf("step 7 printed that the batch was signed:\n%s", flat)
 	}
-	if !strings.Contains(flat, "nothing has looked at it for signatures yet") {
+	if !strings.Contains(flat, "nothing has checked it for signatures yet") {
 		t.Errorf("step 7 does not say what it has not checked:\n%s", flat)
 	}
 }
