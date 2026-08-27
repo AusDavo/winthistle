@@ -591,6 +591,24 @@ func TestTheSignerNoteSaysOnlyWhatTheJournalHolds(t *testing.T) {
 		mustContain(t, got, "a txid that had moved")
 	})
 
+	// This subtest pins a rejection rather than a behaviour, which is why it
+	// asserts an absence. #37 moved run.sign's SignerSigned write to after
+	// combine.Accept, so from that fix on the value means what it says — and the
+	// question it left was whether the screen should hedge the rows an earlier
+	// build wrote for a file nothing had checked, the way it hedges "%d marked
+	// declined". It should not: the arm would fire on the true case far more often
+	// than the false one, the operator's next move does not change either way, and
+	// there is nothing in the journal to condition it on. See signerNote.
+	t.Run("signed", func(t *testing.T) {
+		got := flat(Recovery(withSigners(journal.StateSigning,
+			journal.SignerSigned), time.Now()))
+		mustContain(t, got, "1 signed")
+		if regexp.MustCompile(`a journal an earlier build wrote`).MatchString(got) {
+			t.Errorf("a signed row is hedged as an earlier build's, which would "+
+				"hedge every true one too:\n%s", got)
+		}
+	})
+
 	t.Run("every state adds up", func(t *testing.T) {
 		got := flat(Recovery(withSigners(journal.StateSigning,
 			journal.SignerSigned, journal.SignerPartial, journal.SignerAwaiting,

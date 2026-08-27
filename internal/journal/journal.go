@@ -171,6 +171,21 @@ const (
 //     return a complete transaction would be a signer that could publish. I-2 is
 //     dissolved: the gate closed at step 6, before anything was signed, so a
 //     wallet holding a signed batch front-runs nothing.
+//
+//     Written *after* combine.Accept, which is the thing that establishes it, and
+//     the ordering is part of what the value means — the way StatePublishing's
+//     doc declares its own. Accept executes every input's witness against its own
+//     script, so a row carrying this value says witnesses were present and ran.
+//     Until issue #37 it was written by run.sign the moment SigningWallet.Signed
+//     returned bytes, where on the .psbt branch the only check that had run was
+//     combine.Parse's five magic bytes — a sniffer, not a parser — so an operator
+//     who saved the unsigned step-4 transaction at step 7 got this value over the
+//     top of the truthful SignerAwaiting row. A journal an earlier build wrote can
+//     therefore carry it for a run where the file was never signed; those runs
+//     stopped at Accept's refusal, with the reason on the terminal at the time.
+//     Do not move the write earlier again: its safe direction is late, and the
+//     row it would replace is true.
+//
 //   - SignerPartial has no writer in this build. It was the CPFP child, which
 //     went out to m devices and came back in m pieces, and that round is deleted.
 //     The constant stays because journals earlier builds wrote carry the value,
