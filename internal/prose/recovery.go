@@ -37,8 +37,14 @@ import (
 // Register, per CLAUDE.md: say what happened and what to do, and never
 // euphemise a risk.
 
-// RecoveryList is the screen shown at startup when the journal has runs that
-// stopped somewhere they should not have.
+// RecoveryList is the screen shown at startup when the journal has runs it has
+// not seen finish — neither published nor aborted.
+//
+// It used to say "runs that stopped somewhere they should not have", which is
+// the claim the comment below it exists to explain the screen cannot make.
+// Issue #24 found this line and deliberately left it, to hold that slice to
+// doctor and journal; it is the second of the two internal/prose sites that
+// issue named, and the other was stateMeans' aborting copy.
 func RecoveryList(runs []*journal.Run, now time.Time) string {
 	if len(runs) == 0 {
 		return Para("No unfinished runs. Nothing to recover.")
