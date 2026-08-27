@@ -353,7 +353,7 @@ sizing this slice and not closed by it.**
 **Four more instances, found by the sweep after this slice's own copy was
 written.** Each is verified in source, and each is a decision rather than a typo,
 so each wants its own slice. Filed 2026-08-27 as **#24, #25, #26 and #27**, in
-that order. **#24 and #25 are closed; #26 and #27 remain:**
+that order. **#24, #25 and #27 are closed; #26 remains:**
 
 1. ~~**#24 · `doctor` said unfinished runs had stopped.**~~ **Done, 2026-08-27.**
    `journal.Unfinished` is `state NOT IN (published, aborted)`, and a run is in
@@ -386,9 +386,11 @@ that order. **#24 and #25 are closed; #26 and #27 remain:**
    started and did not finish"*, which is **this defect one state over**.
    `MarkAborting` writes that state before the first RPC, deliberately, so a
    `winthistle recover` running right now in another terminal is described as
-   having failed. `journal.go:86` and `docs/design.html:698` both hedge it
-   correctly; only the screen asserts it. `prose`'s printed recovery header
-   remains right and remains the model.
+   having failed. `journal.go:86` and the design page's state table both hedge it
+   correctly; only the screen asserted it. `prose`'s printed recovery header
+   remains right and remains the model. **Both of those are closed now**, in the
+   #27 + #30 slice below — the second as its first commit and the first as its
+   own one-line one.
 
    **And the check's copy had never been rendered by any test.** The old sentence
    passed `prose.IsAre` where a pronoun belonged and printed *"3 runs stopped
@@ -448,36 +450,96 @@ that order. **#24 and #25 are closed; #26 and #27 remain:**
    bringing links up, and false by default for any channel point missing from the
    map. `State.Active`'s doc comment says *"whether the peer is currently
    connected"* and carries the same over-claim.
-4. **#27 · `internal/prose/recovery.go:388-391`** asserts a channel is *"still pending
-   here and on the peer"* where only this node's `PendingChannels` was read. The
-   inference is sound and the paragraph 150 lines above shows its working; this
-   one states it bare.
+4. ~~**#27 · a refusal said a channel was pending on the peer.**~~ **Done,
+   2026-08-27**, with #30, as one recovery-screen slice. `failureLine`'s
+   `abort.ErrBluntNotConfirmed` arm said *"It is still pending here and on the
+   peer"* where only this node's `PendingChannels` was read. **Two honest answers
+   were available and the shape of the screen chose between them.** Showing the
+   working — which `recoveryPlan` does 160 lines up, naming clock B in blocks as
+   the style rule requires — is **not available here**: that paragraph is on the
+   `Recovery` screen and this line is on `RecoveryOutcome`, and
+   `TestNoScreenPointsBelowItself` forbids pointing at a section a screen does
+   not have. Restating it in a bullet would have put a 2016-block horizon on a
+   channel this failure did not touch. So the line says the *mechanism* instead
+   of the mechanism's conclusion: this node still has it pending, which is what
+   was read; an abandon tells the peer nothing either way, so the refusal changed
+   nothing on the peer's side. The other arms were left — `ErrNotPending`'s copy
+   was checked in the same sweep and is sound, and the new test asserts it still
+   renders.
 
-**And PR #29's own audit found six more, which is the third sweep in a row to
-find instances the previous one's vocabulary could not see.** Verified in source,
-none fixed there, filed 2026-08-27 as **#30**, and **not** a list to call
-complete:
+**PR #29's own audit found six more, which was the third sweep in a row to find
+instances the previous one's vocabulary could not see. All six are closed**, with
+#27, as one recovery-screen slice on 2026-08-27 — `internal/prose/recovery.go`
+plus two doc comments in `internal/journal`, and **no state, value or schema
+moved in the journal**. The three decisions, and what each rejected:
 
-- **`prose.stateMeans`' `StateAborting`** — *"An abort of this run was started
-  and did not finish."* The state is written before the first RPC, so a live
-  `recover` is described as a failed one. The sharpest of the six, and the same
-  defect as #24 one state over.
-- **`prose.stateMeans`' `StateArming` and `StateSigning`** render a state a live
-  run holds for its whole working life in the past tense — *"streams **were**
-  open"* — where `journal.go:52`, `journal.go:65` and `docs/design.html:694`
-  all use the present. `prose` is the outlier.
-- **`prose.signerNote`** — *"No signer had been asked for anything when this
-  stopped"*, off `len(r.Signers) == 0`, which establishes only that no row was
-  written. Rendered for any journalled run, including one arming.
-- **`journal.Recover`'s doc** calls its input *"a crashed run"*; its own caller
-  says the commonest path in is Ctrl-C.
-- **`prose.channelBreakdown`'s comment** reads `len(r.Channels) == 0` as *"a run
-  that stopped before Begin wrote any"* — and `Begin` writes both in one
-  transaction, so that is not normally reachable at all. The emitted copy is
-  fine; the comment justifying it is not.
-- **`journal`'s package doc** — *"the record of what a batch did"* — is now at
-  odds with the contract #24 wrote three files over: *"the journal records what a
-  run wrote, not whether it is still writing."*
+1. ~~**Three states a live run also holds were rendered as a run that
+   stopped.**~~ `StateAborting` — *"An abort of this run was started and did not
+   finish"* — was the sharpest, and is #24 one state over; `StateArming` and
+   `StateSigning` said *"streams **were** open"* and *"**had** gone out to be
+   signed"* for states a run holds for its whole working life. All three are
+   written *before* the work they name, so `run.recoverRun` prints this screen
+   from inside the process still tearing the run down, and `winthistle recover
+   ID` prints it for a run that may be being armed next door. **The hedge went
+   in `stateMeans` rather than at the caller, which is where #24 put its own**,
+   on #24's own rule: *can the narrower question be answered honestly?*
+   `journal.Unfinished` could not, so its hedge had to go where a sentence could
+   carry it; `stateMeans` is handed the state itself and each of the three has an
+   honest reading — *"in progress, or one was interrupted partway"* is exactly
+   what `aborting` establishes, and it is `journal.go:86`'s own wording. **A
+   blanket paragraph at the caller was rejected because it would over-apply**:
+   `armed` and `published` are *not* written ahead of their work, and hedging
+   them would weaken two sentences that are true. One state renders per screen,
+   so a clause in each costs the reader nothing. **`armed` was deliberately left
+   alone** — the journal sets it itself after observing the *n* receipts.
+2. ~~**#27's arm.**~~ See the numbered item above.
+3. ~~**Four comments and docs that said more than their code establishes.**~~
+   Taken as one look with a likely yes, and all four over-claimed.
+   `channelBreakdown`'s `no channels` comment called it *"a run that stopped
+   before `Begin` wrote any"* — `Begin` refuses an empty batch and writes the run
+   row and the channel rows in one transaction, and nothing deletes a channel
+   row, so **that shape is not reachable through this build at all**, which is
+   the reason to render something rather than a blank. `journal.Recover`'s doc
+   called its input *"a crashed run"* when it is handed a run id, and its own
+   caller says the commonest way in is Ctrl-C. `journal`'s package doc — *"the
+   record of what a batch **did**"* — is now *"what a run wrote, in the order it
+   wrote it"*, which is the contract #24 wrote over three files. And
+   `signerNote`'s *"No signer had been asked for anything when this stopped"*
+   kept its first half, because here the narrower question **can** be answered:
+   `run.sign` writes the `SignerAwaiting` row before it calls `Signed`, so no row
+   at all establishes that step 7 was never entered.
+
+**And `%d declined` was in scope after PR #31, which made it sharper rather than
+smaller.** #25 stopped `sign` writing `journal.SignerDeclined` at all, so every
+row `signerNote` will ever render it for was written by the defect: it is not
+wrong for some rows, it is wrong for **all** of them. It reads *"%d marked
+declined"* now, with a paragraph saying where the value comes from, that it never
+meant a wallet said no, and what the old frame actually had in hand — a file that
+never appeared, one that could not be read, a moved txid, Ctrl-C. **Deleting the
+arm was not available**: those rows are on operators' disks and dropping them into
+the `unknown` bucket is the defect that function's doc comment was written about.
+
+**The sweep found nothing else false, and that is worth stating rather than
+leaving unmentioned.** `cmd/winthistle`'s package doc and its `recover` usage line
+already read *"the runs the journal never saw finish"*, and `README.md:472`
+already says *"which includes one being armed in another terminal right now"* —
+#24 hedged all three and they still agree with this slice's wording.
+`internal/peers`' and `doctor.anyOurs`' *"may be an earlier run of this tool that
+did not finish"* are about a **pending channel read from LND**, are hedged with
+*"may"*, and are sound. **`docs/design.html` does not carry any of these claims
+and did not move**: its state table already hedges `aborting`/`aborted` as *"in
+progress, was interrupted partway, or finished"* and uses the present tense for
+`arming` and `signing` — so the page was the thing the code was brought up to, as
+it has been every slice — and it carries no signer-declined copy at all, its
+`declin` hits being LND's own.
+
+**No test in `internal/prose` had ever built a run with signer rows**, so every
+sentence `signerNote` writes about a signer was rendered by nothing, widths
+included, on the screen that has a pane test. That is #24's `checkJournal`
+finding in a second package. `withSigners` fixes it, and **`RecoveryOutcome` went
+into the pane test too** — the one screen in the file it did not measure, and the
+one whose width is least under the file's control, because every `failureLine`
+ends with `abort`'s or LND's own error text appended to a bullet. It fits.
 
 **The audit's other half came back clean, and that is worth recording too**: no
 test in the tree asserts on a copy string, check name or map key the build no

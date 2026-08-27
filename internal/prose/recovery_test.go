@@ -149,6 +149,31 @@ func TestTheOutcomeScreenReportsAPartialAbortHonestly(t *testing.T) {
 
 // A clean abort still leaves the peers holding their side, and a screen that
 // said "clean" without saying that would be producing the next incident.
+// #27's claim one function over, which that issue's sweep did not reach.
+//
+// The success path said n channels "are still pending on the other side" off
+// rep.Abandoned, which establishes only that this node abandoned them. Found by
+// the audit run after this slice's copy was written, because the sweep grepped
+// the wording failureLine used. It shows the mechanism now, the way
+// recoveryPlan's own paragraph does.
+func TestTheCleanOutcomeShowsWhyThePeersAreNotClean(t *testing.T) {
+	rep := &abort.Report{Abandoned: []abort.AbandonOutcome{
+		{Channel: lnd.ChannelPoint{TxID: fakeTxID, Index: 0}},
+		{Channel: lnd.ChannelPoint{TxID: fakeTxID, Index: 1}},
+	}}
+	got := flat(RecoveryOutcome(run(journal.StateAborting), rep, nil))
+
+	if regexp.MustCompile(`still pending on the other side`).MatchString(got) {
+		t.Errorf("the outcome screen states the peers' side bare, where only "+
+			"this node's abandons were read:\n%s", got)
+	}
+	mustContain(t, got, "2 channels were abandoned here")
+	mustContain(t, got, "an abandon tells the peer nothing at all")
+	mustContain(t, got, "keeps its side pending")
+	// Clock B still in blocks, which the style rule requires of recovery copy.
+	mustContain(t, got, "until 2016 blocks pass from the funding height")
+}
+
 func TestACleanAbortStillWarnsAboutThePeers(t *testing.T) {
 	rep := &abort.Report{
 		Abandoned: []abort.AbandonOutcome{{

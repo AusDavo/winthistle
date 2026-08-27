@@ -341,13 +341,20 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 				"nothing was spent."))
 		if len(rep.Abandoned) > 0 {
 			b.WriteString("\n")
+			// This is #27's claim one function over, and it was found by the
+			// audit rather than by that issue's own sweep, which grepped the
+			// wording failureLine used. What was read here is rep.Abandoned:
+			// this node abandoned n channels. The peer's side is the mechanism's
+			// conclusion, so the mechanism is shown — the way recoveryPlan's own
+			// paragraph shows it, which is this file's model.
 			b.WriteString(Para(fmt.Sprintf(
-				"Your peers are not clean. %d channel%s %s abandoned here and "+
-					"%s still pending on the other side, for 2016 blocks from the "+
-					"funding height. Re-arming against those peers costs another of "+
-					"their pending-channel slots.",
+				"Your peers are not clean. %d channel%s %s abandoned here, and an "+
+					"abandon tells the peer nothing at all — so each of those peers "+
+					"keeps its side pending, and goes on holding one of its own "+
+					"pending-channel slots until 2016 blocks pass from the funding "+
+					"height. Re-arming against those peers costs another slot again.",
 				len(rep.Abandoned), Plural(len(rep.Abandoned)),
-				WasWere(len(rep.Abandoned)), IsAre(len(rep.Abandoned)))))
+				WasWere(len(rep.Abandoned)))))
 		}
 		if alreadyGone > 0 {
 			b.WriteString("\n")
