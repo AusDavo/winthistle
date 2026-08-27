@@ -304,6 +304,64 @@ func TestAFailureInsideTheArmedWindowIsTakenApart(t *testing.T) {
 	}
 }
 
+// TestAFirstChannelRefusalIsReportedAsTheRefusal is #42.
+//
+// arm.Open hands back its Streams on the first channel's failure too, so that
+// whatever shims exist can be released. On that path Streams.All is empty,
+// NewChannels() is a zero-length slice, and journal.Begin refuses one outright —
+// "a batch with no channels in it is not a batch". armWindow returned *that*, and
+// the peer's own sentence, which is the only thing naming a remedy, was never
+// returned at all.
+//
+// The batch here is the previous test's inverted: the refused channel is first,
+// so nothing opens. What the operator must see is LND's refusal, and what must
+// not appear anywhere is the journal's complaint about an empty batch.
+func TestAFirstChannelRefusalIsReportedAsTheRefusal(t *testing.T) {
+	env := regtestenv.Start(t)
+	peers := env.Peers(t)
+	if len(peers) < 2 {
+		t.Skipf("this test needs 2 peers, alice has %d", len(peers))
+	}
+	// 1,000 sat is below LND's MinChanFundingSize of 20,000, and it is the FIRST
+	// channel this time.
+	d, o, out, _ := setup(t, peers[:2], []int64{1_000, fixtureChannelSat})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+
+	res, err := run.Do(ctx, d, o)
+	t.Logf("\n%s", out.String())
+	if err == nil {
+		t.Fatal("a batch whose first channel is below the minimum size was opened")
+	}
+	if res.Armed != nil || res.Published {
+		t.Fatal("the run got past the armed window")
+	}
+
+	if strings.Contains(err.Error(), "a batch with no channels in it is not a batch") {
+		t.Fatalf("the run reported the journal's complaint about an empty batch "+
+			"instead of the refusal it observed:\n%v", err)
+	}
+	if strings.Contains(err.Error(), "journalling the run") {
+		t.Fatalf("the run reported a journalling failure for a batch that had "+
+			"nothing to journal:\n%v", err)
+	}
+	// The remedy lives in the number LND named, so the sentence carrying it has to
+	// survive. Keyed on LND's own wording rather than on ours.
+	if !strings.Contains(err.Error(), "channel is too small") &&
+		!strings.Contains(err.Error(), "chan size of") {
+
+		t.Errorf("the error does not carry LND's own refusal, so the operator is "+
+			"not told what to change:\n%v", err)
+	}
+
+	// And nothing was journalled, which is correct rather than a gap: no stream
+	// opened, so there is no pending channel id in existence to write down.
+	if _, jerr := d.Journal.Load(ctx, o.RunID); !errors.Is(jerr, journal.ErrNoRun) {
+		t.Errorf("a run whose first channel never opened left %v in the journal", jerr)
+	}
+}
+
 func writeFile(t *testing.T, path, body string) string {
 	t.Helper()
 	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {

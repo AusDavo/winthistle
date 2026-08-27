@@ -130,3 +130,46 @@ func TestFundingPSBTLocksItsInputs(t *testing.T) {
 		t.Fatalf("freed %d of %d inputs", len(freed), len(funded.Inputs))
 	}
 }
+
+// TestAShimSurvivesItsStreamBeingHungUp answers the question #42 named as unread:
+// whether a cancelled funding stream tears down the reservation LND created for
+// it.
+//
+// It does not. rpcServer.OpenChannel's update loop returns on the first
+// updateStream.Send failure with a bare `return err` — nothing on that path
+// cancels the reservation — and the intent lives in
+// LightningWallet.fundingIntents until something asks for it to go. So the
+// pending channel id really is the only handle, and a code path that drops one
+// after LND has registered the intent leaves a shim nothing can reach.
+//
+// Which is not the same as saying every failed open leaks one. A refusal that
+// arrives as an error *from LND* has already cleaned itself up: a peer's
+// lnwire.Error reaches Manager.handleErrorMsg, which calls cancelReservationCtx,
+// which calls ChannelReservation.Cancel, which is what deletes the intent
+// (lnwallet/wallet.go:1488). The leak is confined to a client-side hang-up over
+// a reservation LND is still happy with.
+//
+// The wait is not decoration. Without it a shim cleaned up asynchronously when
+// the stream died would still be in the map when the cancel arrived, and the
+// test would pass while proving nothing.
+func TestAShimSurvivesItsStreamBeingHungUp(t *testing.T) {
+	env := regtestenv.Start(t)
+	ctx := testCtx(t)
+
+	s := env.OpenShimStream(t, env.Peers(t)[0], fixtureChannelSat)
+
+	// Hang up the client's end. Stream.Close does not cancel the shim, which is
+	// the whole point of the distinction it documents.
+	s.Close()
+	time.Sleep(2 * time.Second)
+
+	if err := abort.CancelShim(ctx, env.Alice.Lightning, s.PendingChanID); err != nil {
+		t.Fatalf("cancelling the shim of a hung-up stream: %v.\n"+
+			"If this is ErrNoShim, LND does tear the reservation down with the "+
+			"stream, and arm.open discarding the pending channel id on a "+
+			"post-psbt_fund failure costs nothing. Say so where that id is "+
+			"dropped", err)
+	}
+	t.Log("the shim outlived its stream: the pending channel id is the only " +
+		"handle that could have released it")
+}
