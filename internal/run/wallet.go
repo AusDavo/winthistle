@@ -440,14 +440,14 @@ func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) (
 
 	for {
 		for _, path := range paths {
-			body, present, err := readWhole(path)
+			body, state, err := readWhole(path)
 			if err != nil {
 				return nil, "", fmt.Errorf("reading %s: %w", path, err)
 			}
 			if body != nil {
 				return body, path, nil
 			}
-			if !present {
+			if state == fileAbsent {
 				unsettled[path] = 0
 				continue
 			}
@@ -459,10 +459,10 @@ func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) (
 			unsettled[path]++
 			if unsettled[path] >= unsettledPollsBeforeSaying && !said[path] {
 				said[path] = true
-				fmt.Fprint(w.Out, prose.Bullet(fmt.Sprintf("%s is there but is still "+
-					"being written, so it has not been read: half a transaction is not "+
-					"read on purpose. If your wallet says it has finished saving, save "+
-					"it again over that file.", path)))
+				fmt.Fprint(w.Out, prose.Bullet(fmt.Sprintf("%s is there and %s, so "+
+					"it has not been read: half a transaction is not read on "+
+					"purpose. If your wallet says it has finished saving, save it "+
+					"again over that file.", path, notWholeYet(state))))
 			}
 		}
 		select {
@@ -483,12 +483,46 @@ func (w *FileWallet) waitAny(ctx context.Context, paths []string, what string) (
 // anything on this number; it only chooses the moment a line is printed.
 const unsettledPollsBeforeSaying = 2
 
+// notWholeYet says what was seen, rather than what it implies.
+//
+// The old wording was "is still being written", which asserts a writer this
+// program never observed. It only ever observed one of two things, and by the
+// time this prints the more likely of them is the one that names no writer at
+// all: issue #10 measured Sparrow's gap between two encoder chunks at 0.05-0.3
+// ms, with no syscall and no I/O in it, and this line does not print until a
+// path has been unfinished across two consecutive polls — two seconds at
+// DefaultPoll. A file that has been at zero bytes that long is more likely empty
+// and staying empty than caught mid-write. The remedy is the same either way,
+// which is why the wording is the whole of the fix.
+func notWholeYet(state fileState) string {
+	if state == fileGrew {
+		return "grew while it was being read, so what came back was a prefix"
+	}
+	return "has nothing in it yet"
+}
+
+// fileState is what one look at a candidate path found.
+//
+// Three of the four are "nothing to read yet", and they are kept apart because
+// the screen names what was observed. fileEmpty and fileGrew are both a wallet
+// that may be part-way through saving, but only fileGrew has actually seen the
+// file move; fileEmpty has seen zero bytes, which is also what an empty file
+// that stays empty looks like forever.
+type fileState int
+
+const (
+	fileAbsent fileState = iota
+	fileEmpty
+	fileGrew
+	fileWhole
+)
+
 // readWhole reads path if what is there is a whole file, and holds its peace if
 // it is not.
 //
-// present says the path existed on this look, so the caller can tell "the wallet
-// has not saved yet" from "the wallet is part-way through saving". A nil body
-// with a nil error is the second: come back next tick.
+// The state says what this look found, so the caller can tell "the wallet has
+// not saved yet" from the two shapes of "not finished". A nil body with a nil
+// error is one of the latter: come back next tick.
 //
 // The check is two stats around the read. A wallet part-way through writing is
 // growing the file, so a size that moved across the read means what came back is
@@ -539,16 +573,16 @@ const unsettledPollsBeforeSaying = 2
 // no I/O and no operator — it is the encoding of the next 8 KB. A poll would have
 // to land inside one of those *and* finish its read inside it. That is what the
 // two-poll rule would buy, for two seconds on every run.
-func readWhole(path string) (body []byte, present bool, err error) {
+func readWhole(path string) (body []byte, state fileState, err error) {
 	before, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return nil, fileAbsent, nil
 		}
-		return nil, false, err
+		return nil, fileAbsent, err
 	}
 	if before.Size() == 0 {
-		return nil, true, nil
+		return nil, fileEmpty, nil
 	}
 
 	body, err = os.ReadFile(path)
@@ -556,20 +590,20 @@ func readWhole(path string) (body []byte, present bool, err error) {
 		if os.IsNotExist(err) {
 			// Gone between the stat and the open. There is nothing here to wait on
 			// yet, which is what an absent file means.
-			return nil, false, nil
+			return nil, fileAbsent, nil
 		}
-		return nil, true, err
+		return nil, fileGrew, err
 	}
 
 	after, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return nil, fileAbsent, nil
 		}
-		return nil, true, err
+		return nil, fileGrew, err
 	}
 	if after.Size() != before.Size() || int64(len(body)) != after.Size() {
-		return nil, true, nil
+		return nil, fileGrew, nil
 	}
-	return body, true, nil
+	return body, fileWhole, nil
 }

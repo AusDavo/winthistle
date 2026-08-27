@@ -612,12 +612,20 @@ func (b *syncBuffer) String() string {
 	return b.buf.String()
 }
 
-// stillWriting is what the transport says when a candidate has been there and
-// unfinished across a whole poll interval. The tests use it as a synchronisation
-// point — it is printed only after the poller has looked at the unfinished file
-// and declined to read it — which is what makes the two-stage writes below a
-// constructed race rather than a hopeful one.
-const stillWriting = "is still being written"
+// notRead is the half of that sentence that both unfinished shapes share. The
+// tests use it as a synchronisation point — it is printed only after the poller
+// has looked at the unfinished file and declined to read it — which is what makes
+// the two-stage writes below a constructed race rather than a hopeful one.
+//
+// Only the shared half, because the rest of the sentence names what was actually
+// observed and the two observations are different: a file at zero bytes has seen
+// no writer at all. isEmpty and grew are those halves, asserted where each one
+// is the one produced.
+const (
+	notRead = "so it has not been read"
+	isEmpty = "has nothing in it yet"
+	grew    = "grew while it was being read"
+)
 
 // awaitPolled blocks until the transport has looked at an unfinished file and
 // turned it down. It reports rather than fails, because it is called from the
@@ -626,7 +634,7 @@ const stillWriting = "is still being written"
 // out the deadline of a stage that will never come.
 func awaitPolled(out *syncBuffer, stop <-chan struct{}) bool {
 	return awaitCondition(stop, func() bool {
-		return strings.Contains(out.String(), stillWriting)
+		return strings.Contains(out.String(), notRead)
 	})
 }
 
@@ -851,12 +859,23 @@ func TestTheWaitSaysWhenItIsHoldingOffOnAFile(t *testing.T) {
 	_, _ = w.Built(ctx, nil)
 
 	if !strings.Contains(out.String(), w.Unsigned) ||
-		!strings.Contains(out.String(), stillWriting) {
+		!strings.Contains(out.String(), notRead) {
 		t.Errorf("the wait never said it was holding off on %s, so the operator "+
 			"watches nothing happen:\n%s", w.Unsigned, out.String())
 	}
-	if n := strings.Count(out.String(), stillWriting); n != 1 {
+	if n := strings.Count(out.String(), notRead); n != 1 {
 		t.Errorf("said it %d times; saying it once is the whole point of saying it", n)
+	}
+	// And it says what it saw. This file is zero bytes and stays zero bytes,
+	// which is the state the old wording named least well: it asserted a writer,
+	// and nothing here has one.
+	if !strings.Contains(out.String(), isEmpty) {
+		t.Errorf("the wait did not say the file is empty, and an empty file is "+
+			"what it looked at:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), grew) {
+		t.Errorf("the wait said the file grew, and nothing wrote to it:\n%s",
+			out.String())
 	}
 }
 

@@ -27,7 +27,24 @@ type Publisher interface {
 }
 
 var (
-	// ErrPublishRefused means the node declined to broadcast.
+	// ErrPublishUnanswered means the publish call did not come back with a
+	// success, and nothing more than that.
+	//
+	// It is the sentinel for the error return from PublishTransaction, which
+	// covers codes.Unavailable, a dead transport and a cancelled context as well
+	// as a wallet that genuinely said no — and in the first three LND may never
+	// have seen the request, or may have broadcast and lost the answer. This used
+	// to be ErrPublishRefused, whose text asserted the one thing an operator must
+	// not conclude here: run/report.go interpolates it into "LND refused or did
+	// not answer", a hedge somebody wrote deliberately, and the old text
+	// overrode it inside the same sentence.
+	ErrPublishUnanswered = errors.New("the publish call did not return a success, " +
+		"and whether the funding transaction reached the network is not in this error")
+
+	// ErrPublishRefused is the narrower one: LND answered, and the answer was no.
+	//
+	// Only PublishResponse.publish_error produces it, which is LND stating a
+	// refusal in a successful response rather than a call that failed.
 	ErrPublishRefused = errors.New("lnd refused to publish the funding transaction")
 
 	// ErrTXIDMoved is I-3 at the last possible moment: the bytes handed to
@@ -51,7 +68,8 @@ var (
 // before the bytes go out, and none of them is checked here as a courtesy:
 //
 //   - the caller holds an *Armed. It cannot have built one: receipts is
-//     unexported and only Receipts fills it, one entry per chan_pending it read.
+//     unexported and only Receipts fills it, one entry per channel that got its
+//     receipt — off the stream, or out of PendingChannels when it did not arrive.
 //   - the bytes hash to the txid LND pinned. That is I-3, and it is the whole of
 //     what stands between a returned transaction and n destroyed channels — LND
 //     committed to these outpoints at psbt_verify, so bytes with a different txid
@@ -95,8 +113,8 @@ func Publish(ctx context.Context, pub Publisher, j *journal.Journal, a *Armed,
 		return fmt.Errorf("run %s: the armed batch has no channels in it", a.RunID)
 	case len(a.receipts) != len(a.Channels):
 		return fmt.Errorf("run %s: this Armed carries %d receipt(s) for %d channel(s). "+
-			"An Armed only comes from Receipts, which records one per chan_pending it "+
-			"read, so this one was not built by the gate",
+			"An Armed only comes from Receipts, which records one per channel that "+
+			"got its receipt, so this one was not built by the gate",
 			a.RunID, len(a.receipts), len(a.Channels))
 	case a.Backup == nil:
 		return fmt.Errorf("run %s: no channel backup was exported. The backups are "+
@@ -129,7 +147,7 @@ func Publish(ctx context.Context, pub Publisher, j *journal.Journal, a *Armed,
 
 	// The write that must land before the RPC goes out. It is also the gate: this
 	// call fails if the journal does not believe every channel is pending, and the
-	// journal is the only component that knows whether every chan_pending arrived.
+	// journal is the only component that counted the receipts.
 	if err := j.MarkPublishing(ctx, a.RunID); err != nil {
 		return fmt.Errorf("refusing to publish run %s: %w", a.RunID, err)
 	}
@@ -149,7 +167,7 @@ func Publish(ctx context.Context, pub Publisher, j *journal.Journal, a *Armed,
 			"The run is journalled as publishing, so it will not be aborted: this "+
 			"transaction may be in a mempool. Every channel in it is already "+
 			"recoverable by force-close, and the transaction is in the journal to "+
-			"re-broadcast", ErrPublishRefused, a.TxID, err)
+			"re-broadcast", ErrPublishUnanswered, a.TxID, err)
 	}
 
 	// PublishResponse carries a publish_error string as well. At v0.21.2-beta
