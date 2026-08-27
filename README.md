@@ -18,6 +18,7 @@ once, confirmed.
 | `chan_pending` over a transaction nothing had signed, mempool empty | regtest | 2026-08-25 | 2 | v0.19.3-beta / v0.19.3-beta |
 | The whole sequence against real peers, stopping before step 8 — the cold probe | mainnet | 2026-08-26 | 2 | v0.19.3-beta / **v0.21.2-beta** |
 | The whole sequence including step 8: 9,000,000 sat, txid `a1b2c3d4…e8f90` | mainnet | 2026-08-26 | 5 | v0.21.2-beta / v0.21.2-beta |
+| What the receipt is worth: an armed channel force-closed, its commitment mined | regtest | 2026-08-27 | 1 | v0.21.2-beta / v0.21.2-beta |
 
 **The mismatched row is not a typo.** The cold probe was run by a client pinned
 two minor releases behind the node it was arming — the pin had been
@@ -166,6 +167,16 @@ channel is already recoverable by force-close, and gating a single publish on
 *n* of *n* receipts means the transaction cannot reach the network while any
 channel is unrecoverable.
 
+**The receipt is executed, not only read.** `TestTheReceiptIsProvedByForceClosingTheChannel`
+in `internal/arm` arms one channel the way the app does, publishes, mines the
+batch to confirmation, and then force-closes the channel out of band with
+`lncli` — out of band because `CloseChannel` is on the method registry's
+never-list and this repository stays incapable of calling it. The commitment transaction reaches the mempool and then
+a block, spending the exact outpoint `chan_pending` named, with a four-element
+P2WSH witness over a 2-of-2 script. The judge is Bitcoin Core rather than LND:
+consensus checked both signatures, and this node holds one of the two keys, so
+the other one was stored before the receipt arrived.
+
 LND's "DO NOT PUBLISH … OR THE FUNDS CAN BE LOST" warning is about *ordering*,
 not authorship. The "all but the last" idiom exists because `lncli` has no way to
 broadcast afterwards; an orchestrator is not bound by that.
@@ -180,27 +191,29 @@ unsigned transaction, with an empty mempool, in under a second.
 That inverts the thing that made this frightening. The signing round is no longer
 inside anybody's ten-minute window.
 
-**This rests on behaviour, not on an interface.** That `chan_pending` follows
-`CompleteReservation` is read out of `funding/manager.go`; LND documents no such
-ordering and its own `docs/psbt.md` recommends the opposite idiom. The citations
-here were read against v0.19.3-beta and re-read line by line against
-v0.21.2-beta, where the ordering was unchanged and about thirty line numbers were
-not. Nothing promises the next release keeps it.
+**This rests on behaviour, not on an interface**, which is why it is exercised
+rather than only cited. That `chan_pending` follows `CompleteReservation` is read
+out of `funding/manager.go`; LND documents no such ordering and its own
+`docs/psbt.md` recommends the opposite idiom. The citations here were read
+against v0.19.3-beta and re-read line by line against v0.21.2-beta, where the
+ordering was unchanged and about thirty line numbers were not. Nothing promises
+the next release keeps it.
 
 **What that would look like if it changed, and what would catch it.** Two
-failures, and they are not alike. If `skip_finalize` or `no_publish` stopped
-behaving — LND demanding a signature, or broadcasting anyway — it is loud and
-immediate: the receipts never arrive, or the transaction is in a mempool when it
-should not be, and `TestSkipFinalizeReachesChanPendingWithNothingSigned` in
-`internal/arm` fails against a harness running the new version. If instead the
-*ordering* moved, so that `chan_pending` were emitted before the peer's
-commitment signature is stored, **nothing here would notice.** The receipt still
-arrives and looks identical; what changed is what it means. No test in this
-repository force-closes a pending channel to prove the receipt was worth
-something, so recoverability is inferred from the source and never exercised end
-to end. `winthistle doctor` prints the node's LND version and grades it against
-nothing. **So the check on a new LND is a human re-reading that function**, and
-`CLAUDE.md` says so at the place somebody would otherwise assume.
+failures, still not alike, and both now caught. If `skip_finalize` or
+`no_publish` stopped behaving — LND demanding a signature, or broadcasting
+anyway — it is loud and immediate: the receipts never arrive, or the transaction
+is in a mempool when it should not be, and
+`TestSkipFinalizeReachesChanPendingWithNothingSigned` in `internal/arm` fails
+against a harness running the new version. If instead the *ordering* moved, so
+that `chan_pending` were emitted before the peer's commitment signature is
+stored, the receipt would still arrive and still look identical — and the
+force-close test above is what notices, because LND would have no counterparty
+signature to put in the commitment's witness and Core would refuse the
+transaction that resulted. `winthistle doctor` still prints the node's LND
+version and grades it against nothing, deliberately. **So the check on a new LND
+is `make test` and a re-read of that function**, in that order, and `CLAUDE.md`
+says so at the place somebody would otherwise assume.
 
 ## The two clocks
 
@@ -486,8 +499,9 @@ anyway:
 - **The safety property is read out of LND's internals, and LND moves.** That
   `chan_pending` follows `CompleteReservation` is behaviour observed in
   `funding/manager.go`, not a documented interface. Re-reading it on every LND
-  release is a cost Winthistle can carry because it is small and its author runs
-  it. A wallet shipping to thousands of people on its own cadence would be
+  release — and running the one test that force-closes an armed channel to check
+  the ordering still means what it says — is a cost Winthistle can carry because
+  it is small and its author runs it. A wallet shipping to thousands of people on its own cadence would be
   carrying somebody else's undocumented ordering into every release.
 - **A baked macaroon is a bearer credential.** Integration means a general-purpose
   wallet stores one, on a machine chosen for signing rather than for holding node
