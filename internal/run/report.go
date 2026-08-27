@@ -191,10 +191,9 @@ func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 
 	fmt.Fprint(w, prose.Para(fmt.Sprintf(
 		"All %d channel%s reached chan_pending before anything was signed, so every "+
-			"one of them is already recoverable: the peer has stored its commitment "+
-			"signature against an outpoint in this transaction, and a force-close "+
-			"would get the funds back even if this node vanished. Nothing is in any "+
-			"mempool.",
+			"one of them is already recoverable: this node has stored the peer's "+
+			"commitment signature against an outpoint in this transaction, and a "+
+			"force-close would get the funds back. Nothing is in any mempool.",
 		len(armed.Channels), prose.Plural(len(armed.Channels)))))
 
 	fmt.Fprintf(w, "\n  txid\n      %s\n\n", armed.TxID)
