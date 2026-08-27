@@ -96,6 +96,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/plan"
@@ -433,25 +434,25 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 		return nil, fmt.Errorf("opening a funding stream to %s: %w", short(c.Peer), err)
 	}
 
-	// From here on LND may already hold a registered intent for id, and this
-	// function's failure paths drop it. RegisterFundingIntent runs at
-	// lnwallet/wallet.go:1000, inside handleFundingReserveRequest, which the
-	// funding manager dispatches asynchronously — so cli.OpenChannel returning is
-	// no evidence either way, and a hung-up stream does not release what is there:
-	// abort's TestAShimSurvivesItsStreamBeingHungUp measures that on a live node.
+	// From here on LND may already hold a registered intent for id.
+	// RegisterFundingIntent runs at lnwallet/wallet.go:1000, inside
+	// handleFundingReserveRequest, which the funding manager dispatches
+	// asynchronously — so cli.OpenChannel returning is no evidence either way,
+	// and a hung-up stream does not release what is there: abort's
+	// TestAShimSurvivesItsStreamBeingHungUp measures that on a live node.
 	//
-	// What saves the realistic path is that LND cleans up its own refusals. A
-	// peer's lnwire.Error reaches Manager.handleErrorMsg (funding/manager.go:5301),
-	// which calls cancelReservationCtx (:5308), which calls
-	// ChannelReservation.Cancel, whose handler deletes the intent
-	// (lnwallet/wallet.go:1488). So the Recv failure immediately below — where
-	// "Number of pending channels exceed maximum" arrives — leaves nothing behind.
+	// The Recv failure immediately below needs nothing from us, because LND
+	// cleans up its own refusals. A peer's lnwire.Error reaches
+	// Manager.handleErrorMsg (funding/manager.go:5301), which calls
+	// cancelReservationCtx (:5308), which calls ChannelReservation.Cancel, whose
+	// handler deletes the intent (lnwallet/wallet.go:1488). That is where
+	// "Number of pending channels exceed maximum" arrives, and it leaves nothing
+	// behind.
 	//
-	// The two branches after it are the residual: LND has not errored, the
-	// reservation is live, and hanging up is ours. Issue #57. It is not fixed by
-	// returning the id, because a stream that never opened has no channel row to
-	// journal it against, and that is a journal decision rather than a signature
-	// change.
+	// The two branches after it are the ones that did — issue #57. LND has not
+	// errored there, so nothing on its side is going to cancel anything: the
+	// reservation is live, the hang-up is ours, and the id is the only handle.
+	// cancelUnreadable is that handle being used before it goes out of scope.
 	upd, err := recv.Recv()
 	if err != nil {
 		cancel()
@@ -460,13 +461,14 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 	fund := upd.GetPsbtFund()
 	if fund == nil {
 		cancel()
-		return nil, fmt.Errorf("expected psbt_fund from %s, got %T",
-			short(c.Peer), upd.GetUpdate())
+		return nil, cancelUnreadable(ctx, cli, id, fmt.Errorf(
+			"expected psbt_fund from %s, got %T", short(c.Peer), upd.GetUpdate()))
 	}
 	if fund.GetFundingAddress() == "" || fund.GetFundingAmount() <= 0 {
 		cancel()
-		return nil, fmt.Errorf("%s named a funding output of %d sat to %q",
-			short(c.Peer), fund.GetFundingAmount(), fund.GetFundingAddress())
+		return nil, cancelUnreadable(ctx, cli, id, fmt.Errorf(
+			"%s named a funding output of %d sat to %q",
+			short(c.Peer), fund.GetFundingAmount(), fund.GetFundingAddress()))
 	}
 
 	return &Stream{
@@ -480,6 +482,52 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 		cancel:         cancel,
 		recv:           recv,
 	}, nil
+}
+
+// cancelUnreadable releases the funding intent for a stream this program is
+// giving up on while LND has not errored, and returns what to tell the operator.
+//
+// It exists for exactly two call sites, both of them "LND sent this program
+// something it cannot read". Neither is likely. What makes them worth the code
+// is what they leave behind if nothing is done: LND has not refused anything, so
+// nothing on its side cancels the reservation, and hanging the stream up does
+// not either — abort's TestAShimSurvivesItsStreamBeingHungUp closes a stream,
+// waits, and then cancels the shim successfully. The pending channel id goes out
+// of scope one return later and is the only handle there is, so LND would keep a
+// registered intent nothing can reach; and where the peer has already accepted,
+// one of its pending-channel slots goes with it until its own timer runs out
+// (LND's default is about eleven minutes). Issue #57.
+//
+// **The stream is hung up first and the shim cancelled second**, which is the
+// order that test measured. Cancelling an intent out from under a live stream is
+// not something anyone here has watched LND do.
+//
+// Nothing is journalled. A stream that never opened has no funding address, no
+// amount and no channel row to hang an id on, and journal.Begin takes
+// []NewChannel — so recording this would mean a new table for a shim with no
+// channel behind it. There is no need: the process is alive, the id is in hand,
+// and this is one call. What the journal is for is state that has to outlive the
+// process, and after this returns there is none.
+//
+// ErrNoShim is success. It means LND registered no intent for the id, or has
+// already dropped one — which is the end state this is aiming at, not a failure
+// to reach it.
+//
+// A cancel that genuinely fails is reported *alongside* cause rather than in
+// place of it. cause is what LND did, which is established; the cancel failure
+// is a second thing that happened, and the id goes in the sentence because this
+// is the last moment anything knows it.
+func cancelUnreadable(ctx context.Context, cli Client, id lnd.PendingChanID,
+	cause error) error {
+
+	err := abort.CancelShim(ctx, cli, id)
+	if err == nil || errors.Is(err, abort.ErrNoShim) {
+		return cause
+	}
+	return fmt.Errorf("%w. Releasing its funding intent failed too, so whether "+
+		"one is still registered is unknown and nothing on disk can reach it: "+
+		"cancel pending channel id %s out of band with `lncli fundingstatestep "+
+		"--shim_cancel`, or wait out the peers' window: %w", cause, id, err)
 }
 
 // Verified is what step 5 produced: LND has pinned one funding outpoint per
