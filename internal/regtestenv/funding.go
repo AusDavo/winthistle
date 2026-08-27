@@ -557,7 +557,7 @@ func (e *Env) AwaitStreamFailure(t *testing.T, s *Stream, timeout time.Duration)
 	}
 }
 
-// RecipientsIn scrapes the step-4 table out of a run's transcript, the way an
+// RecipientsIn scrapes the step-3 table out of a run's transcript, the way an
 // operator's eye does.
 //
 // It exists because after the inversion the app prints a table and something else
@@ -579,10 +579,10 @@ func (e *Env) AwaitStreamFailure(t *testing.T, s *Stream, timeout time.Duration)
 func RecipientsIn(t *testing.T, transcript string) []coldwallet.Output {
 	t.Helper()
 
-	const heading = "Step 4 — build the transaction in your wallet"
+	const heading = "Step 3 — the plan"
 	i := strings.Index(transcript, heading)
 	if i < 0 {
-		t.Fatalf("the transcript has no step-4 table in it:\n%s", transcript)
+		t.Fatalf("the transcript has no step-3 table in it:\n%s", transcript)
 	}
 
 	var got []coldwallet.Output

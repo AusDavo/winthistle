@@ -202,3 +202,84 @@ func Plural(n int) string {
 	}
 	return "s"
 }
+
+// Stage is how far a run has got, for the one line that says what stopping
+// costs.
+//
+// Four values, because the answer changes exactly three times in a run and each
+// change is a thing the operator has to understand. The boundaries are the
+// facts, not the headings: a stage's line is printed at the moment the thing
+// that makes it true has happened, which is why StageArmed is not step 6's
+// heading but the sentence after its receipts arrived.
+//
+// No LND default appears in any of these. The eleven minutes and the 2016
+// blocks live on the screens that own them — step 2's note, step 7's, and the
+// recovery copy — and StockLNDNote attributes them there. A line that repeated
+// either figure on four more screens would owe four more attributions, which is
+// how a rule that exists to stop noise becomes the noise.
+type Stage int
+
+const (
+	// StageNothingAsked: before any funding stream exists.
+	StageNothingAsked Stage = iota
+
+	// StageStreamsOpen: the shims are registered and no channel has reached
+	// chan_pending. Steps 2 to 5.
+	StageStreamsOpen
+
+	// StageArmed: n receipts, nothing signed and nothing broadcast. Step 6 on.
+	StageArmed
+
+	// StagePublished: step 8 was taken.
+	StagePublished
+)
+
+// StoppingHere is the standing line under a run's screens: what it costs to
+// stop, right now.
+//
+// n is the count the line is about — streams at StageStreamsOpen, channels at
+// StageArmed — and is ignored where the line names no count.
+func StoppingHere(s Stage, n int) string {
+	switch s {
+	case StageNothingAsked:
+		return Para("If you stop here: nothing. No peer has been asked for " +
+			"anything, and this node has done nothing it would have to undo.")
+
+	case StageStreamsOpen:
+		return Para(fmt.Sprintf("If you stop here: the batch is taken apart for "+
+			"you. Nothing has been broadcast and no channel has reached "+
+			"chan_pending, so the teardown cancels the %d shim%s and abandons "+
+			"anything LND created behind them. Each peer holds the slot it "+
+			"reserved until its own sweeper releases it.", n, Plural(n)))
+
+	case StageArmed:
+		return Para(fmt.Sprintf("If you stop here: the batch is abandoned. %d "+
+			"channel%s already recoverable by force-close, and nothing has been "+
+			"broadcast — but abandoning is local and tells the peer nothing, so "+
+			"each peer keeps its side pending and goes on holding one of its own "+
+			"slots.", n, isAreChannels(n)))
+
+	case StagePublished:
+		return Para("If you stop here: nothing stops. The transaction is public " +
+			"and every channel in it is recoverable, so closing this program does " +
+			"not recall it — and winthistle recover refuses to abort a run that " +
+			"reached the publish.")
+	}
+
+	// Not silence. An unhandled Stage is this program failing to say what a
+	// stop would cost, at the one moment that question is worth answering, and
+	// a line that rendered as nothing would look like a screen where stopping
+	// was free. It says which of the two it is and asserts nothing about the
+	// batch, because it knows nothing about the batch.
+	return Para("If you stop here: this program cannot say. That is a defect in " +
+		"it and not a state of your batch — read the screens above, and treat " +
+		"winthistle recover as the authority on what is still standing.")
+}
+
+// isAreChannels keeps "1 channel is" and "2 channels are" grammatical.
+func isAreChannels(n int) string {
+	if n == 1 {
+		return " is"
+	}
+	return "s are"
+}

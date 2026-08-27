@@ -77,3 +77,109 @@ func TestTableStaysInThePane(t *testing.T) {
 		t.Errorf("amounts are not right-aligned against the widest:\n%s", out)
 	}
 }
+
+// stages is every Stage StoppingHere declares, keyed by the identifier rather
+// than by the number, so a stage that is renamed or removed fails to compile
+// instead of going quiet.
+var stages = map[string]Stage{
+	"StageNothingAsked": StageNothingAsked,
+	"StageStreamsOpen":  StageStreamsOpen,
+	"StageArmed":        StageArmed,
+	"StagePublished":    StagePublished,
+}
+
+// TestEveryStageSaysSomethingDifferent.
+//
+// The line is the one place a run says what stopping costs, and the whole
+// design is that its answer changes at each boundary. Two stages rendering the
+// same sentence would be a boundary that says nothing, which is the defect this
+// asserts against rather than a cosmetic repeat.
+func TestEveryStageSaysSomethingDifferent(t *testing.T) {
+	seen := map[string]string{}
+	for name, s := range stages {
+		got := StoppingHere(s, 2)
+		if strings.TrimSpace(got) == "" {
+			t.Errorf("%s renders nothing", name)
+			continue
+		}
+		if !strings.Contains(got, "If you stop here:") {
+			t.Errorf("%s does not open with the standing lead-in:\n%s", name, got)
+		}
+		if prev, dup := seen[got]; dup {
+			t.Errorf("%s renders the same line as %s, so the boundary between "+
+				"them tells the operator nothing:\n%s", name, prev, got)
+		}
+		seen[got] = name
+	}
+}
+
+// TestNoStageLineRepeatsAnLNDDefault.
+//
+// StockLNDNote attributes the eleven minutes and the 2016 blocks once per
+// screen, on the screens that name them. StoppingHere prints on four more
+// screens, so a figure that leaked into it would owe an attribution on each —
+// and the rule exists to stop noise, not to license it.
+func TestNoStageLineRepeatsAnLNDDefault(t *testing.T) {
+	for name, s := range stages {
+		got := StoppingHere(s, 2)
+		for _, figure := range []string{"2016", "eleven minutes", "ten minutes"} {
+			if strings.Contains(got, figure) {
+				t.Errorf("%s names %q, which is an LND default and needs "+
+					"StockLNDNote beside it:\n%s", name, figure, got)
+			}
+		}
+	}
+}
+
+// TestAnUnknownStageSaysSoRatherThanNothing.
+//
+// Go's zero value is a valid Stage, but nothing stops a caller reaching this
+// with a value no case handles. A switch that fell through to "" would render
+// as a screen with no standing line — indistinguishable from a screen where
+// stopping is free, which is the reading that could cost a batch. The default
+// has to be loud, and it may not assert anything about the batch, because at
+// that point it knows nothing about the batch.
+func TestAnUnknownStageSaysSoRatherThanNothing(t *testing.T) {
+	got := StoppingHere(Stage(99), 2)
+	if strings.TrimSpace(got) == "" {
+		t.Fatal("an unknown Stage renders nothing, which reads as a screen " +
+			"where stopping costs nothing")
+	}
+	if !strings.Contains(got, "cannot say") {
+		t.Errorf("an unknown Stage does not say that it cannot say:\n%s", got)
+	}
+	for _, claim := range []string{"recoverable", "broadcast", "abandoned"} {
+		if strings.Contains(got, claim) {
+			t.Errorf("the unknown-Stage line claims %q about a batch it knows "+
+				"nothing about:\n%s", claim, got)
+		}
+	}
+}
+
+// TestTheStageLineCountsGrammatically. One channel is, two channels are.
+//
+// Compared against the unwrapped line, because Para wraps to ProseWidth and a
+// phrase this test is about can have a newline through the middle of it. The
+// grammar is the assertion; where the wrap lands is not.
+func TestTheStageLineCountsGrammatically(t *testing.T) {
+	cases := []struct {
+		stage Stage
+		n     int
+		want  string
+	}{
+		{StageArmed, 1, "1 channel is already recoverable"},
+		{StageArmed, 2, "2 channels are already recoverable"},
+		{StageStreamsOpen, 1, "cancels the 1 shim and"},
+		{StageStreamsOpen, 3, "cancels the 3 shims and"},
+	}
+	for _, c := range cases {
+		got := unwrapped(StoppingHere(c.stage, c.n))
+		if !strings.Contains(got, c.want) {
+			t.Errorf("StoppingHere(%d, %d) does not say %q:\n%s",
+				c.stage, c.n, c.want, got)
+		}
+	}
+}
+
+// unwrapped collapses a wrapped paragraph back to one line.
+func unwrapped(s string) string { return strings.Join(strings.Fields(s), " ") }

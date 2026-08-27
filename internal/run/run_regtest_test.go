@@ -147,7 +147,7 @@ func batchFile(t *testing.T, dir string, peers []string, amounts []int64) string
 	return writeFile(t, filepath.Join(dir, "batch.toml"), b.String())
 }
 
-// TestTheColdProbeRunsTheRealPathAndWithholdsStepNine.
+// TestTheColdProbeRunsTheRealPathAndWithholdsStepEight.
 //
 // This is the mainnet cold probe, on regtest: the whole production sequence,
 // with the last call not made. What it has to prove is that the flag is a
@@ -160,7 +160,7 @@ func batchFile(t *testing.T, dir string, peers []string, amounts []int64) string
 //   - nothing is in the mempool, checked afterwards;
 //   - and the run terminated through the abort path, which is the other half of
 //     what the probe is for.
-func TestTheColdProbeRunsTheRealPathAndWithholdsStepNine(t *testing.T) {
+func TestTheColdProbeRunsTheRealPathAndWithholdsStepEight(t *testing.T) {
 	env := regtestenv.Start(t)
 	peers := env.Peers(t)
 	if len(peers) < 2 {
