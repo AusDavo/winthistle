@@ -340,7 +340,8 @@ func TestAnUnknownRefusalIsARefusalAndIsRetryable(t *testing.T) {
 			"identical update applied by hand minutes later")
 	}
 	if out.Terminal() {
-		t.Fatal("only INVALID_PARAMETER is a statement about the policy itself")
+		t.Fatal("only INVALID_PARAMETER is a refusal against bounds that cannot " +
+			"change")
 	}
 	if !out.Unexplained() {
 		t.Fatal("UNKNOWN names nothing to wait for, so the retry has to be bounded")
@@ -546,10 +547,13 @@ func TestAnInvalidParameterIsTerminalOnTheFirstRefusal(t *testing.T) {
 		failFor: map[string]*lnrpc.FailedUpdate{
 			// LND's own refusal, not internal/policy's pre-check: the pre-check
 			// never reaches the node, and this test is about the reason arriving
-			// from it.
+			// from it. The detail is updateEdge's, because updateEdge failing is
+			// the only thing that emits this reason — a CLTV delta out of bounds
+			// fails the whole call as a gRPC error and never appears here.
 			badCP: failure(bad.Channel,
 				lnrpc.UpdateFailure_UPDATE_FAILURE_INVALID_PARAMETER,
-				"time lock delta of 4 is too small"),
+				"min htlc amount of 1000 mSAT is below min htlc parameter of "+
+					"20000 mSAT"),
 		},
 	}
 
@@ -568,15 +572,30 @@ func TestAnInvalidParameterIsTerminalOnTheFirstRefusal(t *testing.T) {
 			s.Policy)
 	}
 	if s.Attempts != 1 || cli.callsFor[badCP] != 1 {
-		t.Errorf("attempts = %d, calls = %d, want 1 and 1: nothing about the "+
-			"channel can change LND's mind about the figures", s.Attempts,
-			cli.callsFor[badCP])
+		t.Errorf("attempts = %d, calls = %d, want 1 and 1: the bounds this "+
+			"refusal measures against were negotiated when the channel opened "+
+			"and nothing later moves them", s.Attempts, cli.callsFor[badCP])
 	}
 	if !s.RefusedSince.IsZero() || s.RetriesExhausted {
 		t.Errorf("a terminal refusal was put on the retry clock: %+v", s)
 	}
 	if !stateFor(t, res, goodCP).Settled() {
 		t.Errorf("the other channel did not settle:\n%s", res.Report())
+	}
+
+	// And the screen says why it will not change, in terms of the mechanism that
+	// actually produces it. Both emitting sites are updateEdge failing against
+	// the channel's negotiated LocalChanCfg bounds; the figures LND checks ahead
+	// of any channel never reach failed_updates at all.
+	rep := res.Report()
+	// Unwrapped, because prose.Para breaks the sentence at the pane width and a
+	// literal would then depend on where it happened to break.
+	flat := strings.Join(strings.Fields(rep), " ")
+	if !strings.Contains(flat, "negotiated when it opened") {
+		t.Errorf("the report does not say what the bounds are:\n%s", rep)
+	}
+	if strings.Contains(flat, "before it looks at the channel") {
+		t.Errorf("the report still has the mechanism inverted:\n%s", rep)
 	}
 }
 

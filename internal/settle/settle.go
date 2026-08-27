@@ -45,8 +45,9 @@
 // LND's defaults with nothing left running to notice.
 //
 // Which refusals are worth waiting through is the other half of that, and the
-// answer is not readable off the enum. INVALID_PARAMETER is a verdict on the
-// policy and is terminal at once; PENDING and NOT_FOUND name what they are
+// answer is not readable off the enum. INVALID_PARAMETER is a refusal against
+// bounds this channel negotiated when it opened, so it is terminal at once;
+// PENDING and NOT_FOUND name what they are
 // waiting for; and everything else — UNKNOWN, INTERNAL_ERR, whatever a later
 // version adds — is LND declining to say, which is retried for RetryWindow and
 // then reported. See PolicyOutcome.Retryable, Terminal and Unexplained.
@@ -287,13 +288,31 @@ type PolicyOutcome struct {
 // the retry instead of refusing to make it.
 func (o PolicyOutcome) Retryable() bool { return o.Refused && !o.Terminal() }
 
-// Terminal reports whether the refusal is a verdict on the policy itself, which
-// will arrive again on the hundredth attempt exactly as it did on the first.
+// Terminal reports whether the refusal will arrive again on the hundredth
+// attempt exactly as it did on the first.
 //
-// One reason qualifies, and only one. INVALID_PARAMETER is LND checking the CLTV
-// delta and the inbound fees against its own bounds before it looks at the
-// channel at all, so nothing about the channel can change the answer. Every
-// other refusal is about the channel, the graph, or LND's own insides.
+// One reason qualifies, and only one — but not for the reason this comment gave
+// for a year. INVALID_PARAMETER is not LND checking the figures ahead of the
+// channel. Both sites that emit it are updateEdge failing
+// (routing/localchans/manager.go:122 and :273), and updateEdge fetches the
+// channel and measures the HTLC bounds against its *negotiated*
+// LocalChanCfg — MinHTLC and ChannelStateBounds.MaxPendingAmount (:448-467,
+// :478). It is entirely about the channel.
+//
+// The conclusion survives on the better argument: negotiated bounds are fixed
+// when the channel opens and nothing later changes them, so a min or max HTLC
+// this channel will not carry is one it will still not carry on the hundredth
+// attempt.
+//
+// The figures LND does check ahead of any channel — the CLTV delta and the
+// inbound fees — produce no failed_updates entry at all. They fail the whole
+// UpdateChannelPolicy call as a gRPC error, which is why policy.Validate refuses
+// them before a batch is armed rather than waiting to read them here.
+//
+// Not settled: updateEdge's first statement is FetchChannel, and a channel that
+// went away between the graph lookup and that fetch would land here as
+// INVALID_PARAMETER for a transient reason. Whether that ordering is reachable
+// has not been established, and this build does not claim either way.
 func (o PolicyOutcome) Terminal() bool {
 	return o.Refused &&
 		o.Reason == lnrpc.UpdateFailure_UPDATE_FAILURE_INVALID_PARAMETER
@@ -345,6 +364,13 @@ func (o PolicyOutcome) String() string {
 // See the package comment: a pending channel is refused inside a successful
 // response.
 func ApplyPolicy(ctx context.Context, cli Client, m Member) (PolicyOutcome, error) {
+	// Our own refusal, reported under LND's enum for it. Validate covers exactly
+	// the figures LND checks in the RPC handler ahead of any channel — the CLTV
+	// delta and the inbound fees — where a refusal is a gRPC error for the whole
+	// call and never a failed_updates entry, so there is no LND reason code to
+	// carry it. INVALID_PARAMETER is the right classification anyway: it is
+	// terminal, which is what the caller needs, and repeating the call cannot
+	// change it.
 	if err := m.Policy.Validate(); err != nil {
 		return PolicyOutcome{
 			Refused: true,
@@ -386,10 +412,17 @@ func outpointString(op *lnrpc.OutPoint) string {
 type State struct {
 	Member Member
 
-	// Open is whether LND lists the channel as open at all, and Active whether
-	// the peer is currently connected. Only Open gates the policy; Active is
-	// reported because an open channel with an offline peer routes nothing, and
-	// that is worth seeing rather than debugging.
+	// Open is whether LND lists the channel as open at all. Active is
+	// ListChannels' own active field, which LND computes as peerOnline &&
+	// link.EligibleToForward() — so what it establishes is narrower than "the
+	// peer is up": this node's own link is not eligible to forward, and a peer
+	// that is offline is only one of the ways that happens. The others are our
+	// own link still coming up after a restart, and a link that has been taken
+	// out of service.
+	//
+	// Only Open gates the policy. Active is reported because a channel whose
+	// link cannot forward routes nothing, and that is worth seeing rather than
+	// debugging.
 	Open   bool
 	Active bool
 

@@ -53,8 +53,8 @@
 //
 //  2. Publish will not accept anything but an *Armed, and an Armed carrying a
 //     batch cannot be constructed outside this package: its receipts live in an
-//     unexported map that only Receipts fills, one entry per chan_pending it
-//     actually read. So "there is no path to the publish call that skips the
+//     unexported map that only Receipts fills, one entry per channel that got
+//     its receipt. So "there is no path to the publish call that skips the
 //     gate" is a fact about the type system rather than a convention.
 //
 //     This used to be the raw transaction, which was unforgeable for the same
@@ -522,10 +522,10 @@ type Verified struct {
 // with the transaction: psbt_verify runs enforceNewReservedValue over the node's
 // own hot wallet. internal/reserve predicts that in Phase 0.
 //
-// Each success is journalled as it happens. That is what makes a crash here
-// legible: a channel recorded as verified is one LND has committed an outpoint
-// for, and a channel still recorded as shim_registered is one that can be
-// cancelled for free — which is exactly the split abort.Target needs.
+// Each channel is journalled before its own call, not after it, and what that
+// row does and does not establish is journal.MarkVerified's to say. It is one
+// write and it gets one doc comment; this one said the opposite for a slice
+// after the ordering moved.
 func Verify(ctx context.Context, cli Client, j *journal.Journal, runID string,
 	s *Streams, psbtRaw []byte) (*Verified, error) {
 
@@ -609,7 +609,7 @@ func Verify(ctx context.Context, cli Client, j *journal.Journal, runID string,
 // force-close, and the only thing Publish will accept.
 //
 // It cannot usefully be constructed outside this package: receipts is unexported
-// and only Receipts fills it, one entry per chan_pending actually read. That is
+// and only Receipts fills it, one entry per channel that got its receipt. That is
 // I-1 in the type system — not a rule the publish path remembers to check, but a
 // value it cannot be called without.
 type Armed struct {
@@ -735,7 +735,8 @@ func Receipts(ctx context.Context, cli Client, j *journal.Journal, s *Streams,
 	return armed, nil
 }
 
-// receiptFor waits for one channel's chan_pending.
+// receiptFor gets one channel's receipt: chan_pending off the stream, or
+// PendingChannels answering the same question when it does not arrive.
 func receiptFor(ctx context.Context, cli Client, st *Stream,
 	want lnd.ChannelPoint) (lnd.ChannelPoint, error) {
 

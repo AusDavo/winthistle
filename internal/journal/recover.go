@@ -35,7 +35,8 @@ type Channel struct {
 	AmountSat     int64
 	State         ChannelState
 
-	// Outpoint is zero until chan_pending arrived. It is what an abandon needs;
+	// Outpoint is zero until the channel got its receipt. It is what an abandon
+	// needs;
 	// the pending channel id is what a shim cancel needs. Which of the two is
 	// available is exactly what State says.
 	Outpoint lnd.ChannelPoint

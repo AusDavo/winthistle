@@ -66,9 +66,38 @@ func (r *Result) Report() string {
 	}
 
 	b.WriteString(policyNote(r))
+	b.WriteString(linkNote(r))
 	b.WriteString(depthNote(r))
 	b.WriteString(horizonNote(r))
 	return b.String()
+}
+
+// linkNote says what "not forwarding" was read off, because the column has room
+// for two words and the field has three causes.
+//
+// State.Active is ListChannels' own active field, which LND computes as
+// peerOnline && link.EligibleToForward(). So what a false one establishes is
+// that this node's link is not eligible to forward, and an offline peer is only
+// one of the ways that happens: our own link still coming up after a restart, and
+// a link deliberately out of service, are the others. The old column said "peer
+// offline", which picked one of the three and put the cause on somebody else's
+// node.
+//
+// Only when a row shows it, and once for the screen.
+func linkNote(r *Result) string {
+	for _, s := range r.States {
+		if s.Open && !s.Active {
+			return "\n" + prose.Para(
+				"\"not forwarding\" is ListChannels' active field, which LND "+
+					"computes as the peer being online and this node's link being "+
+					"eligible to forward. A false one says the link is not "+
+					"forwarding and does not say which side is why: a peer that is "+
+					"offline, a link of ours still coming up, and a link out of "+
+					"service all read the same from here. The policy does not wait "+
+					"on it — only \"open\" does.")
+		}
+	}
+	return ""
 }
 
 // detailIndent is the column the rows' second line and their continuations
@@ -99,7 +128,7 @@ func (s State) line() string {
 	case s.Open && s.Active:
 		where = "open, active"
 	case s.Open:
-		where = "open, peer offline"
+		where = "open, not forwarding"
 	}
 	row := fmt.Sprintf("  %-18s %-20s", short(s.Member.Peer), where)
 	outcome := s.Policy.String()
@@ -143,7 +172,9 @@ func (s State) line() string {
 // channel", which asserted something the app cannot know and was false about the
 // one live batch that reached it: LND had refused with its catch-all while a peer
 // was offline, and the same update applied by hand minutes later. Only
-// INVALID_PARAMETER earns that sentence, so only INVALID_PARAMETER gets it.
+// INVALID_PARAMETER earns a "this will not change" sentence, so only
+// INVALID_PARAMETER gets one — and it earns it for the opposite mechanism to the
+// one the copy claimed. See PolicyOutcome.Terminal.
 func policyNote(r *Result) string {
 	var pending, missing, invalid, silent, retrying int
 	for _, s := range r.States {
@@ -168,10 +199,11 @@ func policyNote(r *Result) string {
 	var b strings.Builder
 	if invalid > 0 {
 		b.WriteString(prose.Para(fmt.Sprintf(
-			"%d channel%s refused the policy itself, and that refusal will not "+
-				"change: LND checks the CLTV delta and the inbound fees against "+
-				"its own bounds before it looks at the channel at all. The figures "+
-				"are what is wrong, not the timing.", invalid, prose.Plural(invalid))))
+			"%d channel%s refused the policy against bounds it negotiated when it "+
+				"opened, and that refusal will not change: those bounds are fixed "+
+				"for the life of the channel. The figures are what is wrong, not "+
+				"the timing — read the detail beside each one below.",
+			invalid, prose.Plural(invalid))))
 		b.WriteString("\n")
 	}
 	if silent > 0 {
