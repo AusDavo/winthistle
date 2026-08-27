@@ -532,6 +532,31 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	if err != nil {
 		return nil, nil, fmt.Errorf("checking what the signing wallet returned: %w", err)
 	}
+
+	// The row that says the wallet signed is written here, one statement after
+	// the only thing that establishes it, and not in sign() where the bytes
+	// arrived. Issue #37. Accept has just executed every input's witness against
+	// its own script; what sign() had was a file and a nil error out of
+	// combine.Parse, which is a sniffer that reads five magic bytes. So on the
+	// .psbt branch nothing had looked for a signature at all, and an operator who
+	// saved the step-4 transaction at step 7 got journal.SignerSigned written over
+	// the truthful SignerAwaiting row — RecordSigner upserts on (run_id, label) —
+	// with the recovery screen reading it back afterwards as "1 signed" for a run
+	// where nothing was. The .txn branch was guarded, by SignedFromTX's witness
+	// count, so the same mistake journalled differently depending on which
+	// encoding the wallet happened to save.
+	//
+	// This is #32's ordering rule with the mechanics reversed and the reason
+	// unchanged: a row may only claim what has been established at the moment it
+	// is written. MarkVerified moved *ahead* of its call because that row is read
+	// to mean "the call may have landed, go and look", so its safe direction is
+	// early. This one is read to mean "it did happen", so its safe direction is
+	// late — and a crash in the gap leaves SignerAwaiting, which is the wallet
+	// having been asked with nothing usable back, that state in its own words.
+	if err := d.Journal.RecordSigner(ctx, o.RunID, combine.SigningWalletLabel,
+		journal.SignerSigned); err != nil {
+		return nil, nil, fmt.Errorf("journalling the signing step: %w", err)
+	}
 	if !recheck.OK() {
 		fmt.Fprint(d.Out, recheck.Report())
 		return nil, nil, errors.New("the finalized transaction does not match the plan")
@@ -621,11 +646,18 @@ func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, erro
 		// already printing to.
 		return nil, fmt.Errorf("the batch was not signed: %w", err)
 	}
-	if err := d.Journal.RecordSigner(ctx, o.RunID, label,
-		journal.SignerSigned); err != nil {
-		return nil, fmt.Errorf("journalling the signing step: %w", err)
-	}
-	fmt.Fprintf(d.Out, "signed (%s elapsed)\n", time.Since(started).Round(time.Second))
+	// Nothing is journalled on the way out either, and issue #37 is why: what
+	// this frame has established is that a file came back and decoded, which on
+	// the .psbt branch means combine.Parse recognised five magic bytes. No
+	// signature is looked for anywhere on that path. The row that says the wallet
+	// signed is written by armWindow, immediately after combine.Accept executes
+	// every witness, and the SignerAwaiting row above stands until then.
+	//
+	// The printed line says the same and no more. It used to read "signed", which
+	// was this claim one output earlier — and the honest version of it is already
+	// printed ninety lines up, after the check: "signed and checked".
+	fmt.Fprintf(d.Out, "a file came back (%s elapsed); nothing has looked at it "+
+		"for signatures yet.\n", time.Since(started).Round(time.Second))
 	return signed, nil
 }
 
