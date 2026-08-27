@@ -351,21 +351,55 @@ and without a `Chain` no production run ever does — **a real gap, found while
 sizing this slice and not closed by it.**
 
 **Four more instances, found by the sweep after this slice's own copy was
-written, none of them fixed here.** Each is verified in source, and each is a
-decision rather than a typo, so each wants its own slice. Filed 2026-08-27 as
-**#24, #25, #26 and #27**, in that order:
+written.** Each is verified in source, and each is a decision rather than a typo,
+so each wants its own slice. Filed 2026-08-27 as **#24, #25, #26 and #27**, in
+that order. **#24 is closed; #25, #26 and #27 remain:**
 
-1. **#24 · `internal/doctor/doctor.go:611`** says *"%d runs stopped somewhere they
-   should not have"* off `journal.Unfinished`, which is
-   `state NOT IN (published, aborted)` — a run is in that set from the moment
-   `arm.Open` journals its first stream, so **a batch being armed in another
-   terminal right now is in this list**. It is a `Fail`, so `Report.OK()` goes
-   false against a healthy node, and its `fix` is `winthistle recover`, which on
-   a run in `StateArming` cancels live shims. `internal/prose/recovery.go:48-59`
-   already fixed exactly this and says so — *"Saying they stopped was a claim the
-   journal cannot make"* — and hedges with *"Unless something is driving one right
-   now"*. `doctor` does not. **The journal's own doc comment carries the claim
-   too**, so the fix is at two sites.
+1. ~~**#24 · `doctor` said unfinished runs had stopped.**~~ **Done, 2026-08-27.**
+   `journal.Unfinished` is `state NOT IN (published, aborted)`, and a run is in
+   that set from the moment `journal.Begin` records its first stream, so a batch
+   being armed in another terminal was reported as dead and pointed at
+   `winthistle recover`. **Two decisions, deliberately two commits, so a later
+   reader can revert one without the other.** (1) The hedge goes at the callers,
+   copying `prose.RecoveryList`'s wording, and `Unfinished`'s doc comment now
+   states what the query establishes — narrowing the *function* was rejected
+   because the narrower question cannot be answered honestly: a run that died
+   mid-arming and one being armed write identical rows, and the journal carries
+   no heartbeat, so it would mean inventing a liveness signal or picking a time
+   window, and a window is a guess wearing a query's clothes. There are exactly
+   two callers and the other already hedged. (2) It is a **`Warn`**, not a
+   `Fail` — nothing on the run path consults the journal's other runs before
+   arming, so an unfinished run stops no batch, and `Report.OK()` no longer goes
+   false against a healthy node.
+
+   **The sweep found more sites than the two the issue named**: `checkJournal`'s
+   sentence and doc, `Unfinished`'s doc, `run.Unfinished`'s doc,
+   `cmd/winthistle`'s package doc and its `recover` **usage line** — *"list runs
+   that stopped"*, the front door to the screen that hedges — and
+   `README.md:472`. `docs/design.html` **does not carry this claim and did not
+   move**; it says only *"the run journal readable"*.
+
+   **Two `internal/prose` sites were found and deliberately left**, to hold the
+   slice to `doctor` and `journal`: `RecoveryList`'s *own doc line*, which sits
+   directly above the comment explaining why the claim cannot be made, and — the
+   sharper one — `stateMeans`' `StateAborting` copy, *"An abort of this run was
+   started and did not finish"*, which is **this defect one state over**.
+   `MarkAborting` writes that state before the first RPC, deliberately, so a
+   `winthistle recover` running right now in another terminal is described as
+   having failed. `journal.go:86` and `docs/design.html:698` both hedge it
+   correctly; only the screen asserts it. `prose`'s printed recovery header
+   remains right and remains the model.
+
+   **And the check's copy had never been rendered by any test.** The old sentence
+   passed `prose.IsAre` where a pronoun belonged and printed *"3 runs stopped
+   somewhere **are** should not have"* — ungrammatical at every count, unnoticed.
+   `TestTheReportStaysInThePane` hand-built every check out of `r.add` and `say`,
+   so the sentences the checks write *themselves* were width-checked by nothing;
+   it renders a real `checkJournal` report now.
+   `TestAnUnfinishedRunIsNotReportedAsStopped` and
+   `TestAnUnfinishedRunDoesNotStopABatch` are **node-free** — `checkJournal`
+   takes the journal as a parameter and the test package is internal — and the
+   first was verified to fail against the old copy rather than only to pass.
 2. **#25 · `internal/run/run.go:602-604`** journals `journal.SignerDeclined` for **any**
    error out of `SigningWallet.Signed` — a failed `os.Remove`, Ctrl-C, an
    unreadable file, and `combine.ErrIncompleteWitnesses`, which is the very
@@ -382,6 +416,38 @@ decision rather than a typo, so each wants its own slice. Filed 2026-08-27 as
    here and on the peer"* where only this node's `PendingChannels` was read. The
    inference is sound and the paragraph 150 lines above shows its working; this
    one states it bare.
+
+**And PR #29's own audit found six more, which is the third sweep in a row to
+find instances the previous one's vocabulary could not see.** Verified in source,
+none fixed there, filed 2026-08-27 as **#30**, and **not** a list to call
+complete:
+
+- **`prose.stateMeans`' `StateAborting`** — *"An abort of this run was started
+  and did not finish."* The state is written before the first RPC, so a live
+  `recover` is described as a failed one. The sharpest of the six, and the same
+  defect as #24 one state over.
+- **`prose.stateMeans`' `StateArming` and `StateSigning`** render a state a live
+  run holds for its whole working life in the past tense — *"streams **were**
+  open"* — where `journal.go:52`, `journal.go:65` and `docs/design.html:694`
+  all use the present. `prose` is the outlier.
+- **`prose.signerNote`** — *"No signer had been asked for anything when this
+  stopped"*, off `len(r.Signers) == 0`, which establishes only that no row was
+  written. Rendered for any journalled run, including one arming.
+- **`journal.Recover`'s doc** calls its input *"a crashed run"*; its own caller
+  says the commonest path in is Ctrl-C.
+- **`prose.channelBreakdown`'s comment** reads `len(r.Channels) == 0` as *"a run
+  that stopped before Begin wrote any"* — and `Begin` writes both in one
+  transaction, so that is not normally reachable at all. The emitted copy is
+  fine; the comment justifying it is not.
+- **`journal`'s package doc** — *"the record of what a batch did"* — is now at
+  odds with the contract #24 wrote three files over: *"the journal records what a
+  run wrote, not whether it is still writing."*
+
+**The audit's other half came back clean, and that is worth recording too**: no
+test in the tree asserts on a copy string, check name or map key the build no
+longer emits. PR #23's `doctor_regtest_test.go` fix held, and every surviving
+`Contains` against a dead sentence is a *negative* assertion with a comment
+saying so.
 
 **And the sweep's other half found a test that could only pass.**
 `internal/doctor/doctor_regtest_test.go`'s second loop still named `"Bitcoin

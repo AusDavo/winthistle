@@ -73,6 +73,11 @@ func TestDoctorReadsTheWholeSetup(t *testing.T) {
 	// usable against a harness that other packages drive successfully. The
 	// macaroon is the one this test expects to fail, and it is asserted on
 	// directly below.
+	//
+	// "the run journal" passes here because this config's journal is a fresh
+	// t.TempDir() with no runs in it, and it would pass now even if it were not:
+	// since #24 an unfinished run is a Warn, because it does not stop a batch
+	// being opened. A test that seeds runs must not use this config.
 	for _, name := range checks {
 		if name == "the macaroon" {
 			continue

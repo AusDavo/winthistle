@@ -3,8 +3,8 @@
 //
 // Four commands, and the order they are in is the order they are used:
 // print-macaroon-command bakes the credential LND will accept, doctor checks
-// that and everything else, run opens the batch, and recover takes apart a run
-// that stopped somewhere it should not have.
+// that and everything else, run opens the batch, and recover lists the runs the
+// journal never saw finish and takes one apart.
 //
 // There is one front door now. The local web UI is gone: it was a second
 // renderer of the same reports and a second place for the copy to be wrong, and
@@ -41,7 +41,8 @@ Commands:
                            open the batch: Phase 0, the armed window, Phase 2.
                            --psbt is where you save the transaction you build
                            in Sparrow, and where the signed one is read back
-  recover [RUN-ID]         list runs that stopped, or take one apart
+  recover [RUN-ID]         list the runs never seen to finish, or take one
+                           apart
   print-macaroon-command   print the lncli bakemacaroon line for this build
   example-config           print a winthistle.toml to start from
   example-batch            print a batch file to start from
@@ -261,10 +262,12 @@ func recoverCmd(ctx context.Context, args []string) error {
 		}
 		defer j.Close()
 
-		// Runs and then the CPFP children, and the pairing is inside run.Unfinished
-		// rather than here: they are not the same thing and they are not aborted
-		// the same way, but a screen that listed one and not the other would be
-		// telling somebody their node is clean when a coin of theirs is locked.
+		// One list. This paired the runs with the CPFP children until item 5 took
+		// the children and the coin-lock machinery with it, and the pairing is the
+		// reason the call is run.Unfinished rather than a bare j.Unfinished; that
+		// history is in run.Unfinished's doc comment rather than here. The screen
+		// it prints is the one that hedges: a run is in the list from the moment
+		// its streams open, so it does not say they stopped.
 		runs, err := run.Unfinished(ctx, j, os.Stdout)
 		if err != nil {
 			return err

@@ -1,14 +1,142 @@
 package doctor
 
 import (
+	"context"
 	"errors"
+	"fmt"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
+	"github.com/AusDavo/winthistle/internal/config"
+	"github.com/AusDavo/winthistle/internal/journal"
+	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/prose"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 )
+
+// journalWithRuns is n runs that reached StateArming and nothing further, in a
+// database of their own. That is exactly the row a live batch writes: Begin
+// records StateArming before anything is shown to a wallet, so nothing here can
+// be distinguished from a batch being armed in another terminal right now — and
+// that indistinguishability is the whole subject of these two tests.
+//
+// No node, no harness. checkJournal takes the journal as a parameter and this
+// package is internal, so the check can be called directly.
+func journalWithRuns(t *testing.T, n int) (*journal.Journal, *config.Config) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "runs.db")
+	j, err := journal.Open(ctx, path)
+	if err != nil {
+		t.Fatalf("opening the journal: %v", err)
+	}
+	t.Cleanup(func() { j.Close() })
+
+	for i := range n {
+		id, err := lnd.NewPendingChanID()
+		if err != nil {
+			t.Fatalf("NewPendingChanID: %v", err)
+		}
+		runID := fmt.Sprintf("20260827-04344%d-9a8f28", i)
+		err = j.Begin(ctx, runID, []journal.NewChannel{{
+			PendingChanID: id,
+			PeerPubkey:    fmt.Sprintf("02%062x", i+1),
+			AmountSat:     2_000_000,
+		}})
+		if err != nil {
+			t.Fatalf("Begin %s: %v", runID, err)
+		}
+	}
+	return j, &config.Config{Journal: config.Journal{Path: path}}
+}
+
+// theOldClaim matches the sentence this check used to print: a count, the word
+// "run" or "runs", and "stopped" asserted straight off it. The replacement still
+// contains the word "stopped", inside a hedge, so an assertion on that word
+// alone would be an assertion about nothing.
+var theOldClaim = regexp.MustCompile(`\d+ runs? stopped`)
+
+// TestAnUnfinishedRunIsNotReportedAsStopped.
+//
+// journal.Unfinished is `state NOT IN (published, aborted)`, and a run is in
+// that set from the moment its streams open. So the report may say the journal
+// never saw these runs finish, and may not say they stopped: a batch being armed
+// in another terminal writes the identical row, and the journal carries no
+// heartbeat that could tell the two apart. prose.RecoveryList already reads this
+// query correctly; this is the same hedge on the other caller.
+func TestAnUnfinishedRunIsNotReportedAsStopped(t *testing.T) {
+	j, cfg := journalWithRuns(t, 3)
+
+	r := &Report{}
+	checkJournal(context.Background(), r, cfg, j, nil)
+
+	// Flattened: the report wraps to the pane, so a Contains against a sentence
+	// written as one line fails on the column rather than on the claim.
+	flat := strings.Join(strings.Fields(r.Report()), " ")
+
+	if theOldClaim.MatchString(flat) {
+		t.Errorf("the report asserts these runs stopped, which the journal "+
+			"cannot establish:\n%s", r.Report())
+	}
+	if !strings.Contains(flat, "unless something is driving one right now") &&
+		!strings.Contains(flat, "Unless something is driving one right now") {
+		t.Errorf("the report does not hedge a live run:\n%s", r.Report())
+	}
+	if !strings.Contains(flat, "neither published nor aborted") {
+		t.Errorf("the report does not say what the journal established:\n%s",
+			r.Report())
+	}
+
+	// The hedge must not have cost the list. An operator reading this needs the
+	// ids, because the next command takes one.
+	for _, run := range mustRuns(t, j) {
+		if !strings.Contains(flat, run.ID) {
+			t.Errorf("run %s is not in the report:\n%s", run.ID, r.Report())
+		}
+	}
+}
+
+// TestAnUnfinishedRunDoesNotStopABatch.
+//
+// Fail is "this has to be fixed before a batch can be opened" and Warn is
+// "usable, and the operator should know". Nothing on the run path consults the
+// journal's other runs before arming, so an unfinished one blocks nothing: this
+// is a Warn, and Report.OK() stays true. It failed the pre-flight against a
+// healthy node until #24, which is the half of that issue the copy fix does not
+// reach.
+func TestAnUnfinishedRunDoesNotStopABatch(t *testing.T) {
+	j, cfg := journalWithRuns(t, 2)
+
+	r := &Report{}
+	checkJournal(context.Background(), r, cfg, j, nil)
+
+	if got := r.Checks[0].Status; got != Warn {
+		t.Errorf("the journal check is %v, want %v", got, Warn)
+	}
+	if !r.OK() {
+		t.Errorf("a node with unfinished runs and nothing else wrong is not "+
+			"ready to open a batch:\n%s", r.Report())
+	}
+	if strings.Contains(r.Report(), "Not ready") {
+		t.Errorf("the report opens by saying the node is not ready:\n%s",
+			r.Report())
+	}
+}
+
+func mustRuns(t *testing.T, j *journal.Journal) []*journal.Run {
+	t.Helper()
+	runs, err := j.Unfinished(context.Background())
+	if err != nil {
+		t.Fatalf("Unfinished: %v", err)
+	}
+	if len(runs) == 0 {
+		t.Fatal("the fixture wrote no unfinished runs")
+	}
+	return runs
+}
 
 // TestTheTwoRefusalsThatLookAlike.
 //
@@ -71,6 +199,14 @@ func TestTheReportStaysInThePane(t *testing.T) {
 	bad.say("    send coins on-chain — /lnrpc.Lightning/SendCoins")
 	bad.fix("winthistle print-macaroon-command --save-to /home/someone/.lnd/" +
 		"winthistle.macaroon | sh")
+
+	// A real checkJournal report, rather than a hand-built stand-in of one. Every
+	// other check in here is assembled by this test out of r.add and say, so the
+	// sentences the checks themselves write were width-checked by nothing — and
+	// this one's is three clauses over run-id rows that are already 40-odd
+	// columns before the state is appended.
+	j, cfg := journalWithRuns(t, 3)
+	checkJournal(context.Background(), r, cfg, j, nil)
 
 	for i, line := range strings.Split(r.Report(), "\n") {
 		// A command is exempt, and deliberately: it has to be pasteable, and a

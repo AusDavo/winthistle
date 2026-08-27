@@ -583,7 +583,13 @@ func anyOurs(pending []peers.PendingOpen) bool {
 	return false
 }
 
-// checkJournal is the runs that stopped.
+// checkJournal is the runs the journal shows as neither published nor aborted.
+//
+// Which is all it may say about them. It said they had stopped, off a query that
+// establishes only that they are in neither terminal state, so a batch being
+// armed in another terminal was reported as dead — see journal.Unfinished, where
+// that reading was stated as the contract, and prose.RecoveryList, which hedges
+// the same query correctly and is the register copied here.
 //
 // It reconciled Core's coin locks against the journal's owners until item 5. A
 // run takes no coin locks — this app selects no coins — and there is no Core
@@ -608,8 +614,17 @@ func checkJournal(ctx context.Context, r *Report, cfg *config.Config,
 		c.say("no unfinished runs")
 		return
 	}
-	c.fail("%d run%s stopped somewhere %s should not have:", len(unfinished),
-		prose.Plural(len(unfinished)), prose.IsAre(len(unfinished)))
+	// Warn, not Fail. Fail is "this has to be fixed before a batch can be
+	// opened", and an unfinished run does not stop one: nothing on the run path
+	// consults the journal's other runs before arming, and j.Unfinished has
+	// exactly two callers, neither of them in it. So a Fail here put "Not ready"
+	// at the top of a report about a node that is fine — and, given the sentence
+	// below, most often one that is fine because a batch is running on it.
+	c.warn("%d unfinished run%s in the journal: neither published nor aborted. "+
+		"A run is in this list from the moment its streams open, so unless "+
+		"something is driving one right now it stopped somewhere it should not "+
+		"have and is waiting for a decision:",
+		len(unfinished), prose.Plural(len(unfinished)))
 	for _, run := range unfinished {
 		c.say("    %s — %s", run.ID, run.State)
 	}
