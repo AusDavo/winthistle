@@ -657,27 +657,126 @@ the other three were **#37 and #38**, both filed 2026-08-27. **#37 is closed;
   transaction"*, where `arm.Publish` checked the txid and a txid check cannot
   establish signing — witnesses do not move it, which is I-3's own premise.
 
+**PR #36's audit found five more of the rule, and it is the seventh sweep in a
+row to find what the previous one's vocabulary could not see.** Denominator:
+**160 operator-reaching sites** across `internal/run` and `internal/arm` — 54
+`fmt.Fprint*` and 15 `prose` calls plus 41 operator-reaching errors in `run`,
+and 50 errors in `arm`. All five verified in source, and the LND half of the
+sharpest one re-read at v0.21.2-beta. Filed 2026-08-27 as **#39, #40, #41, #42
+and #43**; none is fixed, and each is a decision rather than a typo.
+
+- **#39 · `reportArmed` puts the commitment signature on the peer, and says the
+  funds come back without this node.** The sharpest, because it is the screen
+  the operator reads with one call left and because **the same function
+  contradicts it eighteen lines later**. `funderProcessFundingSigned` parses
+  `commitSig` from **the peer's `funding_signed`**
+  (`msg.CommitSig.ToSignature()`, `:2805`) and hands it to
+  `CompleteReservation(nil, commitSig)` — so **this node** stored **the
+  peer's** signature, which is what `CLAUDE.md`'s own I-1 citation and
+  `arm.go:756-757` both say. The screen has the custodian inverted, and *"even
+  if this node vanished"* is denied by the backup paragraph below it: *"lives
+  in this node's channel database … the backup plus the peer's data-loss
+  protection is what recovers them"*. **The safety conclusion is not in
+  question** — recoverable by force-close is I-1 and is executed by a test. The
+  clause an operator acts on is the one that is wrong, at the moment the copy
+  is telling them to store the backup off the box. **And nothing renders this
+  screen and asserts on it**, which is #24's `checkJournal` finding in a third
+  package. - **#40 · `arm.Verify`'s doc still describes the ordering PR #35
+  reversed.** A hole left **inside #35's own slice**, at the other end of the
+  write it moved: the doc says *"each success is journalled as it happens"* and
+  *"a channel recorded as verified is one LND has committed an outpoint for"*,
+  which is precisely the inference that slice removed. `MarkVerified`'s own doc
+  was updated and is right; two docs on one write is how they drifted. - **#41
+  · `ErrPublishRefused` says the node declined**, on the branch that catches
+  `codes.Unavailable`, a transport failure and `context.Canceled` — where LND
+  may never have seen the request, as the function's own comment three lines up
+  says. #22's shape at the sentinel level, name and text both, **with the same
+  split polarity**: the other use at `publish.go:161` reads
+  `resp.GetPublishError()` and is a genuine refusal. **The cost is that it
+  defeats a hedge somebody deliberately wrote**: `run/report.go:258` says *"LND
+  refused or did not answer: %v"* and then interpolates *"lnd refused to
+  publish"* into it, on the one screen where the operator must not conclude the
+  transaction is not public. - **#42 · a first-channel `Open` failure is
+  reported as a journalling failure, and the peer's own refusal is discarded.**
+  **The only one of the five with a functional cost.** `arm.Open` returns its
+  `*Streams` on the first channel's failure too, deliberately; `All` is then
+  empty, `NewChannels()` returns an empty slice, `journal.Begin` refuses it —
+  *"a batch with no channels in it is not a batch"* — and that error is
+  returned while `err`, holding the peer's sentence, is never returned at all.
+  The `if err != nil` below it is unreachable on this path. So *"Number of
+  pending channels exceed maximum"* prints as a journal complaint. Its second
+  half is `recoverRun`'s *"which means `arm.Open` never returned a stream"*,
+  asserted from a row's absence, where `Begin` is one transaction and so
+  `ErrNoRun` is also what a successful `Open` with a failed `Begin` looks like
+  — the shape `arm.Open`'s own doc exists for. - **#43 · *"is still being
+  written"* is printed from an observation of zero bytes.** `readWhole`
+  returned `present=true, body=nil`, which is either an empty file or a size
+  that moved; nothing observed a writer. **The build's own strace measurement
+  makes the asserted cause the unlikely one at the moment it prints** — issue
+  #10 put Sparrow's inter-chunk gap at 0.05–0.3 ms, and this sentence fires
+  only after the file has been at zero across two polls, ≥2 s at `DefaultPoll`.
+  The wait is right, the remedy is right either way, and the state it does
+  *not* name — empty and staying empty — is the one that reaches the branch.
+  **Step 4 is inside clock A, where waiting is the one thing that cannot
+  help.**
+
+**And `internal/arm` prints nothing at all** — no `Fprint`, no `prose`, no
+writer, no logger, across 1,021 lines. Its whole operator-facing surface is
+error text and the doc comments on its journal writes, which is why #40 and #38
+are both docs and #41 is a sentinel.
+
 **One lead was left unverified and is not filed**, on the standing rule that an
 agent's report is evidence rather than a finding: `arm.go:437` discards the
 pending channel id when `psbt_fund`'s `Recv` fails *after* `cli.OpenChannel`
 returned, so a shim LND may already hold would never be journalled and could not
 be cancelled. **The open question is whether LND registers the PSBT shim before
 the stream's first message** — server-streaming `OpenChannel` returns as soon as
-the client stream exists — and answering it means reading `rpcserver.OpenChannel`
-at v0.21.2-beta.
+the client stream exists.
+
+**Half of that is read now, and it does not settle it.** `rpcserver.OpenChannel`
+at v0.21.2-beta runs `newPsbtAssembler` in the handler **before**
+`r.server.OpenChannel(req)` (`rpcserver.go:2555`), and the reservation
+`FundingStateStep` later looks up by pending chan id is created asynchronously
+inside the funding manager — not by the time the client's stream exists. **So a
+client-side failure after `cli.OpenChannel` returned does not establish that no
+shim exists**, which is enough to say the lead is real in shape and not enough to
+file it. What is still unread is whether a cancelled stream tears that
+reservation down. **It stays unfiled**, and #42 names it as the dependency that
+issue's own second half rests on.
 
 **The audit's other half came back clean, and that is worth recording too**: no
 test in the tree asserts on a copy string, check name or map key the build no
 longer emits. PR #23's `doctor_regtest_test.go` fix held, and every surviving
 `Contains` against a dead sentence is a *negative* assertion with a comment
-saying so. **It has now come back clean four sweeps running** — #31's covered
+saying so. **It has now come back clean five sweeps running** — #31's covered
 61 assertion loops across 30 files, and the #27 + #30 slice's covered **373
 assertion points across 29 test files**, including 160 string literals sitting
 inside table-driven blocks *away from* their `Contains` call, which the first
 pass of that sweep missed. **#35's covered ~303 assertion points across all 50
 `_test.go` files**, machine-checking 1,268 literals against a
 concatenation-merged blob of every non-test file and adjudicating 410 survivors
-by hand. A clean answer to this question is cheap and is evidence.
+by hand. **#36's covered 390 assertion call sites and 560 deduped literals across
+all 50 `_test.go` files**, against 2,511 comment-free, concatenation-folded
+literals from all 56 non-test files: 105 assertion-position misses adjudicated
+one at a time, **zero stale**. A clean answer to this question is cheap and is
+evidence.
+
+**#36's pass added a fourth thing to keep, and it is a structural one: walk
+upward to the enclosing field marker rather than grepping near the `Contains`.**
+Collecting every string in every composite literal and then deciding whether it
+reaches an assertion by its field name — `want`, `gone`, `notWant`, `asserted`,
+`hedged`, `says`, or a bare `range []string{` — is what separates the 105
+assertion-position literals from the 176 in `name:`/fixture positions no
+assertion reads. That distinction is the one a grep cannot make, and it is what
+trap (i) is. **All three literal-keyed map lookups in the tree were checked and
+all three keys are live**: `internal/settle/report_test.go:270` and `:299` (the
+`paneCases()` shape — still not self-protecting, but its *positive* loop on the
+same lookup would fail loudly), and `internal/combine/combine_test.go:455`, which
+is an assert-*zero* on a map lookup and therefore trap (ii) in its purest form.
+And re-matching all 281 misses against production text *with* comments found 39
+hits, **every one a documented negative assertion, a runtime-formatted value or a
+test-local fixture — zero positive assertions matching only a doc comment**, for
+a second sweep running.
 
 **Two things #35's pass added that the next one should keep.** **Merge the
 concatenation before matching**: fourteen literals — thirteen in
