@@ -55,7 +55,7 @@ attributes the funding outputs to peers, so you can see which peer each one
 funds and at what amount, and it holds the gate — every channel reaches
 chan_pending before the transaction is allowed to reach the network.
 
-The sequence is the peer pre-flight, the fee source and the reserve check for
+The sequence is the peer pre-flight, the shim probe and the reserve check for
 Phase 0; the armed window, the wallet's two visits and the single publish for
 Phase 1; and the confirmation watch and the policy pass for Phase 2, with the
 abort and recovery paths under all of it. See HANDOFF.md.
