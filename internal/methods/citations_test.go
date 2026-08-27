@@ -126,6 +126,7 @@ var citationExceptions = map[string]string{
 	"SegWit":          "the soft fork",
 	"TxID":            "the abbreviation, prose spelling",
 	"CompactSize":     "the Bitcoin serialization term",
+	"mSAT":            "LND's own spelling of the unit, in its error text",
 	"cHNidP8":         "the base64 prefix of a PSBT's magic bytes",
 	"aGVsbG8gd29ybGQ": "base64 in a test fixture",
 

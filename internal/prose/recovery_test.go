@@ -194,6 +194,19 @@ func TestACleanAbortStillWarnsAboutThePeers(t *testing.T) {
 	mustContain(t, got, "Nothing of this run is left on this node")
 	mustContain(t, got, "Your peers are not clean")
 	mustContain(t, got, "2016 blocks")
+
+	// #33. The count stays — recovery copy names clock B in blocks — and the
+	// screen now says once whose number it is. Once, not once per paragraph.
+	flat := strings.Join(strings.Fields(got), " ")
+	mustContain(t, got, "LND's own defaults")
+	if n := strings.Count(flat, "bind a peer running stock LND"); n != 1 {
+		t.Errorf("the attribution appears %d times; once per screen is the whole "+
+			"point of it:\n%s", n, got)
+	}
+	// And it does not name the figure that is not on this screen.
+	if strings.Contains(flat, "eleven minutes") {
+		t.Errorf("the attribution names a figure this screen never printed:\n%s", got)
+	}
 }
 
 // A failure that is the refusal working must not read like a bug.

@@ -141,6 +141,44 @@ func BTC(sat int64) string {
 	return fmt.Sprintf("%s%d.%08d", neg, sat/1e8, sat%1e8)
 }
 
+// StockLNDNote is the attribution a screen owes when it has quoted one of LND's
+// own configuration defaults as a peer's behaviour.
+//
+// Both figures this build quotes about a peer are defaults rather than protocol
+// constants. The funding horizon is lncfg.DefaultMaxWaitNumBlocksFundingConf,
+// 2016 blocks, and the hold on a cancelled reservation is
+// chanfunding.DefaultReservationTimeout plus lncfg.DefaultZombieSweeperInterval,
+// ten minutes and one. Neither is adjustable in a release build of LND, and
+// neither binds a peer that is running something else, a different version, or a
+// non-default flag — and no RPC reports either figure to an initiator, so this
+// build cannot know which case it is in.
+//
+// Called once per screen, not once per number. internal/settle's horizonNote is
+// the model — it says of the same 2016 that "it binds a peer running stock LND
+// and nobody else" — and a screen that hedged under every figure would be noise
+// rather than attribution. The counts themselves stay: recovery copy names clock
+// B in blocks, and that rule is untouched.
+//
+// Both false renders nothing, so a caller may pass what its own branches
+// actually printed.
+func StockLNDNote(horizon, hold bool) string {
+	var what string
+	switch {
+	case horizon && hold:
+		what = "The 2016 blocks and the eleven minutes above are"
+	case horizon:
+		what = "The 2016 blocks above are"
+	case hold:
+		what = "The eleven minutes above are"
+	default:
+		return ""
+	}
+	return Para(what + " LND's own defaults, not the protocol's. They bind a " +
+		"peer running stock LND and nobody else: another implementation, another " +
+		"version, or a peer that changed the flag gives up somewhere else, and " +
+		"no RPC reports either figure to the side that opened the channel.")
+}
+
 // IsAre and WasWere keep the reports grammatical when a count is one.
 func IsAre(n int) string {
 	if n == 1 {

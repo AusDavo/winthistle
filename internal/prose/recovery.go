@@ -265,6 +265,13 @@ func recoveryPlan(r *journal.Run, pending, shims []journal.Channel) string {
 			"Nothing was broadcast, so nothing was spent. The cost of this abort " +
 				"is one more signing round and some of your peers' patience."))
 	}
+	// #33, once for the screen. Both bullets above quote a figure that is LND's
+	// default rather than something a peer promised, and the flags say which of
+	// them actually printed.
+	if note := StockLNDNote(len(pending) > 0, len(shims) > 0); note != "" {
+		b.WriteString("\n")
+		b.WriteString(note)
+	}
 	return b.String()
 }
 
@@ -436,6 +443,12 @@ func RecoveryOutcome(r *journal.Run, rep *abort.Report, err error) string {
 					"winthistle recover. Nothing this program can read will ever " +
 					"tell it otherwise: the row says verified, and asking LND for " +
 					"the shim again returns the same absence it returned this time."))
+		}
+		// #33, once for the screen. Up to two paragraphs above name the 2016
+		// blocks; the hold is not on this screen at all.
+		if note := StockLNDNote(len(rep.Abandoned) > 0 || len(standing) > 0, false); note != "" {
+			b.WriteString("\n")
+			b.WriteString(note)
 		}
 		return b.String()
 	}

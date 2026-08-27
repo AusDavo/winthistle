@@ -96,6 +96,24 @@ func TestTheArmedScreenNamesTheNodeAsTheCustodian(t *testing.T) {
 		t.Errorf("the armed screen no longer says the batch is recoverable by "+
 			"force-close:\n%s", screen)
 	}
+
+	// Issue #45. The shorthand stays, and beside it the thing an operator must
+	// not do with it: LND does not refuse a force-close on a pending channel, and
+	// on an unconfirmed batch that broadcasts a commitment whose parent is
+	// nowhere. This screen is one of three that say "recoverable by force-close"
+	// and "nothing has been broadcast" in the same breath, and none of them said
+	// what closing one now would actually cost.
+	for _, want := range []string{
+		"once the transaction confirms",
+		"will still close a pending channel if asked",
+		"recovers nothing",
+	} {
+		if !strings.Contains(screen, want) {
+			t.Errorf("the armed screen does not say %q, so an operator reading "+
+				"\"recoverable by force-close\" is not told that closing one now "+
+				"recovers nothing:\n%s", want, screen)
+		}
+	}
 }
 
 // TestTheArmedScreenStandsUpWithNoBackupParagraph is the conditionality half.

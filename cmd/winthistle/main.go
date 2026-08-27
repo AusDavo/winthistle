@@ -169,7 +169,8 @@ func runCmd(ctx context.Context, args []string) error {
 		"the cold probe: run the whole production path and withhold step 8, the "+
 			"publish. Exits non-zero if the teardown does not finish")
 	probe := fs.Bool("probe", false, "shim-probe every peer first. Costs each "+
-		"accepted peer a pending-channel slot for ~11 minutes, and this run then "+
+		"accepted peer a pending-channel slot for ~11 minutes at LND's defaults, "+
+		"and this run then "+
 		"waits that out before arming")
 	psbtPath := fs.String("psbt", "", "where the transaction you build in Sparrow "+
 		"gets saved, and where this run reads it back from. The signed one goes "+
