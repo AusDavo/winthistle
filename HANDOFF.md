@@ -486,12 +486,14 @@ bullet: **nothing pre-excludes a legacy coin** now — Sparrow picks them, and
   `failed_updates` populated. Reading only `err` records a policy that was never
   applied. `settle.ApplyPolicy` is the only place this build calls it.
 
-- **`minimum_depth` is not readable.** It is in `accept_channel` and in
-  `OpenChannel.NumConfsRequired`, and in no RPC. `settle.ExpectedDepth` predicts
-  what a stock LND peer will do and `State.ObservedDepth` records what it
-  actually did, which is only knowable after the fact. Do not add a UI that
-  promises "usable after k confirmations" up front — the design asks for it and
-  it cannot be delivered.
+- **`minimum_depth` is readable, in one window.** It is in `accept_channel` and
+  in `OpenChannel.NumConfsRequired`, and `PendingChannels` reports it back as
+  `confirmations_until_active` for as long as the funding transaction is
+  unconfirmed. `settle.State.PeerDepth` takes that reading once;
+  `ExpectedDepth` is the prediction that stands in when the window was missed,
+  and `ObservedDepth` is the harness's check from above. Once the transaction
+  confirms the same field is a countdown, so a reading taken late is not the
+  peer's number.
 
 - **`gettransaction` on a client with no wallet scope returns -19, not -5.**
   "Multiple wallets are loaded. Please select which wallet to use...".

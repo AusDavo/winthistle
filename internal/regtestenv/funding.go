@@ -469,10 +469,13 @@ func (e *Env) OpenAndConfirmPlainChannel(t *testing.T, peerPubkey string, amount
 // OpenPlainChannel is OpenAndConfirmPlainChannel without the mining.
 //
 // Split out for the settlement tests, which have to advance the chain one block
-// at a time: the depth at which a channel first appears open is the peer's own
-// minimum_depth read from above, and mining six blocks at once throws that
-// reading away. LND exposes minimum_depth over no RPC, so this is the only place
-// it can be learned.
+// at a time: the depth at which a channel first appears open is an upper bound
+// on the peer's own minimum_depth, read from above, and mining six blocks at
+// once throws that reading away. It is not the only route to the number — LND
+// hands the peer's own figure over on PendingChannels while the funding
+// transaction is unconfirmed, which is issue #47 — and that is exactly why it is
+// worth keeping: two numbers from two sources, checked against each other on a
+// running node.
 func (e *Env) OpenPlainChannel(t *testing.T, peerPubkey string, amountSat int64) lnd.ChannelPoint {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
