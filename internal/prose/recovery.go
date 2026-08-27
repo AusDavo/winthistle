@@ -386,9 +386,20 @@ func failureLine(err error) string {
 			"have removed it, and a confirmed channel removed that way has its funds " +
 			"stranded. Look at that channel before doing anything else — " + err.Error()
 	case errors.Is(err, abort.ErrBluntNotConfirmed):
+		// "It is still pending here and on the peer" — #27. The first half is
+		// what abort read, in this node's PendingChannels. The second was an
+		// inference, and a sound one, asserted bare on the screen this file's
+		// own comment calls the highest-stakes copy in the build. What is
+		// established is narrower and is enough: nothing was done, so nothing
+		// changed anywhere. Pointing at the paragraph that shows the working was
+		// the other candidate and is not available — that paragraph is on the
+		// Recovery screen and this is RecoveryOutcome, and a screen may not point
+		// at a section it does not have (TestNoScreenPointsBelowItself).
 		return "An abandon needed LND's blunt flag and it was not authorised, so " +
-			"nothing was done to that channel. It is still pending here and on the " +
-			"peer — " + err.Error()
+			"nothing was done to that channel. This node still has it pending, " +
+			"which is what was read. And an abandon tells the peer nothing either " +
+			"way, so this refusal changed nothing on the peer's side: whatever it " +
+			"was holding, it still is — " + err.Error()
 	case errors.Is(err, abort.ErrNoShim):
 		return "There was no funding intent to cancel — " + err.Error()
 	default:

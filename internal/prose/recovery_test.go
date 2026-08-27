@@ -174,6 +174,38 @@ func TestTheOutcomeScreenNamesTheRefusalThatProtectedYou(t *testing.T) {
 	mustContain(t, got, "stranded")
 }
 
+// A failure line may say what was read and not what it implies.
+//
+// #27. internal/abort looked the channel up in *this node's* PendingChannels and
+// the abandon did not run, so "it is still pending here" is exactly that — and
+// the arm went on to say "and on the peer", which nothing here asked. The
+// inference is sound, which is what made it a copy decision, and the paragraph
+// in recoveryPlan makes the same claim with its working shown and clock B named
+// in blocks. That paragraph is on a different screen, so this line has to be
+// self-contained: it says the mechanism instead of the mechanism's conclusion.
+func TestTheBluntRefusalSaysWhatWasReadAndNotWhatItImplies(t *testing.T) {
+	rep := &abort.Report{Failures: []error{errWrap(abort.ErrBluntNotConfirmed)}}
+	got := flat(RecoveryOutcome(run(journal.StateAborting), rep, errors.New("x")))
+
+	// The old claim, in the shape it was made. "pending" survives in the
+	// replacement, so the assertion is on the peer clause and not on the word.
+	if regexp.MustCompile(`pending here and on the peer`).MatchString(got) {
+		t.Errorf("the failure line asserts the channel is pending on the peer, "+
+			"where only this node's PendingChannels was read:\n%s", got)
+	}
+	// What was read, named as the thing that was read.
+	mustContain(t, got, "This node still has it pending, which is what was read")
+	// And the mechanism, so the reader can carry the inference themselves.
+	mustContain(t, got, "an abandon tells the peer nothing either way")
+	mustContain(t, got, "changed nothing on the peer's side")
+	// The other arms are unchanged: ErrNotPending's copy was checked in the
+	// same sweep and is sound.
+	notPending := flat(RecoveryOutcome(run(journal.StateAborting),
+		&abort.Report{Failures: []error{errWrap(abort.ErrNotPending)}},
+		errors.New("x")))
+	mustContain(t, notPending, "That is the refusal working")
+}
+
 func TestRecoveryListSaysWhenSomethingMustNotBeTouched(t *testing.T) {
 	runs := []*journal.Run{
 		run(journal.StateArming, channel(journal.ChanShimRegistered, false)),
@@ -496,6 +528,24 @@ func TestTheRecoveryScreensStayInThePane(t *testing.T) {
 		"empty list":             RecoveryList(nil, time.Now()),
 		"list of a run with no channels": RecoveryList(
 			[]*journal.Run{run(journal.StateArming)}, time.Now()),
+		// RecoveryOutcome was missing from this map, and it is the screen whose
+		// width is least under this file's control: every failureLine ends with
+		// LND's or abort's own error text, appended to a bullet. Added when #27
+		// lengthened one of those bullets.
+		"outcome, clean": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
+			Abandoned: []abort.AbandonOutcome{{
+				Channel:   lnd.ChannelPoint{TxID: fakeTxID, Index: 0},
+				UsedBlunt: true,
+			}},
+			Cancelled: []abort.ShimOutcome{{ID: lnd.PendingChanID{1, 2, 3}}},
+		}, nil),
+		"outcome, partial": RecoveryOutcome(run(journal.StateAborting), &abort.Report{
+			Failures: []error{
+				errWrap(abort.ErrBluntNotConfirmed),
+				errWrap(abort.ErrNotPending),
+				errWrap(abort.ErrNoShim),
+			},
+		}, errors.New("the abort did not complete")),
 	}
 	for name, text := range screens {
 		for i, line := range strings.Split(text, "\n") {
