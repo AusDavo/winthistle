@@ -413,13 +413,25 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	if errors.As(err, &opened) {
 		streams = opened.Streams
 	}
+	var newChans []journal.NewChannel
 	if streams != nil {
 		defer streams.Close()
-		// The pending channel ids are the only handles that can cancel these
-		// streams, so they go on disk before anything else happens — including
-		// before this function decides whether Open failed.
-		if jerr := d.Journal.Begin(ctx, o.RunID, streams.NewChannels()); jerr != nil {
-			return nil, nil, fmt.Errorf("journalling the run: %w", jerr)
+		newChans = streams.NewChannels()
+	}
+	// The pending channel ids are the only handles that can cancel these streams,
+	// so they go on disk before anything else happens — including before this
+	// function decides whether Open failed.
+	//
+	// Only if there are any, though. arm.Open hands back its Streams on the FIRST
+	// channel's failure too, so that its shims can be released; on that path
+	// NewChannels() is empty and Begin refuses an empty batch outright. Calling it
+	// anyway manufactured a journalling complaint and returned that in place of
+	// the peer's own refusal — the operator was shown "a batch with no channels in
+	// it is not a batch" where LND had said "Number of pending channels exceed
+	// maximum", which is the sentence naming the remedy. #42.
+	if len(newChans) > 0 {
+		if jerr := d.Journal.Begin(ctx, o.RunID, newChans); jerr != nil {
+			return nil, nil, unjournalledStreams(streams, err, jerr)
 		}
 	}
 	if err != nil {
@@ -761,6 +773,45 @@ func members(armed *arm.Armed, p *prepared, o Options) []settle.Member {
 	return out
 }
 
+// unjournalledStreams is what to say when Begin failed with streams already open.
+//
+// This is the one shape arm.Open's doc exists for: n peers holding reservations
+// with nothing on disk to cancel. `winthistle recover` works off the journal and
+// will not see them, and a shim outlives the stream it came on —
+// TestAShimSurvivesItsStreamBeingHungUp on a live node — so hanging up does not
+// release them either. The pending channel ids are therefore printed here, in the
+// error, because this is the last moment this program knows them.
+//
+// openErr, when there is one, comes first and is not discarded. It is the peer's
+// or LND's own sentence about why the batch stopped, and it is the only thing
+// here that names a remedy.
+func unjournalledStreams(streams *arm.Streams, openErr, jerr error) error {
+	ids := streams.PendingChanIDs()
+	labels := make([]string, 0, len(ids))
+	for _, id := range ids {
+		labels = append(labels, id.String())
+	}
+	left := fmt.Errorf("journalling the run failed, so the %d funding stream%s that "+
+		"did open %s not on disk and `winthistle recover` cannot see %s. Cancel "+
+		"%s out of band with lncli fundingstatestep --shim_cancel, or wait out the "+
+		"peers' window — pending channel id%s %s: %w",
+		len(ids), prose.Plural(len(ids)), prose.IsAre(len(ids)), them(len(ids)),
+		them(len(ids)), prose.Plural(len(ids)), strings.Join(labels, ", "), jerr)
+	if openErr == nil {
+		return left
+	}
+	return fmt.Errorf("%w. And %w", openErr, left)
+}
+
+// them is the pronoun for a count, so a one-stream failure does not read as a
+// plural.
+func them(n int) string {
+	if n == 1 {
+		return "it"
+	}
+	return "them"
+}
+
 // recoverRun tears down whatever the run left behind, through the journal.
 //
 // # The teardown outlives the cancellation that caused it
@@ -788,8 +839,18 @@ func recoverRun(ctx context.Context, d Deps, o Options, res *Result) error {
 
 	run, err := d.Journal.Load(ctx, o.RunID)
 	if errors.Is(err, journal.ErrNoRun) {
-		// Nothing was journalled, which means arm.Open never returned a stream.
-		// There is nothing in LND to take down.
+		// No run row, so there is nothing for this path to work from: Recover
+		// reads the journal and the journal is empty. That is all this knows, and
+		// it used to say more — "which means arm.Open never returned a stream" —
+		// which is a cause asserted from a row's absence. Begin writes the run row
+		// and the channel rows in one transaction, so ErrNoRun is also what a
+		// successful arm.Open followed by a failed Begin looks like, and that is
+		// the shape arm.Open's doc exists for. #42.
+		//
+		// It is not silently lost: armWindow names those streams and prints their
+		// pending channel ids in the error it returns on that path, because that
+		// is the last moment anything knows them. What is left here is genuinely
+		// nothing to do.
 		return nil
 	}
 	if err != nil {

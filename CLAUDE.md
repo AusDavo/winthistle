@@ -92,8 +92,19 @@ The bump procedure, in order:
 
 ### Known gaps, with issues open
 
-- **#42** · a first-channel `arm.Open` failure is reported as a journalling
-  failure and the peer's own refusal is discarded. Functional, not copy.
+- **#57** · `arm.open` discards the pending channel id on failure, and on two of
+  its three paths LND has not errored, so the reservation is live and the
+  hang-up is ours: a shim nothing can reach. The realistic path is safe — LND
+  cancels its own refusals (`funding/manager.go:5301` → `:5308` →
+  `lnwallet/wallet.go:1488`) — and a hung-up stream does *not* release a shim,
+  measured by `TestAShimSurvivesItsStreamBeingHungUp`. Cancelling inline is
+  probably the fix; it is an abort-path decision, not a signature change.
+- **The armed window reports the refusal it observed, never a journalling
+  complaint about it.** `arm.Open` returns its `Streams` on a first-channel
+  failure too, so `NewChannels()` is empty there and `journal.Begin` — which
+  rightly refuses an empty batch — must not be called. When `Begin` genuinely
+  must run and fails, `unjournalledStreams` returns both causes and prints the
+  pending channel ids, because that is the last moment anything knows them.
 - **The count at verify grows under the batch, and the top-up is what covers
   it.** `AtVerify` (`RequiredReserve(additional=1)`) is the figure the *first*
   `psbt_verify` uses and the floor for the rest; the *n*th can be judged against

@@ -433,6 +433,25 @@ func open(ctx context.Context, cli Client, c Channel) (*Stream, error) {
 		return nil, fmt.Errorf("opening a funding stream to %s: %w", short(c.Peer), err)
 	}
 
+	// From here on LND may already hold a registered intent for id, and this
+	// function's failure paths drop it. RegisterFundingIntent runs at
+	// lnwallet/wallet.go:1000, inside handleFundingReserveRequest, which the
+	// funding manager dispatches asynchronously — so cli.OpenChannel returning is
+	// no evidence either way, and a hung-up stream does not release what is there:
+	// abort's TestAShimSurvivesItsStreamBeingHungUp measures that on a live node.
+	//
+	// What saves the realistic path is that LND cleans up its own refusals. A
+	// peer's lnwire.Error reaches Manager.handleErrorMsg (funding/manager.go:5301),
+	// which calls cancelReservationCtx (:5308), which calls
+	// ChannelReservation.Cancel, whose handler deletes the intent
+	// (lnwallet/wallet.go:1488). So the Recv failure immediately below — where
+	// "Number of pending channels exceed maximum" arrives — leaves nothing behind.
+	//
+	// The two branches after it are the residual: LND has not errored, the
+	// reservation is live, and hanging up is ours. Issue #57. It is not fixed by
+	// returning the id, because a stream that never opened has no channel row to
+	// journal it against, and that is a journal decision rather than a signature
+	// change.
 	upd, err := recv.Recv()
 	if err != nil {
 		cancel()
