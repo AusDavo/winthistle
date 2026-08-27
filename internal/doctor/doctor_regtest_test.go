@@ -95,7 +95,10 @@ func TestDoctorReadsTheWholeSetup(t *testing.T) {
 		t.Errorf("admin.macaroon was reported as missing a permission this build "+
 			"calls, which means the probe itself is wrong:\n%s", joined)
 	}
-	if strings.Contains(joined, "cannot even run the permission check") {
+	// Keyed on the copy issue #13 replaced. If checkMacaroon's probe-refused
+	// rendering is reworded again, reword this with it — a Contains against a
+	// string the build no longer emits is a check that can only pass.
+	if strings.Contains(joined, "would not run the permission check") {
 		t.Errorf("the probe could not run at all:\n%s", joined)
 	}
 	if len(mac.Fix) == 0 {

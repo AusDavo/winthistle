@@ -65,9 +65,12 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("no certificate found in %s", cfg.TLSCert)
 	}
 
-	macBytes, err := os.ReadFile(cfg.Macaroon)
+	// ReadMacaroon rather than os.ReadFile: a short or empty read hex-encodes
+	// into a well-formed credential carrying the wrong bytes, and every sentence
+	// downstream then blames the node or the permission list. See its comment.
+	macBytes, err := ReadMacaroon(cfg.Macaroon)
 	if err != nil {
-		return nil, fmt.Errorf("reading macaroon %s: %w", cfg.Macaroon, err)
+		return nil, err
 	}
 
 	// LND's self-signed cert is the trust root; MinVersion is set because the
@@ -110,11 +113,18 @@ func Dial(ctx context.Context, cfg Config) (*Client, error) {
 
 	// One cheap call to prove address, certificate and macaroon all work
 	// together. GetInfo is in the permission list precisely for this.
+	//
+	// Which is also why the failure below names the credential's path alongside
+	// the address: one call proves three things at once and its error says which
+	// of them failed only as far as LND chose to say. Naming only the address
+	// reads as "the node", and a credential is the likelier half.
 	probeCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	if _, err := c.Lightning.GetInfo(probeCtx, &lnrpc.GetInfoRequest{}); err != nil {
 		conn.Close()
-		return nil, fmt.Errorf("lnd at %s did not answer GetInfo: %w", cfg.Address, err)
+		return nil, fmt.Errorf("lnd at %s did not answer GetInfo, one call that "+
+			"proves the address, the certificate and the credential at %s "+
+			"together: %w", cfg.Address, cfg.Macaroon, err)
 	}
 	return c, nil
 }

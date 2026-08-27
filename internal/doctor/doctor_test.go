@@ -47,8 +47,9 @@ func TestTheTwoRefusalsThatLookAlike(t *testing.T) {
 		"nothing at all": {err: nil, want: false},
 	}
 	for name, tc := range cases {
-		if got := tooNarrow(tc.err); got != tc.want {
-			t.Errorf("%s: tooNarrow = %v, want %v (%v)", name, got, tc.want, tc.err)
+		if got := refusedOverMacaroon(tc.err); got != tc.want {
+			t.Errorf("%s: refusedOverMacaroon = %v, want %v (%v)",
+				name, got, tc.want, tc.err)
 		}
 	}
 }
