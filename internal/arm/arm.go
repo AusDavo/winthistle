@@ -568,6 +568,24 @@ func Verify(ctx context.Context, cli Client, j *journal.Journal, runID string,
 				"transaction itself. That breaches I-1 and this call will not make it",
 				short(st.Peer), st.PendingChanID)
 		}
+		// Before the call, not after, which is RecordPinnedTxID's discipline
+		// twenty lines up and MarkPublishing's, for the same reason. This one
+		// used to be written after the RPC returned, and the gap was the whole
+		// of it: a process that died between the return and this write left the
+		// row saying shim_registered for a channel whose funding flow LND had
+		// completed and which goes on to reach chan_pending on its own.
+		//
+		// That gap is load-bearing since #32. A shim cancel over such a row
+		// comes back AlreadyGone, and recordAbort reads the row to decide what
+		// the absence means — shim_registered means "no verify, so LND created
+		// nothing", which is exactly the inference this ordering would have
+		// falsified. Written first, the row can only be wrong in the safe
+		// direction: a verify that never happened, or was refused, leaves a
+		// channel journalled as verified, whose shim is still there and still
+		// cancels.
+		if err := j.MarkVerified(ctx, runID, st.PendingChanID); err != nil {
+			return nil, fmt.Errorf("journalling psbt_verify for %s: %w", st.PendingChanID, err)
+		}
 		_, err := cli.FundingStateStep(ctx, &lnrpc.FundingTransitionMsg{
 			Trigger: &lnrpc.FundingTransitionMsg_PsbtVerify{
 				PsbtVerify: &lnrpc.FundingPsbtVerify{
@@ -582,9 +600,6 @@ func Verify(ctx context.Context, cli Client, j *journal.Journal, runID string,
 		if err != nil {
 			return nil, fmt.Errorf("psbt_verify for the channel to %s (%s): %w",
 				short(st.Peer), st.PendingChanID, err)
-		}
-		if err := j.MarkVerified(ctx, runID, st.PendingChanID); err != nil {
-			return nil, fmt.Errorf("journalling psbt_verify for %s: %w", st.PendingChanID, err)
 		}
 	}
 	return &Verified{RunID: runID, TxID: txid, outpoints: expected}, nil

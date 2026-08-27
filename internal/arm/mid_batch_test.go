@@ -390,6 +390,54 @@ func TestLNDRestartingMidBatchLeavesExactlyTheReceiptsThatArrived(t *testing.T) 
 	}
 }
 
+// The journal's row for a channel must never be weaker than what LND has been
+// asked to do with it, and the ordering of one write is the whole of that.
+//
+// MarkVerified used to be written after FundingStateStep returned. A process
+// that died in that gap left the row saying shim_registered for a channel whose
+// funding flow LND had already completed — psbt_verify carries skip_finalize, so
+// it does not park the flow, and that channel goes on to reach chan_pending on
+// its own with the peer holding its side.
+//
+// #32 made that gap load-bearing rather than merely untidy. recordAbort reads
+// this row to decide what an absent funding intent means: shim_registered is
+// taken to establish that no verify happened, so LND created nothing and
+// ChanShimGone is terminal. A row written after the RPC would have made that
+// inference false for exactly the channel it most matters for.
+//
+// The stub refuses the first verify, which is the moment a crash between the two
+// statements looks like from the journal's side: the call did not succeed, and
+// the row must already say verified.
+func TestTheVerifyRowIsWrittenBeforeTheCallItNames(t *testing.T) {
+	ctx := context.Background()
+	b := newBatch(t, "verify-row-first", 2)
+
+	cli := &stubLND{verifyErr: func(int) error {
+		return status.Error(codes.Unavailable, "connection error: desc = transport is closing")
+	}}
+	if _, err := Verify(ctx, cli, b.j, b.runID, b.streams, b.psbtRaw); err == nil {
+		t.Fatal("Verify succeeded through a node that refused every call")
+	}
+
+	run, err := b.j.Load(ctx, b.runID)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	var verified int
+	for _, c := range run.Channels {
+		if c.State == journal.ChanVerified {
+			verified++
+		}
+	}
+	if verified != 1 {
+		t.Fatalf("%d channels are %s, want the one this run asked LND about: %+v",
+			verified, journal.ChanVerified, run.Channels)
+	}
+	if cli.verifies != 1 {
+		t.Errorf("Verify made %d calls after the first was refused, want 1", cli.verifies)
+	}
+}
+
 // LND going away partway through the *verify* loop, which is the other phase.
 //
 // Nothing has been armed and no peer has answered, so this is the cheap failure:
