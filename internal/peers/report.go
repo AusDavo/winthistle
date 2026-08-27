@@ -159,6 +159,9 @@ func pendingSection(f Facts) string {
 			"while the peer still counts it, until 2016 blocks pass from its " +
 			"funding height. And one this node opened may be an earlier run of " +
 			"this tool that did not finish, which `winthistle recover` is for."))
+	// #33, once for the screen.
+	b.WriteString("\n")
+	b.WriteString(prose.StockLNDNote(true, false))
 	return b.String()
 }
 
@@ -222,6 +225,10 @@ func (p Probe) Report(now time.Time) string {
 			"If the batch was ready to arm, this probe was the wrong call: it is " +
 				"step 2 with the answer thrown away. arm.Open asks the same " +
 				"question, holds the same reservation, and keeps what comes back."))
+		// #33, once for the screen. Everything above about how long the slot is
+		// held is LND's default rather than this peer's promise.
+		b.WriteString("\n")
+		b.WriteString(prose.StockLNDNote(false, true))
 		return b.String()
 	}
 
@@ -270,6 +277,9 @@ func (p Probe) Report(now time.Time) string {
 		b.WriteString(prose.Para(
 			"A cancelled shim clears in ten minutes. A channel that reached " +
 				"chan_pending does not."))
+		// #33, for this branch of the screen: both figures are on it.
+		b.WriteString("\n")
+		b.WriteString(prose.StockLNDNote(true, true))
 	case Internal:
 		b.WriteString(prose.Para(
 			"LND's generic refusal. failFundingFlow forwards the real text only " +

@@ -43,8 +43,8 @@ func paneCases() map[string]*Result {
 	long := PolicyOutcome{
 		Refused: true,
 		Reason:  lnrpc.UpdateFailure_UPDATE_FAILURE_INVALID_PARAMETER,
-		Detail: "time lock delta of 4 is too small, minimum supported is 18 and " +
-			"the maximum is 2016",
+		Detail: "max htlc size of 1000000000 mSAT is above max pending amount " +
+			"of 247500000 mSAT",
 	}
 	unexplained := PolicyOutcome{
 		Refused: true,
@@ -53,6 +53,24 @@ func paneCases() map[string]*Result {
 	}
 
 	return map[string]*Result{
+		// #26. A row whose link is not forwarding, so linkNote renders and is
+		// measured — the note is the only place with room to say what the field
+		// actually establishes.
+		"an open channel whose link is not forwarding": {
+			Elapsed:     12 * time.Second,
+			RetryWindow: RetryWindow,
+			States: []State{{
+				Member: paneMember(0),
+				Open:   true,
+				Active: false,
+				Confs:  -1,
+				Policy: PolicyOutcome{
+					Refused: true,
+					Reason:  lnrpc.UpdateFailure_UPDATE_FAILURE_PENDING,
+					Detail:  "not yet confirmed",
+				},
+			}},
+		},
 		"a stuck member with LND's own refusal in the row": {
 			Elapsed:     94 * time.Second,
 			RetryWindow: RetryWindow,

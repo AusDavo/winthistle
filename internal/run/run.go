@@ -427,6 +427,11 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	}
 	fmt.Fprintf(d.Out, "%d funding stream%s open, and the peers' ten minutes "+
 		"start now.\n", len(streams.All), prose.Plural(len(streams.All)))
+	// #33, once for the transcript's clock A. The ten minutes are
+	// chanfunding.DefaultReservationTimeout, swept on
+	// lncfg.DefaultZombieSweeperInterval, and both are LND's defaults rather
+	// than anything a peer agreed to.
+	fmt.Fprint(d.Out, "\n", prose.StockLNDNote(false, true))
 
 	// The Phase 0 finding was about the batch the operator approved. These are
 	// the streams that actually opened.
@@ -516,6 +521,12 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		"chan_pending, with nothing signed. Every one of them is recoverable by "+
 		"force-close, the peers' ten minutes are no longer running, and nothing "+
 		"has been broadcast.", len(armed.Channels), len(streams.All))))
+	fmt.Fprint(d.Out, "\n", prose.Para("That recovery starts when the funding "+
+		"transaction confirms, so do not close anything to undo this. LND does "+
+		"not refuse a force-close on a pending channel: it would broadcast a "+
+		"commitment whose parent is nowhere, destroying the channel and "+
+		"recovering nothing. To stop here, Ctrl-C — the teardown abandons, and "+
+		"this program cannot close a channel at all."))
 
 	// Written before the round rather than after it, so a crash mid-signing is
 	// legible as one. The journal refuses this unless the batch is armed.
@@ -615,6 +626,8 @@ func sign(ctx context.Context, d Deps, o Options, unsigned []byte) ([]byte, erro
 		"so there is no clock on this step that costs a restart — what it spends is "+
 		"the 2016 blocks the peers give the funding transaction to confirm, counted "+
 		"from a broadcast that has not happened yet."))
+	// #33, once for the transcript's clock B.
+	fmt.Fprint(d.Out, "\n", prose.StockLNDNote(true, false))
 
 	label := combine.SigningWalletLabel
 	if err := d.Journal.RecordSigner(ctx, o.RunID, label,

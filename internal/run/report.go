@@ -215,6 +215,12 @@ func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 			"commitment signature against an outpoint in this transaction, and a "+
 			"force-close would get the funds back. Nothing is in any mempool.",
 		len(armed.Channels), prose.Plural(len(armed.Channels)))))
+	fmt.Fprint(w, "\n", prose.Para("It gets them back once the transaction "+
+		"confirms, and not before: until then the commitment's parent does not "+
+		"exist anywhere. LND will still close a pending channel if asked, which "+
+		"destroys it and recovers nothing, so closing one is never the way to "+
+		"undo a batch. An abort abandons, and this program holds no credential "+
+		"that could close a channel."))
 
 	fmt.Fprintf(w, "\n  txid\n      %s\n\n", armed.TxID)
 	for i, cp := range armed.Channels {
@@ -261,6 +267,9 @@ func withheld(armed *arm.Armed) string {
 		"same peer costs another of its pending-channel slots. Each channel is " +
 		"abandoned rather than cancelled, because each one reached chan_pending, " +
 		"and LND wants its blunt flag for every one of them."))
+	// #33, once for the screen.
+	b.WriteString("\n")
+	b.WriteString(prose.StockLNDNote(true, false))
 	return b.String()
 }
 

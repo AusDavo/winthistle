@@ -154,7 +154,13 @@ func (j *Journal) RecordSigner(ctx context.Context, runID, label string, st Sign
 	})
 }
 
-// RecordFinalizedTx stores the signed transaction.
+// RecordFinalizedTx stores the transaction that is about to be published.
+//
+// Not "the signed transaction", which is more than this function establishes.
+// The only thing it checks is the txid, and witnesses do not move a txid — that
+// is I-3's own premise. What has actually looked at these bytes for signatures is
+// combine.Accept, at the call site, which executes every input's witness against
+// its own script; if that ran, they are signed, and this row is not the evidence.
 //
 // This is written *before* the publish call, and it is the first moment the bytes
 // exist: after the inversion nothing signs anything until every channel has
@@ -195,8 +201,13 @@ func (j *Journal) RecordFinalizedTx(ctx context.Context, runID, txid, rawTxHex s
 	})
 }
 
-// MarkPending records one chan_pending receipt: the channel is force-closeable,
-// and its funding outpoint is now known.
+// MarkPending records one channel's receipt: it is force-closeable, and its
+// funding outpoint is now known.
+//
+// The caller may have read chan_pending off the stream or asked PendingChannels
+// after it did not arrive — see ChanPending, which is where the two routes and
+// what they establish are set out. This write does not know which, and does not
+// need to: the fact is the same and the row records the fact.
 //
 // When the last channel in the batch arrives here the run becomes armed, and the
 // journal decides that for itself by counting rows. That count is I-1: the gate
@@ -252,7 +263,7 @@ func (j *Journal) MarkPending(ctx context.Context, runID string,
 			 WHERE run_id = ? AND pending_chan_id = ?`,
 			string(ChanPending), cp.TxID, cp.Index, runID, id.String())
 		if err != nil {
-			return fmt.Errorf("recording chan_pending for %s of run %s: %w", id, runID, err)
+			return fmt.Errorf("recording the receipt for %s of run %s: %w", id, runID, err)
 		}
 		if err := affectedOneChannel(res, runID, id); err != nil {
 			return err
@@ -307,8 +318,8 @@ func (j *Journal) MarkSigning(ctx context.Context, runID string) error {
 // is called, and the reason this package exists.
 //
 // It refuses unless every channel in the run is at chan_pending, so the I-1 gate
-// is enforced by the component that actually knows whether every receipt arrived
-// rather than by the loop that happens to be calling. A run found in this state
+// is enforced by the component that counted the receipts rather than by the loop
+// that happens to be calling. A run found in this state
 // afterwards is a run whose transaction may be public — see Run.AbortTarget,
 // which will not abort one.
 //

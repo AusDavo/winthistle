@@ -126,8 +126,17 @@ const (
 	// channel's funding outpoint and only signatures may be added (I-3).
 	ChanVerified ChannelState = "verified"
 
-	// ChanPending: chan_pending arrived. The receipt that matters — the peer's
-	// commitment signature is stored and the channel is force-closeable.
+	// ChanPending: the receipt that matters — the peer's commitment signature is
+	// stored and the channel is force-closeable.
+	//
+	// Not "chan_pending arrived", which is only one of the two ways this row gets
+	// written. arm.receiptFor reads the stream, and when the receipt does not
+	// arrive it asks PendingChannels instead: presence there means the channel is
+	// in LND's channel database, which happens in CompleteReservation — the same
+	// call that stores the peer's commitment signature, and the one chan_pending
+	// is emitted after. The same fact by a different route, and the safety
+	// conclusion is identical. Only the observation differs, and this row does not
+	// record which one was made.
 	ChanPending ChannelState = "pending"
 
 	// ChanAbandoned: removed from LND by the abort path.
@@ -337,7 +346,8 @@ var (
 	// ErrNotArmed means a publish was about to happen before every channel in
 	// the batch was recoverable. That is I-1, and it is refused here as well as
 	// at the call site, because the journal is the only component that knows
-	// whether every chan_pending actually arrived.
+	// whether every channel got its receipt — by either of the two routes
+	// ChanPending's doc names.
 	ErrNotArmed = errors.New("the batch is not fully armed — publishing now would breach I-1")
 
 	// ErrMayBePublished means the run reached the publish call, so the funding
@@ -346,8 +356,8 @@ var (
 	// force-close path, so an abort is refused outright.
 	ErrMayBePublished = errors.New("the run reached the publish call — it must not be aborted")
 
-	// ErrOutpointMoved means a second chan_pending receipt for a channel already
-	// journalled as pending named a different funding outpoint.
+	// ErrOutpointMoved means a second receipt for a channel already journalled as
+	// pending named a different funding outpoint.
 	//
 	// It is refused rather than reconciled. The journalled outpoint is the one an
 	// abort abandons, and LND commits to the funding outpoint at psbt_verify, so

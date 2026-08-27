@@ -101,11 +101,12 @@ func (r *Report) Clean() bool { return len(r.Failures) == 0 }
 // cancel the shims that did not.
 //
 // Nothing here stops on the first failure. An abort runs when something has
-// already gone wrong, and the alternative — returning early — is what leaves an
-// operator with a wallet that silently refuses to spend its own coins because a
-// lock release was queued behind an abandon that failed. Every step is
-// attempted, every failure is collected, and the joined error is returned once
-// at the end alongside a Report that says exactly which parts did work.
+// already gone wrong, and returning early would leave the rest of the batch
+// standing in LND for no reason but the order this loop happens to visit it in:
+// a pending channel LND keeps watching, or a shim still holding its coins. Every
+// step is attempted, every failure is collected, and the joined error is
+// returned once at the end alongside a Report that says exactly which parts did
+// work.
 //
 // The order is deliberate and not merely tidy. Channels first, because a pending
 // channel is the only item here that LND will otherwise keep watching; shims

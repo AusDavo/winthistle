@@ -199,22 +199,28 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		pub  *refusingPublisher
 		// what the operator has to be able to read in the message
 		says string
+		// and which sentinel the branch it takes owns. Only publish_error is a
+		// refusal LND stated; every other case here is an error return, where
+		// LND may never have seen the request.
+		wraps error
 	}{{
 		// The general case: whatever the node said, said back. The two cases
 		// below are the specific shapes v0.21.2-beta actually produces, and this
 		// one is here because our wrapping must not swallow a message it does not
 		// recognise either.
-		name: "an error the node returned and this build has never seen",
-		pub:  &refusingPublisher{err: errors.New("insufficient fee, rejecting replacement")},
-		says: "insufficient fee",
+		name:  "an error the node returned and this build has never seen",
+		pub:   &refusingPublisher{err: errors.New("insufficient fee, rejecting replacement")},
+		says:  "insufficient fee",
+		wraps: ErrPublishUnanswered,
 	}, {
 		// The UpdateChannelPolicy shape: a refusal arriving inside a successful
 		// response. WalletKit does not use it at v0.21.2-beta, but the field is
 		// in the proto, and a caller that looked only at err would journal a
 		// publish that never happened and then report success to the operator.
-		name: "publish_error inside a successful response",
-		pub:  &refusingPublisher{inRep: "txn-mempool-conflict"},
-		says: "txn-mempool-conflict",
+		name:  "publish_error inside a successful response",
+		pub:   &refusingPublisher{inRep: "txn-mempool-conflict"},
+		says:  "txn-mempool-conflict",
+		wraps: ErrPublishRefused,
 	}, {
 		// A real mempool rejection, in the form it actually arrives in.
 		//
@@ -228,16 +234,18 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		// keeps what we were told, however little that is: an operator with n
 		// peers holding reservations gets "output already spent" and no reason
 		// code, and must not also lose it to our own wrapping.
-		name: "a mempool conflict, which LND reduces to ErrDoubleSpend",
-		pub:  &refusingPublisher{err: lnwallet.ErrDoubleSpend},
-		says: "output already spent",
+		name:  "a mempool conflict, which LND reduces to ErrDoubleSpend",
+		pub:   &refusingPublisher{err: lnwallet.ErrDoubleSpend},
+		says:  "output already spent",
+		wraps: ErrPublishUnanswered,
 	}, {
 		// The one rejection whose reason survives: ErrMempoolMinFeeNotMet is
 		// wrapped rather than replaced, so the operator sees the backend's text.
 		name: "a fee too low for the mempool, which keeps its reason",
 		pub: &refusingPublisher{err: fmt.Errorf("%w: %v", lnwallet.ErrMempoolFee,
 			"min relay fee not met, 100 < 141")},
-		says: "min relay fee not met",
+		says:  "min relay fee not met",
+		wraps: ErrPublishUnanswered,
 	}, {
 		// bitcoind unreachable at publish time.
 		//
@@ -254,7 +262,8 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 		pub: &refusingPublisher{err: errors.New(
 			"rpc error: code = Unknown desc = Post \"http://127.0.0.1:18443\": " +
 				"dial tcp 127.0.0.1:18443: connect: connection refused")},
-		says: "connection refused",
+		says:  "connection refused",
+		wraps: ErrPublishUnanswered,
 	}}
 
 	for _, tc := range cases {
@@ -267,8 +276,9 @@ func TestARefusedPublishLeavesTheRunUnabortable(t *testing.T) {
 			if err == nil {
 				t.Fatal("a refused publish was reported as a success")
 			}
-			if !errors.Is(err, ErrPublishRefused) {
-				t.Errorf("error does not wrap ErrPublishRefused: %v", err)
+			if !errors.Is(err, tc.wraps) {
+				t.Errorf("error does not wrap the sentinel this branch owns "+
+					"(%v): %v", tc.wraps, err)
 			}
 			if !strings.Contains(err.Error(), tc.says) {
 				t.Errorf("the message loses what the node actually said (%q): %v",

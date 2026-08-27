@@ -11,16 +11,17 @@ import (
 // readWhole's own rules, close up. The tests through FileWallet say what the
 // transport does with the answer; these say what the answer is.
 
-// TestReadWholeSaysNothingIsThereWhenNothingIsThere. present is what tells the
-// caller apart "the wallet has not saved yet" from "the wallet is part-way
-// through saving", and only the second is worth printing a line about.
+// TestReadWholeSaysNothingIsThereWhenNothingIsThere. The state is what tells
+// "the wallet has not saved yet" apart from the two shapes of "not finished",
+// and only the latter are worth printing a line about — in the words of whichever
+// one it was, since fileEmpty has seen no writer at all.
 func TestReadWholeSaysNothingIsThereWhenNothingIsThere(t *testing.T) {
-	body, present, err := readWhole(filepath.Join(t.TempDir(), "not-there.psbt"))
+	body, state, err := readWhole(filepath.Join(t.TempDir(), "not-there.psbt"))
 	if err != nil {
 		t.Fatalf("readWhole on an absent path: %v", err)
 	}
-	if body != nil || present {
-		t.Errorf("an absent path reported present=%v with %d bytes", present, len(body))
+	if body != nil || state != fileAbsent {
+		t.Errorf("an absent path reported state=%v with %d bytes", state, len(body))
 	}
 }
 
@@ -35,13 +36,13 @@ func TestReadWholeNeverReadsAnEmptyFile(t *testing.T) {
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body, present, err := readWhole(path)
+	body, state, err := readWhole(path)
 	if err != nil {
 		t.Fatalf("readWhole on an empty file: %v", err)
 	}
-	if !present {
-		t.Error("the file is there and readWhole says it is not, so the wait would " +
-			"never say it is holding off on it")
+	if state != fileEmpty {
+		t.Errorf("an empty file reported state=%v; the wait would either never say "+
+			"it is holding off on it, or say it grew, which nothing observed", state)
 	}
 	if body != nil {
 		t.Errorf("an empty file was read as %d bytes", len(body))
@@ -55,12 +56,12 @@ func TestReadWholeReadsAFileThatIsNotMoving(t *testing.T) {
 	if err := os.WriteFile(path, want, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	body, present, err := readWhole(path)
+	body, state, err := readWhole(path)
 	if err != nil {
 		t.Fatalf("readWhole: %v", err)
 	}
-	if !present || !bytes.Equal(body, want) {
-		t.Errorf("read %d bytes (present=%v), want the whole %d", len(body), present,
+	if state != fileWhole || !bytes.Equal(body, want) {
+		t.Errorf("read %d bytes (state=%v), want the whole %d", len(body), state,
 			len(want))
 	}
 }
@@ -104,15 +105,16 @@ func TestReadWholeDiscardsAReadTheWriterMovedUnderneath(t *testing.T) {
 		}
 	}()
 
-	body, present, err := readWhole(path)
+	body, state, err := readWhole(path)
 	close(stop)
 	<-done
 
 	if err != nil {
 		t.Fatalf("readWhole on a growing file: %v", err)
 	}
-	if !present {
-		t.Error("the file is there and readWhole says it is not")
+	if state != fileGrew {
+		t.Errorf("a growing file reported state=%v, so the screen would not say "+
+			"the read came back as a prefix", state)
 	}
 	if body != nil {
 		t.Errorf("readWhole handed over %d bytes of a file that was still growing "+
