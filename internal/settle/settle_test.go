@@ -21,6 +21,14 @@ type fakeLND struct {
 	active  map[string]bool
 	pending map[string]int32
 
+	// depth and confHeight are the other two fields on a PendingOpenChannel that
+	// settlement reads: confirmations_until_active, and the confirmation height
+	// that says whether it currently means the peer's minimum_depth or a
+	// countdown to the target. Kept beside pending rather than folded into it so
+	// that the tests which care about neither stay legible.
+	depth      map[string]uint32
+	confHeight map[string]uint32
+
 	// failWith is returned in PolicyUpdateResponse.FailedUpdates, with a nil
 	// error, which is what LND does for a pending channel.
 	failWith *lnrpc.FailedUpdate
@@ -48,8 +56,10 @@ func (f *fakeLND) PendingChannels(context.Context, *lnrpc.PendingChannelsRequest
 	for cp, expiry := range f.pending {
 		resp.PendingOpenChannels = append(resp.PendingOpenChannels,
 			&lnrpc.PendingChannelsResponse_PendingOpenChannel{
-				Channel:             &lnrpc.PendingChannelsResponse_PendingChannel{ChannelPoint: cp},
-				FundingExpiryBlocks: expiry,
+				Channel:                  &lnrpc.PendingChannelsResponse_PendingChannel{ChannelPoint: cp},
+				FundingExpiryBlocks:      expiry,
+				ConfirmationsUntilActive: f.depth[cp],
+				ConfirmationHeight:       f.confHeight[cp],
 			})
 	}
 	return resp, nil
@@ -239,9 +249,9 @@ func TestExpectedDepthReproducesLNDsDefaultPolicy(t *testing.T) {
 }
 
 // Tick carries forward what a single pass cannot know, and stops asking once a
-// channel is done. Both matter: the observed depth is the only authoritative
-// reading of a peer's minimum_depth there is, and it is only readable in the one
-// pass where the channel first appears open.
+// channel is done. Both matter: the observed depth is readable only in the pass
+// where the channel first appears open, and a later pass would report the age of
+// the transaction instead.
 func TestTickRecordsTheDepthAChannelOpenedAtAndThenStops(t *testing.T) {
 	m := testMember()
 	cp := m.Channel.String()
@@ -269,7 +279,7 @@ func TestTickRecordsTheDepthAChannelOpenedAtAndThenStops(t *testing.T) {
 	}
 
 	// The block that opens it. The channel appears in ListChannels at depth 3,
-	// which is the peer's minimum_depth read from above.
+	// which is an upper bound on the peer's minimum_depth, read from above.
 	cli.open[cp] = true
 	cli.active[cp] = true
 	delete(cli.pending, cp)
@@ -304,6 +314,86 @@ func TestTickRecordsTheDepthAChannelOpenedAtAndThenStops(t *testing.T) {
 	}
 	if cli.policyCalls != calls {
 		t.Error("the policy was applied again after it had landed")
+	}
+}
+
+// TestTickReadsThePeersOwnMinimumDepthWhilePendingAndNeverAfter is issue #47.
+//
+// confirmations_until_active is two different numbers on either side of the
+// first confirmation. While OpenChannel.ConfirmationHeight is zero,
+// calcRemainingConfs returns NumConfsRequired verbatim — for an initiator, the
+// min_accept_depth the peer sent. Once a confirmation height exists it counts
+// down to the target instead, and a reading taken then is smaller than the
+// peer's figure and looks like a peer that asked for less.
+//
+// So the reading is taken once, in the window where it means what the report
+// says it means, and every later pass must leave it alone. The countdown below
+// is deliberately a *plausible* depth — 2, then 1 — because a wrong reading here
+// would not look wrong.
+func TestTickReadsThePeersOwnMinimumDepthWhilePendingAndNeverAfter(t *testing.T) {
+	m := testMember()
+	cp := m.Channel.String()
+	ctx := context.Background()
+
+	cli := &fakeLND{
+		pending:    map[string]int32{cp: 2010},
+		depth:      map[string]uint32{cp: 3},
+		confHeight: map[string]uint32{},
+		failWith: failure(m.Channel,
+			lnrpc.UpdateFailure_UPDATE_FAILURE_PENDING, "not yet confirmed"),
+	}
+
+	res, err := Tick(ctx, cli, []Member{m}, nil, Options{})
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := res.States[0].PeerDepth; got != 3 {
+		t.Fatalf("the peer's minimum_depth = %d, want 3", got)
+	}
+	// And it is the peer's figure, not the prediction: a 250,000 sat channel
+	// scales to LND's floor, so a report that silently fell back would print 1.
+	if res.States[0].ExpectedDepth != 1 {
+		t.Fatalf("the fixture no longer distinguishes the reading from the "+
+			"prediction: ExpectedDepth = %d", res.States[0].ExpectedDepth)
+	}
+
+	// The funding transaction confirms. Same field, different meaning.
+	cli.confHeight[cp] = 811_000
+	cli.depth[cp] = 2
+	res, err = Tick(ctx, cli, []Member{m}, res, Options{})
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := res.States[0].PeerDepth; got != 3 {
+		t.Fatalf("the reading was revised to %d once the countdown started", got)
+	}
+
+	cli.depth[cp] = 1
+	res, err = Tick(ctx, cli, []Member{m}, res, Options{})
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := res.States[0].PeerDepth; got != 3 {
+		t.Fatalf("the reading was revised to %d one block later", got)
+	}
+
+	// The whole window can be missed, and that is not a failure. A batch whose
+	// transaction had already confirmed when this loop first asked has only the
+	// prediction, and the report says which of the two it is showing.
+	fresh := &fakeLND{
+		pending:    map[string]int32{cp: 2010},
+		depth:      map[string]uint32{cp: 2},
+		confHeight: map[string]uint32{cp: 811_000},
+	}
+	missed, err := Tick(ctx, fresh, []Member{m}, nil, Options{})
+	if err != nil {
+		t.Fatalf("Tick: %v", err)
+	}
+	if got := missed.States[0].PeerDepth; got != 0 {
+		t.Errorf("a countdown was recorded as the peer's minimum_depth: %d", got)
+	}
+	if line := missed.States[0].line(); !strings.Contains(line, "expect ~1") {
+		t.Errorf("the row does not fall back to the prediction:\n%s", line)
 	}
 }
 

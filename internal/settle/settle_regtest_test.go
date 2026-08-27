@@ -138,11 +138,18 @@ func TestUpdateChannelPolicyRefusesAPendingChannelInsideASuccessOK(t *testing.T)
 // funding transaction only confirms if the batch is published, which is the one
 // thing the test suite does in exactly one other place.
 //
-// The depth it opens at is the point. A peer states its minimum_depth in
-// accept_channel and LND exposes it over no RPC, so the depth at which the
-// channel first appears in ListChannels is the only authoritative reading an
-// initiator can get. Mining a block at a time is what makes that reading
-// meaningful.
+// The depth is the point, and since issue #47 there are two of them to check
+// against each other. The peer's own figure comes off PendingChannels'
+// confirmations_until_active while the funding transaction is unconfirmed, which
+// is what the initiator can read directly. The depth at which the channel first
+// appears in ListChannels is the same number observed from above, and mining a
+// block at a time is what makes that observation meaningful.
+//
+// So this test is the one place the prediction is measured against a live peer's
+// own answer rather than against LND's source. ExpectedDepth reimplements
+// lnwallet.ScaleNumConfs in this repository; the peers here run stock LND with
+// no --bitcoin.defaultchanconfs, so their answer is that function's, arrived at
+// over the wire. If the two disagree, the reimplementation is wrong.
 func TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth(t *testing.T) {
 	env := regtestenv.Start(t)
 	ctx := harnessCtx(t)
@@ -186,16 +193,32 @@ func TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth(t *testing.T) {
 	if !s.Policy.Applied {
 		t.Fatalf("policy not applied: %s", s.Policy)
 	}
+	if s.PeerDepth <= 0 {
+		t.Fatal("the peer's own minimum_depth was not read, and it is on the " +
+			"PendingChannels call this loop already makes: see issue #47")
+	}
 	if s.ObservedDepth <= 0 {
 		t.Fatal("the depth the channel opened at was not recorded, and it is the " +
-			"only authoritative reading of the peer's minimum_depth available")
+			"harness's independent check on the reading above")
 	}
-	if s.ObservedDepth != s.ExpectedDepth {
-		// Not a failure: the prediction is LND's default policy and the peer is
-		// entitled to a different one. Worth seeing when it happens.
-		t.Logf("this peer opened at %d confirmations; LND's default policy for a "+
-			"channel of %d sat predicts %d", s.ObservedDepth, fixtureChannelSat,
+	t.Logf("peer asked for %d; opened at %d; predicted %d",
+		s.PeerDepth, s.ObservedDepth, s.ExpectedDepth)
+
+	// The assertion nothing in this repository has ever made: a stock peer's own
+	// answer against the figure ExpectedDepth predicts for it. Both sides are
+	// lnwallet.ScaleNumConfs — one reimplemented here, one executed on another
+	// node and sent over the wire in accept_channel.
+	if s.PeerDepth != s.ExpectedDepth {
+		t.Errorf("a stock peer asked for %d confirmations on a %d sat channel and "+
+			"ExpectedDepth predicts %d: the reimplementation of "+
+			"lnwallet.ScaleNumConfs has drifted", s.PeerDepth, fixtureChannelSat,
 			s.ExpectedDepth)
+	}
+	// And the two readings of the same number agree. The observed one is an
+	// upper bound — the loop polls — so it may be deeper, never shallower.
+	if s.ObservedDepth < s.PeerDepth {
+		t.Errorf("the channel was seen open at %d confirmations, shallower than "+
+			"the %d its peer asked for", s.ObservedDepth, s.PeerDepth)
 	}
 
 	// And the policy really is on the channel, read back from LND rather than

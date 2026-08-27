@@ -292,8 +292,7 @@ var registry = []Method{
 			"and whether its peer is online. Also regtestenv.HasOpenChannel. It was " +
 			"InHarness until Phase 2 existed, because a channel leaving " +
 			"pending_open_channels is the authoritative signal that the peer " +
-			"considers it confirmed to its own minimum_depth — which LND exposes " +
-			"nowhere else.",
+			"considers it confirmed to its own minimum_depth.",
 	},
 	{
 		Name: "/lnrpc.Lightning/ListPeers",
@@ -338,7 +337,11 @@ var registry = []Method{
 			"reads it for the opposite reason: a channel already pending with a " +
 			"batch peer spends the pending-channel slot step 2 needs, and a peer at " +
 			"LND's default of one has none left. Free to ask, and the alternative " +
-			"is learning it from accept_channel with the cold wallet out.",
+			"is learning it from accept_channel with the cold wallet out. Also " +
+			"settle.Tick, for two figures on the same message: funding_expiry_blocks, " +
+			"which is the funding horizon, and confirmations_until_active, which is " +
+			"the peer's own minimum_depth while the funding transaction is " +
+			"unconfirmed.",
 	},
 	{
 		Name: "/lnrpc.Lightning/UpdateChannelPolicy",

@@ -94,9 +94,30 @@ func paneCases() map[string]*Result {
 				},
 			},
 		},
-		// The production shape: nothing open yet, no depth reported because
-		// there is no Bitcoin node to report one, and the horizon still a long
-		// way off.
+		// The production shape since issue #47: nothing open yet, the peer's own
+		// minimum_depth read off PendingChannels, no confirmation count because
+		// there is no Bitcoin node to give one, and the horizon a long way off.
+		"pending, showing the peer's own minimum_depth": {
+			Elapsed:     11 * time.Second,
+			RetryWindow: RetryWindow,
+			States: []State{{
+				Member:        paneMember(0),
+				Confs:         -1,
+				PeerDepth:     3,
+				ExpectedDepth: 6,
+				ExpiryBlocks:  2010,
+				StillPending:  true,
+				Policy: PolicyOutcome{
+					Refused: true,
+					Reason:  lnrpc.UpdateFailure_UPDATE_FAILURE_PENDING,
+					Detail:  "channel is not yet confirmed",
+				},
+				Attempts: 2,
+			}},
+		},
+		// The window missed: the funding transaction had already confirmed when
+		// this loop first asked, so there is no reading and the prediction
+		// stands in.
 		"pending with no depth reading": {
 			Elapsed:     11 * time.Second,
 			RetryWindow: RetryWindow,
@@ -148,6 +169,7 @@ func paneCases() map[string]*Result {
 					Open:          true,
 					Active:        true,
 					Confs:         9,
+					PeerDepth:     3,
 					ExpectedDepth: 6,
 					ObservedDepth: 3,
 					Policy:        PolicyOutcome{Applied: true},
@@ -274,16 +296,15 @@ func TestThePastHorizonReportDoesNotSayWhatThePeerDid(t *testing.T) {
 
 // TestTheDepthNoteSaysTheDesignRatherThanAFault is issue #21.
 //
-// The branch under test is the only one an operator has ever seen: Confs is -1
-// on every production run because the application sets no Chain and cannot, so
-// `known` is always false. It named a Bitcoin Core this build has not dialled
-// since item 5 — which reads as something to go and fix — and then offered a
-// second cause, "or it has not seen the transaction", that nothing here asked
-// anything about.
+// The branch under test is the confirmation count, and Confs is -1 on every
+// production run because the application sets no Chain and cannot. The copy
+// named a Bitcoin Core this build has not dialled since item 5 — which reads as
+// something to go and fix — and then offered a second cause, "or it has not seen
+// the transaction", that nothing here asked anything about.
 //
 // The prediction paragraph is asserted on the same report, because that is the
 // other half: State.line prints "expect ~6" on this branch, and the hedge that
-// explains the number used to live on the branch that never fires.
+// explains the number used to live on a branch that never fires.
 func TestTheDepthNoteSaysTheDesignRatherThanAFault(t *testing.T) {
 	report := paneCases()["pending with no depth reading"].Report()
 	t.Logf("\n%s", report)
@@ -291,7 +312,7 @@ func TestTheDepthNoteSaysTheDesignRatherThanAFault(t *testing.T) {
 
 	for _, want := range []string{
 		"expect ~6",
-		"The expected depth is a prediction, not a reading",
+		"showing an expected depth instead, which is a prediction",
 		"binds a peer running stock LND and nobody else",
 		"this build dials no Bitcoin node",
 		"not a fault to go and fix",
@@ -312,15 +333,129 @@ func TestTheDepthNoteSaysTheDesignRatherThanAFault(t *testing.T) {
 		}
 	}
 
-	// And with a depth reading — which only the harness can produce — the
+	// And with a confirmation count — which only the harness can produce — the
 	// prediction is still explained and the design paragraph is not printed.
 	withDepth := flat(paneCases()["pending with a depth reading, and everything in the detail row"].Report())
-	if !strings.Contains(withDepth, "not a reading") {
+	if !strings.Contains(withDepth, "which is a prediction") {
 		t.Error("the prediction is unexplained when a depth count is present")
 	}
 	if strings.Contains(withDepth, "dials no Bitcoin node") {
 		t.Error("a report carrying a confirmation count still says there is " +
 			"nothing here that can count blocks")
+	}
+}
+
+// TestThePeersOwnMinimumDepthIsNotShownAsAPrediction is issue #47.
+//
+// Five printed sentences said an initiator cannot read a peer's minimum_depth,
+// and it can. The rot is not that the number was missing — it is that the number
+// on screen was a guess described in the language of a fact, or the reverse. So
+// what this pins is the *attribution*: a row showing the peer's own figure says
+// the peer asked for it, a row showing LND's default policy says it expects it,
+// and the note under them explains whichever ones the rows above actually
+// carried.
+//
+// Both shapes appear in one batch — the reading is only available while the
+// funding transaction is unconfirmed, so a channel that confirmed before the
+// first poll has the prediction and nothing else — and the report has to be
+// right about a batch that contains both.
+func TestThePeersOwnMinimumDepthIsNotShownAsAPrediction(t *testing.T) {
+	read := paneCases()["pending, showing the peer's own minimum_depth"]
+	report := read.Report()
+	t.Logf("\n%s", report)
+	rep := flat(report)
+
+	for _, want := range []string{
+		"peer asked for 3 confirmations",
+		"showing the depth its peer asked for, which is a reading and not a guess",
+		"reports it back as confirmations_until_active",
+		// The one hedge on the figure, which is LND's floor and not the peer's.
+		"a peer that sent zero is stored as one",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Errorf("the report does not say %q:\n%s", want, report)
+		}
+	}
+	// The prediction is not shown at all, and its note must not fire either: the
+	// row carries the peer's own number and calling that a prediction is the
+	// same defect one field over.
+	for _, gone := range []string{
+		"expect ~",
+		"which is a prediction",
+		"exposes it over no RPC",
+		"ChannelAcceptResponse",
+	} {
+		if strings.Contains(rep, gone) {
+			t.Errorf("the report describes a reading as a prediction: %q\n%s",
+				gone, report)
+		}
+	}
+
+	// A batch with one of each. Both rows keep their own attribution and both
+	// notes render, because the operator is looking at two different numbers.
+	mixed := &Result{
+		Elapsed:     read.Elapsed,
+		RetryWindow: read.RetryWindow,
+		States: []State{
+			read.States[0],
+			paneCases()["pending with no depth reading"].States[0],
+		},
+	}
+	both := flat(mixed.Report())
+	t.Logf("\n%s", mixed.Report())
+	for _, want := range []string{
+		"peer asked for 3 confirmations",
+		"expect ~6",
+		"1 channel is showing the depth its peer asked for",
+		"1 channel is showing an expected depth instead",
+	} {
+		if !strings.Contains(both, want) {
+			t.Errorf("a mixed batch does not say %q:\n%s", want, mixed.Report())
+		}
+	}
+}
+
+// TestTheBatchLessonSurvivesWithoutAChain is the other half of issue #47.
+//
+// depthLesson never printed on a production run. Its only row came from
+// ObservedDepth, which is read off Confs, and no production run has a Chain to
+// read — so the section that says "what this batch learned" taught a real
+// operator nothing, on every batch they have ever run. The peer's own figure
+// needs no Chain, so it now does.
+func TestTheBatchLessonSurvivesWithoutAChain(t *testing.T) {
+	finished := paneCases()["finished, with what the batch learned"]
+	// The production shape: no Chain, so no confirmation counts and no observed
+	// depths anywhere in the batch.
+	for i := range finished.States {
+		finished.States[i].Confs = -1
+		finished.States[i].ObservedDepth = 0
+	}
+	report := finished.Report()
+	t.Logf("\n%s", report)
+	rep := flat(report)
+
+	if !strings.Contains(rep, "What this batch learned") {
+		t.Fatalf("nothing was learned on a run with no Chain:\n%s", report)
+	}
+	for _, want := range []string{
+		"asked for 3 confirmations (predicted 6)",
+		"is the peer's own figure, read off PendingChannels",
+	} {
+		if !strings.Contains(rep, want) {
+			t.Errorf("the lesson does not say %q:\n%s", want, report)
+		}
+	}
+	// The peer with no reading contributes no row: a batch that learned nothing
+	// about one peer must not print a line implying it did. Measured on the
+	// lesson alone, because every peer has a row in the status list above it.
+	_, lesson, _ := strings.Cut(rep, "What this batch learned:")
+	if strings.Contains(lesson, short(paneMember(1).Peer)) {
+		t.Errorf("a peer whose minimum_depth was never read has a row in the "+
+			"lesson:\n%s", report)
+	}
+	if strings.Contains(lesson, "opened at") {
+		t.Errorf("a run with no Chain reports a depth it never observed:\n%s",
+			report)
 	}
 }
 

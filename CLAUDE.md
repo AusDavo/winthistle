@@ -92,12 +92,6 @@ The bump procedure, in order:
 
 ### Known gaps, with issues open
 
-- **#47** · a peer's `minimum_depth` **is** readable at v0.21.2-beta, via
-  `PendingChannels.confirmations_until_active` (`lightning.proto:2812`, filled
-  from `calcRemainingConfs` at `rpcserver.go:4015-4019`), and five printed
-  sentences say it is not. `PendingChannels` is already registered, already
-  called on the batch path and already in the baked macaroon, so the reading
-  costs no call site, no registry entry and no permission. **Subsumes #28.**
 - **#42** · a first-channel `arm.Open` failure is reported as a journalling
   failure and the peer's own refusal is discarded. Functional, not copy.
 - **#51** · `internal/reserve`'s package doc reasons from `psbt_finalize`, which
@@ -107,9 +101,12 @@ The bump procedure, in order:
 - **`Options.Chain` is the harness's seam and may not be deleted.** The
   application fills it on no path, so `Confs == -1` is the rule; `internal/
   regtestenv`'s Core fills it, and deleting the field would take
-  `State.ObservedDepth`, `depthLesson` and a live peer's `minimum_depth` read
-  from above with it. `docs/design.html:808` says step 9 *observes*
-  `minimum_depth`, and with no `Chain` no production run ever does — see #47.
+  `State.ObservedDepth` and a live peer's `minimum_depth` read *from above* with
+  it. Since #47 that reading is no longer the only one — `State.PeerDepth` is
+  the peer's own figure and needs no `Chain` — which is what makes the observed
+  one worth keeping: two numbers from two sources, checked against each other on
+  a running node by
+  `TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth`.
 
 ---
 

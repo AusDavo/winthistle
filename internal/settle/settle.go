@@ -52,25 +52,49 @@
 // version adds — is LND declining to say, which is retried for RetryWindow and
 // then reported. See PolicyOutcome.Retryable, Terminal and Unexplained.
 //
-// # minimum_depth is not readable, and the design assumes it is
+// # minimum_depth is readable, in one window
 //
 // Phase 0 in docs/design.html says to check each peer's minimum_depth and show
-// "usable after k confirmations" up front. As the *initiator* there is no way to
-// do that. The peer states min_depth in accept_channel; LND stores it as
-// OpenChannel.NumConfsRequired and exposes it over no RPC — min_accept_depth
-// appears in lnrpc only on ChannelAcceptResponse, which is the responder's side
-// of somebody else's channel.
+// "usable after k confirmations" up front, and step 9 observes it. As the
+// initiator, both are available — which is not what this package said for its
+// first several revisions, and the correction is issue #47.
 //
-// Three things stand in, in descending order of certainty:
+// The peer states min_depth in accept_channel. funderProcessAcceptChannel takes
+// it, floors a zero at 1 for anything that is not zero-conf, and stores it as
+// OpenChannel.NumConfsRequired (funding/manager.go:2129-2142). PendingChannels
+// then reports that figure straight back: confirmations_until_active
+// (lightning.proto:2812) is filled from calcRemainingConfs, whose entire
+// unconfirmed case is "return uint32(pendingChan.NumConfsRequired)"
+// (rpcserver.go:4015-4019).
 //
+// The window is the whole of the constraint. calcRemainingConfs returns the
+// peer's figure only while OpenChannel.ConfirmationHeight is zero; once the
+// funding transaction confirms, the same field becomes a countdown to the
+// target height and shrinks every block. So the reading is taken once, while
+// the channel is pending and unconfirmed, and never revised — a reading taken
+// afterwards would be smaller than the peer's number and would look like a peer
+// that had asked for less. State.PeerDepth carries it, and confirmation_height
+// (field 8 on the same message) is what says which of the two meanings the
+// field currently has.
+//
+// Three figures, then, in descending order of what they establish:
+//
+//   - The peer's own. Exact, and available from the moment the channel is
+//     pending — which is before the transaction is even published, so it is
+//     early enough to plan with. Its one hedge is the floor: a peer that sent 0
+//     is stored as 1, so this is what the channel will wait for rather than what
+//     the peer wrote on the wire.
 //   - The observed depth. When a channel first appears in ListChannels, the
-//     number of confirmations it had at that moment is the peer's minimum_depth,
-//     from above. It is the authoritative figure, it arrives too late to plan
-//     with, and it is exactly the right thing to record for next time.
+//     number of confirmations it had at that moment is an upper bound on the
+//     same number — the loop polls, so the channel may have been open for part
+//     of a block interval before it was seen. It needs a source of confirmation
+//     counts, which no production run has, so it is the harness's cross-check on
+//     the reading above rather than a second source for it.
 //   - LND's own default policy, which a peer running stock LND will be using:
 //     between 1 and 6, scaled linearly by capacity against MaxFundingAmount, and
-//     6 for anything wumbo. ExpectedDepth computes it, and it is a prediction.
-//   - Nothing else. There is no gossip field and no third party may be asked.
+//     6 for anything wumbo. ExpectedDepth computes it, it is a prediction, and
+//     it is what stands in for a channel whose funding transaction had already
+//     confirmed before this loop first asked.
 //
 // # The horizon past the end
 //
@@ -163,21 +187,24 @@ type Client interface {
 // What fills it is the harness. internal/regtestenv keeps a Core — the same way
 // it keeps the simulated cold wallet, as the stand-in item 5 left inside the
 // test environment rather than in the application — and
-// TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth uses it to read a live
-// peer's minimum_depth from above, one block at a time. That reading is the only
-// authoritative one an initiator can get, and it is verified against a running
-// node, which is the kind of evidence this repository does not delete to tidy a
-// shape away.
+// TestTheSettlementPassPoliciesAChannelAndLearnsItsDepth uses it to watch a live
+// channel open one block at a time. What that buys is State.ObservedDepth, and
+// since issue #47 its job has changed: it is no longer the only reading of a
+// peer's minimum_depth an initiator can get, it is the harness's independent
+// cross-check on the reading LND hands over directly. Two numbers from two
+// sources agreeing on a running node is better evidence than either alone, which
+// is why the field stays.
 //
 // The doc comment this replaces justified the field by "assisted mode has no
 // Core", and assisted mode dissolved with I-2. Stale twice over, which is what
 // issue #21 was really about: a seam nobody fills grows copy nobody checks.
 //
-// If a production depth reading is ever wanted, this is not the seam for it. It
-// would come from LND, which this build already dials — GetTransactions reports
-// num_confirmations for a wallet transaction, and the funding transaction is
-// ours — and it would be a new call site, a registry entry and a decision, not a
-// field somebody fills in.
+// A production depth reading does not come through here, and does not need to.
+// The peer's own figure is on PendingChannels, which this package already calls
+// — see the package comment. What this seam would report is something else: how
+// deep the funding transaction is right now, which is a count of blocks and
+// would be a new call site, a registry entry and a decision, not a field
+// somebody fills in.
 type Chain interface {
 	Confirmations(ctx context.Context, txid string) (confs int64, present bool, err error)
 }
@@ -434,10 +461,23 @@ type State struct {
 	// never as "the count is unavailable just now".
 	Confs int64
 
-	// ExpectedDepth is the prediction; ObservedDepth is the depth at the moment
-	// the channel first appeared open, which is the peer's real minimum_depth
-	// from above. Zero until that happens, and — since it is read off Confs — it
-	// stays zero on every run the harness is not driving.
+	// The three figures for the peer's minimum_depth, in the order the package
+	// comment ranks them.
+	//
+	// PeerDepth is the peer's own, read once off PendingChannels'
+	// confirmations_until_active while the funding transaction was still
+	// unconfirmed. Zero means it was never in that window when this loop
+	// looked — a channel whose transaction had already confirmed before the
+	// first pass offers no reading, and there is no second chance at it.
+	//
+	// ExpectedDepth is the prediction from LND's default policy, and it is set
+	// on every pass because it is arithmetic on the amount.
+	//
+	// ObservedDepth is the depth the channel was at the moment it first appeared
+	// open, which is an upper bound on the same number the loop's own polling
+	// makes loose. Since it is read off Confs it stays zero on every run the
+	// harness is not driving.
+	PeerDepth     int64
 	ExpectedDepth int64
 	ObservedDepth int64
 
@@ -657,11 +697,12 @@ func (o Options) retryWindow() time.Duration {
 // Separated from Settle so that one pass can be tested, and so that a UI can
 // drive the loop itself at whatever rate it refreshes at.
 //
-// prev may be nil on the first pass. It carries forward the three things a
+// prev may be nil on the first pass. It carries forward the four things a
 // single pass cannot know: how many attempts have been made, how long an
-// unexplained refusal has been going on, and the depth at which a channel was
-// first seen open, which is the only authoritative reading of the peer's
-// minimum_depth there is.
+// unexplained refusal has been going on, the peer's own minimum_depth as it was
+// read while the channel was pending and unconfirmed, and the depth at which the
+// channel was first seen open. The last two are each readable in one window
+// only, and a later pass would report a different number for the same field.
 func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 	opts Options) (*Result, error) {
 
@@ -704,6 +745,7 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 		}
 		if was, ok := before[key]; ok {
 			s.Attempts = was.Attempts
+			s.PeerDepth = was.PeerDepth
 			s.ObservedDepth = was.ObservedDepth
 			s.Policy = was.Policy
 			s.RefusedSince, s.RetriesExhausted = was.RefusedSince, was.RetriesExhausted
@@ -713,12 +755,23 @@ func Tick(ctx context.Context, cli Client, members []Member, prev *Result,
 		s.Open = open[key]
 		s.Active = active[key]
 		if p, ok := pending[key]; ok {
-			s.StillPending, s.ExpiryBlocks = true, p
+			s.StillPending, s.ExpiryBlocks = true, p.expiryBlocks
+
+			// The peer's own minimum_depth, taken once and only inside the one
+			// window where confirmations_until_active means it: before the
+			// funding transaction confirms, calcRemainingConfs returns
+			// NumConfsRequired verbatim, and afterwards the same field is a
+			// countdown that shrinks every block. See the package comment.
+			if s.PeerDepth == 0 && !p.confirmed && p.depth > 0 {
+				s.PeerDepth = int64(p.depth)
+			}
 		}
 
-		// The moment a channel first appears open, the depth it is at is the
-		// peer's minimum_depth from above. Recorded once and never revised: on a
-		// later pass the transaction is deeper and the reading is worthless.
+		// The moment a channel first appears open, the depth it is at is an
+		// upper bound on the peer's minimum_depth, read from above rather than
+		// taken from LND's record of what the peer asked for. Recorded once and
+		// never revised: on a later pass the transaction is deeper and the
+		// reading is worthless.
 		if s.Open && s.ObservedDepth == 0 && confs > 0 {
 			s.ObservedDepth = confs
 		}
@@ -850,15 +903,38 @@ func openChannels(ctx context.Context, cli Client) (open, active map[string]bool
 	return open, active, nil
 }
 
-// pendingChannels reads funding_expiry_blocks for every pending open.
-func pendingChannels(ctx context.Context, cli Client) (map[string]int32, error) {
+// pendingOpen is what one PendingChannels entry is worth to this package.
+type pendingOpen struct {
+	// expiryBlocks is funding_expiry_blocks: how far this node's own count of
+	// the funding horizon has left to run.
+	expiryBlocks int32
+
+	// depth is confirmations_until_active, which is the peer's minimum_depth
+	// only while confirmed is false. See the package comment for why the same
+	// field means two different things either side of the first confirmation.
+	depth uint32
+
+	// confirmed is whether LND has recorded a confirmation height for the
+	// funding transaction, which is the condition calcRemainingConfs branches
+	// on. Zero-conf channels never appear in this list at all, so a pending
+	// channel that is unconfirmed always has a real figure to give.
+	confirmed bool
+}
+
+// pendingChannels reads the funding horizon and the peer's stated depth for
+// every pending open.
+func pendingChannels(ctx context.Context, cli Client) (map[string]pendingOpen, error) {
 	resp, err := cli.PendingChannels(ctx, &lnrpc.PendingChannelsRequest{})
 	if err != nil {
 		return nil, fmt.Errorf("listing this node's pending channels: %w", err)
 	}
-	out := map[string]int32{}
+	out := map[string]pendingOpen{}
 	for _, p := range resp.GetPendingOpenChannels() {
-		out[p.GetChannel().GetChannelPoint()] = p.GetFundingExpiryBlocks()
+		out[p.GetChannel().GetChannelPoint()] = pendingOpen{
+			expiryBlocks: p.GetFundingExpiryBlocks(),
+			depth:        p.GetConfirmationsUntilActive(),
+			confirmed:    p.GetConfirmationHeight() != 0,
+		}
 	}
 	return out, nil
 }

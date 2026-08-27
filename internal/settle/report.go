@@ -143,11 +143,8 @@ func (s State) line() string {
 	if s.Confs >= 0 {
 		detail = append(detail, fmt.Sprintf("%d conf", s.Confs))
 	}
-	if s.ObservedDepth > 0 {
-		detail = append(detail, fmt.Sprintf("opened at %d, predicted %d",
-			s.ObservedDepth, s.ExpectedDepth))
-	} else if !s.Open {
-		detail = append(detail, fmt.Sprintf("expect ~%d", s.ExpectedDepth))
+	if d := depthDetail(s); d != "" {
+		detail = append(detail, d)
 	}
 	if s.StillPending {
 		detail = append(detail, fmt.Sprintf("%d blocks to the horizon", s.ExpiryBlocks))
@@ -159,6 +156,33 @@ func (s State) line() string {
 		b.WriteString(prose.Wrap(strings.Join(detail, ", "), detailIndent, detailIndent))
 	}
 	return b.String()
+}
+
+// depthDetail is the depth figures for one row, and it names which figure it is
+// showing rather than printing a bare number.
+//
+// Three of them exist and they establish different things — see the package
+// comment. "asked for" is the peer's own, off PendingChannels while the funding
+// transaction was unconfirmed; "expect ~" is LND's default policy for a channel
+// of this size, which is a prediction; "opened at" is what the harness watched
+// happen. A row that showed a number without saying which one it was would be
+// asserting the peer's answer on a run that only ever guessed at it.
+func depthDetail(s State) string {
+	switch {
+	case s.ObservedDepth > 0 && s.PeerDepth > 0:
+		return fmt.Sprintf("opened at %d, asked for %d", s.ObservedDepth, s.PeerDepth)
+	case s.ObservedDepth > 0:
+		return fmt.Sprintf("opened at %d, predicted %d", s.ObservedDepth, s.ExpectedDepth)
+	case s.Open:
+		// Open, and neither reading was taken: the channel was already past
+		// this loop's questions when it first asked. Nothing to say.
+		return ""
+	case s.PeerDepth > 0:
+		return fmt.Sprintf("peer asked for %d confirmation%s", s.PeerDepth,
+			prose.Plural(int(s.PeerDepth)))
+	default:
+		return fmt.Sprintf("expect ~%d", s.ExpectedDepth)
+	}
 }
 
 // policyNote explains why a channel is still on LND's defaults.
@@ -278,43 +302,71 @@ func policyNote(r *Result) string {
 
 // depthNote says what is being waited for, and admits what cannot be known.
 //
-// Two paragraphs, and which one is conditional was the whole of issue #21.
+// Up to three paragraphs, and every one of them is conditional on a row above
+// having shown the thing it explains. That discipline was the whole of issue
+// #21: a note that fires on a branch the operator never reaches leaves the one
+// number they do see unexplained.
 //
-// The prediction paragraph is unconditional because State.line prints "expect
-// ~6" unconditionally, and a prediction shown without its hedge is the same
-// defect as an asserted cause. It used to sit on the branch that has never
-// fired on a production run, so the one number an operator actually sees was
-// the one never explained.
+// The first two are the two halves of depthDetail, and a batch can contain both.
+// A channel that was pending and unconfirmed when this loop first asked has the
+// peer's own figure; one that had already confirmed by then has only the
+// prediction, and there is no second chance at the reading.
 //
-// The depth paragraph is the conditional one, and it says the design fact
-// rather than a fault. It used to say "Core is not connected, or it has not
-// seen the transaction": the first half read as something to go and fix and
-// sent the operator to debug a bitcoind this application has not dialled since
-// item 5, and the second was a cause nothing here established — no question was
-// asked of anything about the transaction's propagation.
+// The third is the confirmation count, and it says the design fact rather than a
+// fault. It used to say "Core is not connected, or it has not seen the
+// transaction": the first half read as something to go and fix and sent the
+// operator to debug a bitcoind this application has not dialled since item 5,
+// and the second was a cause nothing here established — no question was asked of
+// anything about the transaction's propagation.
 func depthNote(r *Result) string {
 	stalled := r.Stalled()
 	if len(stalled) == 0 {
 		return ""
 	}
+
+	var asked, predicted, counted int
+	for _, s := range stalled {
+		if s.PeerDepth > 0 {
+			asked++
+		} else {
+			predicted++
+		}
+		if s.Confs >= 0 {
+			counted++
+		}
+	}
+
 	var b strings.Builder
 	b.WriteString("\n")
 
-	b.WriteString(prose.Para(
-		"The expected depth is a prediction, not a reading. A peer states its " +
-			"minimum_depth in accept_channel; LND stores it and exposes it over no " +
-			"RPC — min_accept_depth exists in lnrpc only on ChannelAcceptResponse, " +
-			"which is the responder's side of somebody else's channel. So the " +
-			"figure shown is LND's own default policy for a channel of this size, " +
-			"which binds a peer running stock LND and nobody else."))
-
-	known := false
-	for _, s := range stalled {
-		if s.Confs >= 0 {
-			known = true
-		}
+	if asked > 0 {
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"%d channel%s %s showing the depth its peer asked for, which is a "+
+				"reading and not a guess. The peer states a minimum_depth in "+
+				"accept_channel, LND stores what it sent, and PendingChannels "+
+				"reports it back as confirmations_until_active for as long as the "+
+				"funding transaction is unconfirmed. One hedge on it: a peer that "+
+				"sent zero is stored as one, so the figure is what the channel will "+
+				"wait for rather than what the peer wrote on the wire.",
+			asked, prose.Plural(asked), prose.IsAre(asked))))
 	}
-	if !known {
+
+	if predicted > 0 {
+		if asked > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(prose.Para(fmt.Sprintf(
+			"%d channel%s %s showing an expected depth instead, which is a "+
+				"prediction: LND's own default policy for a channel of that size, "+
+				"which binds a "+
+				"peer running stock LND and nobody else. The peer's own figure is "+
+				"readable only while the funding transaction is unconfirmed, and "+
+				"%s already past that when this loop first asked.",
+			predicted, prose.Plural(predicted), prose.IsAre(predicted),
+			wasWereThey(predicted))))
+	}
+
+	if counted == 0 {
 		b.WriteString("\n")
 		b.WriteString(prose.Para(
 			"No confirmation count is reported, and none will be: this build dials " +
@@ -327,33 +379,84 @@ func depthNote(r *Result) string {
 	return b.String()
 }
 
+// wasWereThey keeps the prediction paragraph grammatical for one channel and for
+// several, without naming the count a second time.
+func wasWereThey(n int) string {
+	if n == 1 {
+		return "it was"
+	}
+	return "they were"
+}
+
 // depthLesson reports what the batch actually taught us about each peer.
+//
+// Two kinds of row, and until issue #47 only the second existed — which meant
+// this section never printed on a production run at all, because the depth it
+// reported is read off Confs and no production run has a Chain to read. The
+// peer's own figure needs none: it comes off the PendingChannels call this
+// package already makes, so the lesson is now something a real batch leaves
+// behind rather than something only the harness ever saw.
 func depthLesson(r *Result) string {
-	var rows []string
+	var (
+		rows  []string
+		asked int
+		seen  int
+	)
 	for _, s := range r.States {
-		if s.ObservedDepth <= 0 {
-			continue
+		switch {
+		case s.PeerDepth > 0:
+			note := "as predicted"
+			if s.PeerDepth != s.ExpectedDepth {
+				note = fmt.Sprintf("predicted %d", s.ExpectedDepth)
+			}
+			row := fmt.Sprintf("  %-18s asked for %d confirmation%s (%s)",
+				short(s.Member.Peer), s.PeerDepth,
+				prose.Plural(int(s.PeerDepth)), note)
+			if s.ObservedDepth > 0 {
+				row += fmt.Sprintf(", opened at %d", s.ObservedDepth)
+			}
+			rows = append(rows, row)
+			asked++
+		case s.ObservedDepth > 0:
+			note := "as predicted"
+			if s.ObservedDepth != s.ExpectedDepth {
+				note = fmt.Sprintf("predicted %d", s.ExpectedDepth)
+			}
+			rows = append(rows, fmt.Sprintf("  %-18s opened at %d confirmations (%s)",
+				short(s.Member.Peer), s.ObservedDepth, note))
+			seen++
 		}
-		note := "as predicted"
-		if s.ObservedDepth != s.ExpectedDepth {
-			note = fmt.Sprintf("predicted %d", s.ExpectedDepth)
-		}
-		rows = append(rows, fmt.Sprintf("  %-18s opened at %d confirmations (%s)",
-			short(s.Member.Peer), s.ObservedDepth, note))
 	}
 	if len(rows) == 0 {
 		return ""
 	}
+
 	var b strings.Builder
 	b.WriteString("\nWhat this batch learned:\n\n")
 	b.WriteString(strings.Join(rows, "\n"))
 	b.WriteString("\n\n")
-	b.WriteString(prose.Para(
-		"Those are the only authoritative readings of these peers' minimum_depth " +
-			"available to an initiator, and they are upper bounds — the loop polls, " +
-			"so a channel may have been open for part of a block interval before it " +
-			"was seen. Worth keeping for the next batch, since Phase 0 has no way " +
-			"to ask."))
+
+	if asked > 0 {
+		b.WriteString(prose.Para(
+			"\"Asked for\" is the peer's own figure, read off PendingChannels while " +
+				"the funding transaction was still unconfirmed, and it is exact " +
+				"apart from the floor LND puts under a zero. Worth keeping for the " +
+				"next batch: it is readable from the moment a channel is pending, " +
+				"which is early enough to tell an operator when each channel will " +
+				"be usable."))
+	}
+	if seen > 0 {
+		if asked > 0 {
+			b.WriteString("\n")
+		}
+		b.WriteString(prose.Para(
+			"\"Opened at\" is the depth the channel was seen open at, which is an " +
+				"upper bound rather than the peer's number — the loop polls, so a " +
+				"channel may have been open for part of a block interval before it " +
+				"was seen. It stands in where the peer's own figure was not " +
+				"readable, and where both are shown it is the independent check on " +
+				"the other."))
+	}
 	return b.String()
 }
 
@@ -362,8 +465,11 @@ func depthLesson(r *Result) string {
 // Every figure here is ours. The countdown is funding_expiry_blocks off
 // PendingChannels, which is this node's own arithmetic against LND's own
 // default, and ForgetHorizonBlocks is that default written down. Nothing in this
-// build has heard from the peer about any of it, and no RPC reports a peer's
-// horizon to the initiator any more than one reports its minimum_depth.
+// build has heard from the peer about any of it, and that is what separates this
+// figure from the minimum_depth reported beside it on the same message: a peer
+// states its minimum_depth in accept_channel, so LND has something of the peer's
+// to store and hand back. A peer's funding horizon is in no message it ever
+// sends, so there is nothing to store and nothing to read.
 //
 // So this used to quote LND's proto hedge — "very likely cancelled" — and
 // override it in the same sentence with "and that is what has happened", then
@@ -394,8 +500,9 @@ func horizonNote(r *Result) string {
 			"Very likely is as far as this goes. Nothing here has heard from the " +
 				"peer, and its horizon is its own: another implementation, another " +
 				"version, or a non-default --maxwaitnumblocksfundingconf gives up " +
-				"somewhere else, and this build can no more read that figure than " +
-				"it can read a peer's minimum_depth."))
+				"somewhere else. A peer's minimum_depth can be read because the " +
+				"peer stated it in accept_channel and LND kept it. Its horizon it " +
+				"never stated, so there is nothing stored anywhere to read."))
 		b.WriteString("\n")
 		b.WriteString(prose.Para(
 			"This node has not given up, and will not: waitForFundingWithTimeout " +
