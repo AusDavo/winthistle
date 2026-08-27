@@ -186,6 +186,26 @@ func csvQuoted(s string) string {
 // operator reads with one call left: everything on it is reversible, and
 // everything after it is not, so it says which channels exist, where their funds
 // will be, and what the one remaining action does.
+//
+// The two paragraphs stay apart, and that is a decision rather than an accident
+// of where they were written. The second one is conditional — it renders only
+// when the export carried single-channel backups — so it may not print, and a
+// claim whose correction sits on a branch is the mistake issue #21 named. The
+// answer is not to merge them but to make the first one true standing alone:
+// naming this node as the custodian is the whole of what the receipt
+// establishes, and the backup paragraph then adds only what to do about it. So
+// do not move the custody clause down into the conditional half.
+//
+// Whether that branch can be false on a live batch is worth stating rather than
+// assuming, because nothing in this build establishes that it cannot. armWindow
+// refuses an export whose MultiChanBackup is empty, and that guard does not
+// reach the singles: LND's createBackupSnapshot packs the multi from the same
+// slice the singles come from, and Multi.PackToWriter writes a version byte and
+// a count even for zero backups, so an empty export still yields a non-empty
+// multi. In practice the branch is true — every channel here reached
+// chan_pending, which is CompleteReservation having marked it pending in the
+// channel database, and FetchStaticChanBackups reads all open channels
+// including pending open. In practice is not the same as checked.
 func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 	section(w, "Armed")
 
