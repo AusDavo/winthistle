@@ -24,7 +24,8 @@ var leaseID = []byte("winthistle-regtest-fixture-lease")
 // This is how the reserved-value refusal is reproduced on purpose: LND's balance
 // for that check excludes leased coins, so a node with 5 BTC and every UTXO
 // leased is, as far as psbt_verify is concerned, a node with nothing. The
-// harness's own fragility was this same mechanism — see HANDOFF.md, finding 5.
+// harness's own fragility was this same mechanism — see HANDOFF.md's coin-lock
+// and lease bullets, under "The harness".
 //
 // The returned func gives the coins back, for a test that needs to see the node
 // recover. It is idempotent and it also runs at cleanup whether the caller

@@ -316,9 +316,9 @@ func assertPolicyOnChain(t *testing.T, env *regtestenv.Env, cp lnd.ChannelPoint,
 // here.
 //
 // Side effect worth knowing: mining past the horizon is also the cheapest way to
-// clear the pending channels that aborted batches leave on the peers. HANDOFF
-// said `make harness` was the only cure; it is not, it is just the only one that
-// does not advance the chain by two weeks.
+// clear the pending channels that aborted batches leave on the peers. `make
+// harness` is not the only cure, just the only one that does not advance the
+// chain by two weeks.
 func TestTheFundingHorizonIsReachedByMining(t *testing.T) {
 	env := regtestenv.Start(t)
 	ctx := harnessCtx(t)
