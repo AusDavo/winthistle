@@ -57,9 +57,22 @@ func (j *Journal) Begin(ctx context.Context, runID string, chans []NewChannel) e
 	})
 }
 
-// MarkVerified records that psbt_verify succeeded for one channel. From here
-// LND has committed to that channel's funding outpoint and will accept only
-// added signatures (I-3).
+// MarkVerified records that psbt_verify is being made for one channel. From
+// there LND has committed to that channel's funding outpoint and will accept
+// only added signatures (I-3).
+//
+// Written *before* the call, like RecordPinnedTxID and MarkPublishing, and this
+// is the one write in the batch path that used to be written after. What that
+// cost is stated at the call site in arm.Verify: since #32, recordAbort reads
+// this row to decide what an absent shim means, and a shim_registered row is
+// taken to establish that no verify happened and so that LND created nothing. A
+// row written after the RPC returned could not carry that, because a crash in
+// the gap leaves shim_registered for a channel that verified.
+//
+// So this row can be wrong only in the safe direction. A verify that was refused
+// leaves a channel journalled as verified whose shim LND still holds, which
+// cancels normally; the reverse would leave a pending channel journalled as one
+// that never started.
 //
 // The run does not move. It used to go to signing here, because psbt_verify was
 // the last thing that happened before the PSBT went out to the signers; after
@@ -387,6 +400,25 @@ func (j *Journal) touch(ctx context.Context, tx *sql.Tx, runID string) error {
 		return fmt.Errorf("updating run %s: %w", runID, err)
 	}
 	return affectedOne(res, runID)
+}
+
+// channelStateIn reads one channel's current state inside a transaction, so a
+// write can be guarded by what the journal has already established rather than
+// simply overwriting it. MarkPending's outpoint guard is the precedent.
+func (j *Journal) channelStateIn(ctx context.Context, tx *sql.Tx, runID string,
+	id lnd.PendingChanID) (ChannelState, error) {
+
+	var st string
+	err := tx.QueryRowContext(ctx,
+		`SELECT state FROM channels WHERE run_id = ? AND pending_chan_id = ?`,
+		runID, id.String()).Scan(&st)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("run %s has no channel %s: %w", runID, id, ErrNoRun)
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading channel %s of run %s: %w", id, runID, err)
+	}
+	return ChannelState(st), nil
 }
 
 func (j *Journal) setChannelState(ctx context.Context, tx *sql.Tx, runID string,

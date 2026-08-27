@@ -231,9 +231,12 @@ granularity, not a moved timeout. Ten minutes is LND's default — a CLN or Ecla
 peer has its own, and any peer can reconfigure, so design against it as a
 convention rather than a guarantee.
 
-Blowing clock A costs a restart and nothing else. Nothing was broadcast,
-`shim_cancel` still works after a successful `psbt_verify`, and re-arming is
-free. Winthistle's own work across steps 2 to 6 takes about a second; the ten
+Blowing clock A costs a restart and nothing else. Nothing was broadcast and
+re-arming is free. `shim_cancel` is the lever *before* the gate, and only there:
+`psbt_verify` carries `skip_finalize`, so it completes LND's funding flow rather
+than parking it, and a channel that goes on to reach `chan_pending` has consumed
+its own funding intent — the cancel then comes back with nothing to cancel.
+Blowing clock A is the case where nothing got that far. Winthistle's own work across steps 2 to 6 takes about a second; the ten
 minutes are spent at step 4, by you, in Sparrow. That is the whole budget and it
 is the only thing in it.
 

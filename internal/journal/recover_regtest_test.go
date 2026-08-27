@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/journal"
 	"github.com/AusDavo/winthistle/internal/lnd"
 	"github.com/AusDavo/winthistle/internal/regtestenv"
@@ -181,6 +182,119 @@ func TestRecoverAbortsACrashedRunFromItsJournalRow(t *testing.T) {
 	}
 	if len(rep2.Abandoned) != 0 || len(rep2.Cancelled) != 0 {
 		t.Fatalf("second Recover redid work that was already done: %+v", rep2)
+	}
+}
+
+// The crashed-process window, executed rather than reasoned about. #32 item 1.
+//
+// AbortTarget's own comment has described this shape since the inversion and no
+// test has ever produced it: a process that died between the psbt_verify and the
+// receipt. psbt_verify carries skip_finalize, so it completes LND's funding flow
+// — the channel goes on to reach chan_pending on its own and CompleteReservation
+// consumes the funding intent — but the journal row still says verified, because
+// the process that would have written pending is gone.
+//
+// So the recovery cancels a shim LND no longer has, gets ErrNoShim, and the
+// abort reports a success. Everything after that is what this test is for: the
+// channel is *really* pending on this node, with the peer holding its side, and
+// until #32 the journal wrote ChanCancelled over the verified row, the run went
+// to StateAborted, and AbortTarget emitted nothing for it ever again.
+//
+// Nothing here closes the window — it cannot be closed from the journal, which
+// has no client and cannot map a pending channel point back to a pending channel
+// id. What is asserted is that the journal stops claiming the window was not
+// entered.
+func TestACrashBetweenVerifyAndTheReceiptIsNotRecordedAsACancelledShim(t *testing.T) {
+	env := regtestenv.Start(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 120*time.Second)
+	defer cancel()
+
+	peers := env.Peers(t)
+	if len(peers) < 1 {
+		t.Skipf("need a peer, alice has %d — run: make -C regtest reset", len(peers))
+	}
+
+	j := open(t)
+	const runID = "regtest-crashed-mid-verify"
+
+	stream := env.OpenShimStream(t, peers[0], fixtureChannelSat)
+	err := j.Begin(ctx, runID, []journal.NewChannel{{
+		PendingChanID: stream.PendingChanID,
+		PeerPubkey:    stream.PeerPubkey,
+		AmountSat:     stream.FundingAmount,
+	}})
+	if err != nil {
+		t.Fatalf("Begin: %v", err)
+	}
+
+	funded := env.BuildFundingPSBT(t, env.Cold, []*regtestenv.Stream{stream}, 5)
+	t.Cleanup(func() {
+		c, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		_, _ = env.Cold.ReleaseLocks(c, funded.Inputs)
+	})
+	if err := j.RecordPinnedTxID(ctx, runID, funded.TxID); err != nil {
+		t.Fatalf("RecordPinnedTxID: %v", err)
+	}
+
+	env.VerifySkippingFinalize(t, stream, funded.Base64)
+	if err := j.MarkVerified(ctx, runID, stream.PendingChanID); err != nil {
+		t.Fatalf("MarkVerified: %v", err)
+	}
+
+	// The crash is here: MarkPending is never called. The receipt is read only
+	// so that this test knows the outpoint — the journal never learns it, which
+	// is the whole reason nothing in this build can abandon the channel.
+	cp := env.Receipt(t, stream)
+	t.Cleanup(func() {
+		c, done := context.WithTimeout(context.Background(), 30*time.Second)
+		defer done()
+		_, _ = abort.AbandonPending(c, env.Alice.Lightning, cp, alwaysConfirm)
+	})
+	if !pendingOpen(t, env, cp) {
+		t.Fatalf("%s should be pending on this node before the recovery", cp)
+	}
+
+	rep, err := j.Recover(ctx, env.Alice.Lightning, runID, alwaysConfirm)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(rep.Cancelled) != 1 || !rep.Cancelled[0].AlreadyGone {
+		t.Fatalf("want the shim cancel to report AlreadyGone, got %+v", rep)
+	}
+	if !rep.Clean() {
+		t.Fatalf("an already-gone shim is not a failure: %v", rep.Failures)
+	}
+
+	// The cost the old row denied: the channel is still there, and the peer is
+	// holding its side of it.
+	if !pendingOpen(t, env, cp) {
+		t.Fatalf("%s stopped being pending, which this recovery had no way to do", cp)
+	}
+	if env.InMempool(t, funded.TxID) {
+		t.Fatalf("funding tx %s reached the mempool — nothing here may publish",
+			funded.TxID)
+	}
+
+	r := load(t, j, runID)
+	if got := r.Channels[0].State; got != journal.ChanVerified {
+		t.Errorf("the channel is journalled as %s while it is pending in LND at "+
+			"%s; the row must still be %s", got, cp, journal.ChanVerified)
+	}
+	if r.State != journal.StateAborting {
+		t.Errorf("run is %s, want %s: %s is still standing", r.State,
+			journal.StateAborting, cp)
+	}
+	if len(mustUnfinished(t, j)) != 1 {
+		t.Error("the run is not listed for recovery, so nothing brings the " +
+			"operator back to a channel the peer is holding until clock B runs out")
+	}
+	target, err := r.AbortTarget()
+	if err != nil {
+		t.Fatalf("AbortTarget: %v", err)
+	}
+	if len(target.Shims) != 1 || target.Shims[0] != stream.PendingChanID {
+		t.Errorf("a second recovery does not pick it up: %+v", target)
 	}
 }
 
