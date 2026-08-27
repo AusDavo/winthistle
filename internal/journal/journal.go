@@ -94,7 +94,13 @@ const (
 	// StateAborting: an abort is in progress, or one was interrupted partway.
 	StateAborting State = "aborting"
 
-	// StateAborted: the abort completed with nothing left behind.
+	// StateAborted: the abort completed with nothing left behind — and since #32
+	// both halves of that are established rather than one standing in for the
+	// other. Nothing failed, which is abort.Report.Clean(), *and* a re-read of
+	// this run's own rows through AbortTarget finds no channel to abandon and no
+	// shim to cancel. Clean() alone is a fact about the calls, not about what
+	// they left: a shim that came back already gone is not a failure and can
+	// still leave a channel standing. See Recover.
 	StateAborted State = "aborted"
 )
 
@@ -117,8 +123,30 @@ const (
 	// ChanAbandoned: removed from LND by the abort path.
 	ChanAbandoned ChannelState = "abandoned"
 
-	// ChanCancelled: its shim was cancelled before it ever reached pending.
+	// ChanCancelled: this run cancelled its shim, and LND accepted the cancel.
+	//
+	// It is a cause with an actor in it, and it is written only where this build
+	// was the actor — abort.CancelShim returned nil. A shim that was already
+	// gone when the abort asked is not this state: see ChanShimGone, and
+	// recordAbort, which is where the two are told apart. #32 item 1.
 	ChanCancelled ChannelState = "cancelled"
+
+	// ChanShimGone: LND held no funding intent under this pending channel id
+	// when the abort asked, and this journal had never verified the channel.
+	//
+	// Both halves are needed and only the pair is terminal. The absence on its
+	// own says nothing about the channel — abort.ErrNoShim is matched off LND's
+	// own text and means "no funding intent under that id", which a shim that
+	// was never registered, one a previous cancel took, one an LND restart
+	// dropped and one that CompleteReservation consumed all produce alike. What
+	// settles it here is the row: psbt_verify is what starts LND's funding flow
+	// after the inversion, so a channel this run never verified is one LND never
+	// created, and there is nothing of it to abandon.
+	//
+	// It is deliberately never written over a verified row. There the same
+	// absence is exactly what a channel that reached chan_pending looks like
+	// from here, and that row is left as the journal last established it.
+	ChanShimGone ChannelState = "shim_gone"
 )
 
 // SignerState is how far one signer has got with a PSBT.

@@ -190,6 +190,13 @@ func (r *Run) AbortTarget() (abort.Target, error) {
 			// size, and closing it needs a lookup this function cannot make: it
 			// has no client, and the journal cannot map a pending channel point
 			// back to a pending channel id.
+			//
+			// What recordAbort does with that answer is #32 item 1, and closing
+			// the window is still not on offer: the row is left as it stands
+			// rather than being overwritten with ChanCancelled, so this channel
+			// keeps being emitted here, the run keeps out of StateAborted, and
+			// the operator is told to go and look. Saying it honestly is what
+			// changed; the window is the same size it always was.
 			t.Shims = append(t.Shims, c.PendingChanID)
 		}
 	}
@@ -237,13 +244,42 @@ func (j *Journal) Recover(ctx context.Context, cli lnrpc.LightningClient,
 	recErr := j.recordAbort(ctx, runID, rep)
 
 	if runErr == nil && recErr == nil && rep.Clean() {
-		if err := j.tx(ctx, func(tx *sql.Tx) error {
-			return j.setState(ctx, tx, runID, StateAborted)
-		}); err != nil {
+		// Clean() is not the whole question and used to be treated as though it
+		// were. It establishes that no step failed; StateAborted claims that
+		// nothing was left behind, and a shim that came back already gone is not
+		// a failure and can still leave a channel standing. #32 item 1.
+		left, err := j.leftStanding(ctx, runID)
+		if err != nil {
 			return rep, err
+		}
+		if left == 0 {
+			if err := j.tx(ctx, func(tx *sql.Tx) error {
+				return j.setState(ctx, tx, runID, StateAborted)
+			}); err != nil {
+				return rep, err
+			}
 		}
 	}
 	return rep, errors.Join(runErr, recErr)
+}
+
+// leftStanding re-reads the run and asks AbortTarget how much of it is still
+// there.
+//
+// It is the same function an abort acts on, deliberately: "nothing left behind"
+// must not be able to drift from "nothing an abort would touch", and a second
+// list of states here is how it would. The cost is one extra Load on a path that
+// has just made n gRPC calls.
+func (j *Journal) leftStanding(ctx context.Context, runID string) (int, error) {
+	r, err := j.Load(ctx, runID)
+	if err != nil {
+		return 0, err
+	}
+	t, err := r.AbortTarget()
+	if err != nil {
+		return 0, err
+	}
+	return len(t.Channels) + len(t.Shims), nil
 }
 
 // recordAbort writes an abort.Report back into the journal.
@@ -263,7 +299,40 @@ func (j *Journal) recordAbort(ctx context.Context, runID string, rep *abort.Repo
 			}
 		}
 		for _, c := range rep.Cancelled {
-			if err := j.setChannelState(ctx, tx, runID, c.ID, ChanCancelled); err != nil {
+			st := ChanCancelled
+			if c.AlreadyGone {
+				// #32 item 1. This loop used to write ChanCancelled for every
+				// entry, discarding c.AlreadyGone — whose own doc comment names
+				// this consumer, "which matters when reading a journal after the
+				// fact" — so a shim nothing here cancelled was journalled as one
+				// this run cancelled, over a row that may have been the stronger
+				// claim.
+				//
+				// What CancelShim established is an absence, and an absence is
+				// not a cause. What it means is decided by the one thing this
+				// journal does know: how far this channel itself got.
+				was, err := j.channelStateIn(ctx, tx, runID, c.ID)
+				if err != nil {
+					return err
+				}
+				if was != ChanShimRegistered {
+					// A verified row is left exactly as it stands, and so is
+					// anything further on. psbt_verify with skip_finalize
+					// completes LND's funding flow, so a missing intent there is
+					// what a channel that reached chan_pending looks like from
+					// here — and the outpoint it reached is one this journal
+					// never recorded, so nothing in this build can abandon it.
+					//
+					// Leaving the row is the whole remedy: AbortTarget goes on
+					// emitting it, Recover's leftStanding keeps the run out of
+					// StateAborted, and prose.RecoveryOutcome tells the operator
+					// which channel to go and look at. See AbortTarget's own
+					// paragraph on the crashed process, above.
+					continue
+				}
+				st = ChanShimGone
+			}
+			if err := j.setChannelState(ctx, tx, runID, c.ID, st); err != nil {
 				return err
 			}
 		}

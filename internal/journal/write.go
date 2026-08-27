@@ -389,6 +389,25 @@ func (j *Journal) touch(ctx context.Context, tx *sql.Tx, runID string) error {
 	return affectedOne(res, runID)
 }
 
+// channelStateIn reads one channel's current state inside a transaction, so a
+// write can be guarded by what the journal has already established rather than
+// simply overwriting it. MarkPending's outpoint guard is the precedent.
+func (j *Journal) channelStateIn(ctx context.Context, tx *sql.Tx, runID string,
+	id lnd.PendingChanID) (ChannelState, error) {
+
+	var st string
+	err := tx.QueryRowContext(ctx,
+		`SELECT state FROM channels WHERE run_id = ? AND pending_chan_id = ?`,
+		runID, id.String()).Scan(&st)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("run %s has no channel %s: %w", runID, id, ErrNoRun)
+	}
+	if err != nil {
+		return "", fmt.Errorf("reading channel %s of run %s: %w", id, runID, err)
+	}
+	return ChannelState(st), nil
+}
+
 func (j *Journal) setChannelState(ctx context.Context, tx *sql.Tx, runID string,
 	id lnd.PendingChanID, st ChannelState) error {
 

@@ -495,6 +495,106 @@ func TestRecoverLeavesAFailedAbortOpen(t *testing.T) {
 	}
 }
 
+// A shim that was already gone when the abort asked is not a shim this run
+// cancelled, and over a verified row it is not even evidence that the channel is
+// gone. #32 item 1.
+//
+// The row is left exactly as it stood. ChanCancelled says "its shim was
+// cancelled before it ever reached pending", which is a cause with an actor in
+// it and an ordering claim on top, and abort.CancelShim established neither —
+// abort.ErrNoShim is matched off LND's own text and says only that LND holds no
+// funding intent under that id. psbt_verify carries skip_finalize, so a verified
+// channel is one whose funding flow LND completed; the intent being gone is
+// exactly what that looks like from here.
+//
+// So the run also stays out of StateAborted: "the abort completed with nothing
+// left behind" is not established by nothing having failed.
+func TestAnAlreadyGoneShimOverAVerifiedRowIsLeftAlone(t *testing.T) {
+	ctx := context.Background()
+	j := open(t)
+	chanIDs := ids(t, 1)
+	const runID = "run-gone-verified"
+
+	if err := j.Begin(ctx, runID, batch(t, chanIDs)); err != nil {
+		t.Fatal(err)
+	}
+	if err := j.MarkVerified(ctx, runID, chanIDs[0]); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := j.Recover(ctx, &fakeLN{shimGone: true}, runID, alwaysConfirm)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(rep.Cancelled) != 1 || !rep.Cancelled[0].AlreadyGone {
+		t.Fatalf("want one already-gone shim, got %+v", rep)
+	}
+	if !rep.Clean() {
+		t.Fatalf("an already-gone shim is not a failure: %v", rep.Failures)
+	}
+
+	r := load(t, j, runID)
+	if got := r.Channels[0].State; got != journal.ChanVerified {
+		t.Errorf("the channel is journalled as %s; the abort established only that "+
+			"LND holds no intent under that id, so the row must still be %s",
+			got, journal.ChanVerified)
+	}
+	if r.State != journal.StateAborting {
+		t.Errorf("run is %s, want %s: a channel this journal cannot abandon is "+
+			"still standing, so the abort did not complete with nothing left behind",
+			r.State, journal.StateAborting)
+	}
+	if len(mustUnfinished(t, j)) != 1 {
+		t.Error("the run is not listed for recovery, so nothing will ever bring " +
+			"the operator back to a channel the peer is still holding")
+	}
+	target, err := r.AbortTarget()
+	if err != nil {
+		t.Fatalf("AbortTarget: %v", err)
+	}
+	if len(target.Shims) != 1 || target.Shims[0] != chanIDs[0] {
+		t.Errorf("a second recovery does not pick the channel up: %+v", target)
+	}
+}
+
+// The other side of the same read, and the one place the absence is terminal.
+//
+// A channel this run never verified is one LND never created — psbt_verify is
+// what starts the funding flow — so a missing intent leaves nothing to abandon.
+// That pair is ChanShimGone, and it is what lets the run settle rather than
+// nagging forever over a shim nothing can do anything about. It is still not
+// ChanCancelled: nothing here cancelled anything.
+func TestAnAlreadyGoneShimOverAnUnverifiedRowSettlesTheRun(t *testing.T) {
+	ctx := context.Background()
+	j := open(t)
+	chanIDs := ids(t, 1)
+	const runID = "run-gone-unverified"
+
+	if err := j.Begin(ctx, runID, batch(t, chanIDs)); err != nil {
+		t.Fatal(err)
+	}
+
+	rep, err := j.Recover(ctx, &fakeLN{shimGone: true}, runID, alwaysConfirm)
+	if err != nil {
+		t.Fatalf("Recover: %v", err)
+	}
+	if len(rep.Cancelled) != 1 || !rep.Cancelled[0].AlreadyGone {
+		t.Fatalf("want one already-gone shim, got %+v", rep)
+	}
+
+	r := load(t, j, runID)
+	if got := r.Channels[0].State; got != journal.ChanShimGone {
+		t.Errorf("the channel is journalled as %s, want %s", got, journal.ChanShimGone)
+	}
+	if r.State != journal.StateAborted {
+		t.Errorf("run is %s, want %s: nothing was created under this shim and "+
+			"nothing is left of it", r.State, journal.StateAborted)
+	}
+	if len(mustUnfinished(t, j)) != 0 {
+		t.Error("a run with nothing left of it is still listed for recovery")
+	}
+}
+
 func TestBeginRefusesAnEmptyBatch(t *testing.T) {
 	ctx := context.Background()
 	j := open(t)
@@ -561,6 +661,11 @@ type fakeLN struct {
 	calls      int
 	cancels    int
 	abandonErr error
+
+	// shimGone makes the *first* cancel report an intent that is already gone,
+	// which is what a crashed run's shim cancel gets: CompleteReservation
+	// consumed the intent before the process ever asked.
+	shimGone bool
 }
 
 func (f *fakeLN) AbandonChannel(context.Context, *lnrpc.AbandonChannelRequest,
@@ -576,7 +681,7 @@ func (f *fakeLN) FundingStateStep(context.Context, *lnrpc.FundingTransitionMsg,
 	...grpc.CallOption) (*lnrpc.FundingStateStepResp, error) {
 	f.calls++
 	f.cancels++
-	if f.cancels > 1 {
+	if f.shimGone || f.cancels > 1 {
 		// LND's wording for an intent that is already gone, which is what a
 		// second cancel of the same shim gets.
 		return nil, errors.New("no funding intent found for pendingChannelID(...)")
