@@ -155,7 +155,7 @@ func TestSkipFinalizeReachesChanPendingWithNothingSigned(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("psbt_verify(skip_finalize) for the channel to %s (%s): %v\n"+
 				"If LND refuses skip_finalize outright this is the disproof, and "+
-				"docs/replan-2026-08.md is void", short(st.Peer), st.PendingChanID, err)
+				"the whole inverted sequence is void", short(st.Peer), st.PendingChanID, err)
 		}
 		t.Logf("psbt_verify(skip_finalize) accepted for %s", short(st.Peer))
 	}

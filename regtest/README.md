@@ -118,8 +118,8 @@ Nothing this build does. The **descriptor-import rescan** and the
 rescan, so a right birthday and a wrong one find precisely the same nothing, and
 this node cannot be made meaningfully pruned — and a second harness in
 `signet/` existed for them. Both paths belonged to `winthistle setup` and to the
-descriptor import, which item 5 of `docs/replan-2026-08.md` deleted, so the
-signet harness went with them.
+descriptor import, which the 2026-08 rewrite deleted, so the signet harness went
+with them.
 
 This harness does not substitute for the mainnet cold probe, which proves your node,
 your peers, your devices.

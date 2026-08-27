@@ -15,8 +15,8 @@ opens no socket except to your LND. It assumes you have Sparrow (or comparable),
 LND, and a wallet with coins in it — hot, cold, single-sig, multisig. Which of
 those does not matter to this program.
 
-Full spec: `docs/design.html`. Direction and rationale for the 2026-08 rewrite:
-`docs/replan-2026-08.md`. **This file holds invariants, rules and current state.
+Full spec: `docs/design.html`. Designs this tool used to have, and why each one
+went: `docs/superseded.md`. **This file holds invariants, rules and current state.
 The slice-by-slice account of how it got here lives in git history and PR
 bodies, and does not belong here.**
 

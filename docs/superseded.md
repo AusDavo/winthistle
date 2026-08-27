@@ -6,8 +6,9 @@ order to understand the current one. They are here instead, because *why a thing
 was removed* is still worth having written down — it is what stops it being
 reintroduced by somebody who only sees the gap.
 
-They belong with [`replan-2026-08.md`](replan-2026-08.md), which is the plan that
-removed most of them and carries the account of each item as built.
+The plan that removed most of them was `docs/replan-2026-08.md`, finished on
+2026-08-26 and deleted once it was; git has it, and the account of each item as
+built is in the pull requests that did the work.
 
 ---
 

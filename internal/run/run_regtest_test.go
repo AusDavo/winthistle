@@ -372,18 +372,6 @@ func writeFile(t *testing.T, path, body string) string {
 
 func itoa(n int64) string { return strconv.FormatInt(n, 10) }
 
-// TestARejectedWalletStopsTheRunBeforeAnythingIsAsked lived here, and it went
-// with the gate it was about.
-//
-// setup.Check read back a human's verdict on the cold wallet's descriptor pair,
-// first, before LND was asked anything, and the test's real subject was that
-// placement rather than the refusal — that the peer section had not printed when
-// it fired. `run` no longer selects coins, derives addresses or asks Core for
-// change, so it never reads those descriptors and a refusal about them would have
-// no subject. The gate itself is unchanged and still tested, in internal/setup and
-// through `winthistle doctor`, which is where somebody setting a wallet up meets
-// it. Item 5 of docs/replan-2026-08.md deletes the package.
-
 // cancelDuringSigning cancels the run at step 7, which is where an operator's
 // Ctrl-C is most likely to land and where it costs the most.
 //

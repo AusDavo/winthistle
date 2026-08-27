@@ -13,8 +13,8 @@ import (
 // that closes it.
 //
 // One socket and one file: LND, and the run journal. Bitcoin Core was dialled
-// here too, for the fee estimate and for testmempoolaccept, and item 5 of
-// docs/replan-2026-08.md removed both.
+// here too, for the fee estimate and for testmempoolaccept, and the 2026-08
+// rewrite removed both.
 //
 // It lives here rather than in cmd/winthistle because it is the same set of
 // connections for every command that touches a batch, and because a test that
