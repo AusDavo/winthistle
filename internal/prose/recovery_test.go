@@ -270,10 +270,10 @@ func TestRecoveryListSaysWhenSomethingMustNotBeTouched(t *testing.T) {
 	// whether one is being driven right now — an arming run is in this list for
 	// its whole life — so the screen must not assert that they stopped.
 	mustContain(t, got, "Unless something is driving one right now, they stopped")
-	// A capital in the middle of a sentence. theyThey returned "They" because
-	// that clause used to open the paragraph, and moving it left "…right now,
-	// They stopped…" on the screen — which a passing test for the new clause did
-	// not notice and a browser did.
+	// A capital in the middle of a sentence. The clause used to open the
+	// paragraph, so the copy capitalised it; moving it left "…right now, They
+	// stopped…" on the screen — which a passing test for the new clause did not
+	// notice and a reader did.
 	if strings.Contains(got, ", They ") || strings.Contains(got, ", It ") {
 		t.Errorf("a sentence restarts mid-clause with a capital:\n%s", got)
 	}

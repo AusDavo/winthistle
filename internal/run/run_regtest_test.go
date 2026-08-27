@@ -46,8 +46,8 @@ type sparrow struct {
 	// would be testing the fee finding rather than the sequence.
 	feeRate float64
 
-	// signedWith records the packet handed back at step 7, so a test can prove
-	// the bytes that reached the publish call are these.
+	// signed records the packet handed back at step 7, so a test can prove the
+	// bytes that reached the publish call are these.
 	signed []byte
 
 	// beforeSign runs just before the wallet answers step 7. It is where a test
