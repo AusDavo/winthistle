@@ -210,6 +210,15 @@ says so where somebody editing that switch would read it.
   whatever slice next touches those functions; they are comments, and hunting
   them down as a sweep is the process this repository retired.
 
+- **No test takes `run.Do` past the publish, so steps 8 and 9 print unexercised.**
+  The two regtest tests that arm a batch set `StopBeforePublish`, and the other
+  three fail inside the armed window on purpose — so `arm.Publish`'s screen,
+  `Published <txid>`, `prose.StagePublished` and the whole of `settlePhase` have
+  never rendered under `go test`. A green suite is not evidence that the last two
+  screens of a live batch are legible, and the one time they ran for real was the
+  mainnet batch on 2026-08-26. Closing it means a regtest run that publishes,
+  which nothing prevents; it has simply never been written.
+
 - **When a report renders a verdict, check the zero value is not a verdict.** A
   `bool` that means "it failed" cannot also mean "we never tried", and a `switch`
   with no `default` arm renders an unknown value as "nothing happened". Both
