@@ -82,6 +82,7 @@ import (
 	"io"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/AusDavo/winthistle/internal/abort"
 	"github.com/AusDavo/winthistle/internal/arm"
@@ -247,6 +248,19 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 		return res, nil
 	}
 
+	section(d.Out, "Step 8 — publish, once")
+	// What this screen owes the operator is the checks that stand between the
+	// heading and the RPC, because they all run inside arm.Publish and none of
+	// them prints anything when it passes. Naming them here is not reassurance:
+	// it is the difference between a program that publishes what it was handed
+	// and one that publishes only what it pinned, and step 8 is the last screen
+	// on which that distinction can still be read.
+	fmt.Fprint(d.Out, prose.Para("One call, and this program has no second. The "+
+		"bytes are hashed again before the call goes out and refused if they are "+
+		"not the txid LND committed to at psbt_verify (I-3); the transaction "+
+		"goes on disk first, because nothing else will rebroadcast it; and the "+
+		"journal refuses the call unless it counts every channel at "+
+		"chan_pending."))
 	if err := arm.Publish(ctx, d.LND.WalletKit, d.Journal, armed, final.RawTx); err != nil {
 		// Deliberately no abort here, and no attempt to decide whether the
 		// transaction went out. journal.MarkPublishing lands before the RPC, so
@@ -258,6 +272,7 @@ func Do(ctx context.Context, d Deps, o Options) (*Result, error) {
 	}
 	res.Published = true
 	fmt.Fprintf(d.Out, "\nPublished %s\n\n", armed.TxID)
+	fmt.Fprint(d.Out, prose.StoppingHere(prose.StagePublished, len(armed.Channels)))
 
 	res.Settlement = settlePhase(ctx, d, o, armed, p)
 	return res, nil
@@ -296,7 +311,9 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	}
 
 	// 1. The peers, free tier. No stream, no clock.
-	section(d.Out, "Phase 0 — the peers")
+	act(d.Out, "Act I — nothing has been asked of anyone")
+	fmt.Fprint(d.Out, "\n", prose.StoppingHere(prose.StageNothingAsked, 0))
+	section(d.Out, "Step 1 — who you are opening to")
 	facts, err := peers.Check(ctx, d.LND.Lightning, o.Batch.Wants())
 	if err != nil {
 		return p, fmt.Errorf("the peer pre-flight: %w", err)
@@ -311,7 +328,7 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 
 	// 2. The probe, only when asked, and then the gate it creates.
 	if o.Probe {
-		section(d.Out, "Phase 0 — the shim probe")
+		section(d.Out, "Step 1 — the shim probe")
 		fmt.Fprint(d.Out, prose.Para("A probe that the peer accepts is step 2 with "+
 			"the answer thrown away: same RPC, same reservation, same ten minutes. "+
 			"shim_cancel is local — it deletes our own map entry and sends the peer "+
@@ -333,7 +350,7 @@ func prepare(ctx context.Context, d Deps, o Options) (*prepared, error) {
 	// 4. The anchor reserve, which is about this node's own hot wallet and is
 	//    the one thing that can refuse step 5 for a reason unrelated to the
 	//    batch. A shortfall is not fatal here: the plan pays it as an output.
-	section(d.Out, "Phase 0 — the anchor reserve")
+	section(d.Out, "Step 1 — this node's anchor reserve")
 	p.finding, err = reserve.Check(ctx, d.LND.WalletKit, arm.BatchOf(p.chans))
 	if err != nil {
 		return p, fmt.Errorf("the anchor-reserve pre-flight: %w", err)
@@ -406,7 +423,8 @@ func waitForPeers(ctx context.Context, d Deps, probes []peers.Probe) error {
 func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result) (
 	*arm.Armed, *combine.Finalized, error) {
 
-	section(d.Out, "Phase 1 — the armed window")
+	act(d.Out, "Act II — the peers' ten minutes, and nothing is signed")
+	section(d.Out, "Step 2 — asking each peer to hold a slot")
 
 	streams, err := arm.Open(ctx, d.LND.Lightning, p.chain, p.chans)
 	var opened *arm.OpenError
@@ -444,6 +462,11 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	// lncfg.DefaultZombieSweeperInterval, and both are LND's defaults rather
 	// than anything a peer agreed to.
 	fmt.Fprint(d.Out, "\n", prose.StockLNDNote(false, true))
+	// The stage line goes after the attribution, not between it and the sentence
+	// it attributes: StockLNDNote says "the eleven minutes above", and above has
+	// to mean the line before it.
+	fmt.Fprint(d.Out, "\n", prose.StoppingHere(
+		prose.StageStreamsOpen, len(streams.All)))
 
 	// The Phase 0 finding was about the batch the operator approved. These are
 	// the streams that actually opened.
@@ -451,16 +474,23 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 		return nil, nil, err
 	}
 
-	// Step 3 and step 4: the recipients, and then the operator in their wallet.
-	// The addresses are printed in full and never abbreviated, because this table
-	// is the attribution — which peer gets which output, at what amount — and it
-	// is the last screen on which that is legible to a human. How they reach the
-	// wallet is the transport's business: FileWallet writes them as a CSV as well,
-	// and prints where. Whichever route they take, an output nobody named is what
-	// plan.Verify is for.
-	section(d.Out, "Step 4 — build the transaction in your wallet")
+	// Step 3 is the attribution; step 4 is the operator in their wallet. They
+	// were one screen until the rail put numbers on them and the order became
+	// visible: the recipients printed under step 4's heading, and the batch plan
+	// — which cannot be assembled until the packet exists — printed under an
+	// unnumbered one after it, so the run counted 4, then 3, then 5.
+	//
+	// The table is step 3 because the table is the attribution: which peer gets
+	// which output, at what amount, printed in full and never abbreviated,
+	// because this is the last screen on which that is legible to a human. How
+	// it reaches the wallet is the transport's business — FileWallet writes the
+	// same rows as a CSV and prints where. Whichever route they take, an output
+	// nobody named is what plan.Verify is for.
+	section(d.Out, "Step 3 — the plan")
 	pay := recipientsOf(streams, p)
 	fmt.Fprint(d.Out, recipientTable(pay))
+
+	section(d.Out, "Step 4 — build it in your wallet, and do not sign")
 	fmt.Fprint(d.Out, prose.Para("Pay exactly these recipients, choose your coins "+
 		"and the fee, and save the PSBT. Do not sign it yet: nothing is recoverable "+
 		"until step 6, so a transaction signed and broadcast before then would "+
@@ -495,14 +525,16 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 	if err != nil {
 		return nil, nil, fmt.Errorf("assembling the plan: %w", err)
 	}
-	section(d.Out, "The batch plan")
+	// The plan document opens step 5 rather than standing under a heading of its
+	// own: it is what the verification below runs against, so "here is the plan"
+	// and "here is whether it matched" are one screen and not two.
+	section(d.Out, "Step 5 — does it match the plan?")
 	fmt.Fprint(d.Out, batchPlan.Document())
 
 	// Ours first. LND's psbt_verify finds its own funding output and stops, so
 	// an output nobody named passes all n of its checks — and it pins the funding
 	// outpoint while it is at it, so a wrong output caught here costs a redo and
 	// one caught there costs a channel.
-	section(d.Out, "Step 5 — does it match the plan?")
 	v, err := batchPlan.Verify(unsigned)
 	if err != nil {
 		return nil, nil, fmt.Errorf("verifying the transaction your wallet built: %w", err)
@@ -525,20 +557,43 @@ func armWindow(ctx context.Context, d Deps, o Options, p *prepared, res *Result)
 
 	// Step 6, and it is the gate. Every channel becomes recoverable by
 	// force-close here, over a transaction nobody has signed.
+	//
+	// The heading is in the future tense and prints before the wait, which is
+	// deliberate on both counts. Nothing bounds this wait — a silent peer parks
+	// it until Ctrl-C — so a heading printed afterwards would leave the operator
+	// watching a blank screen with no idea what for. And a heading that said
+	// "every channel is now recoverable" would be asserting, before the receipts
+	// arrive, the one thing this step exists to establish. What has happened is
+	// the paragraph below's business, and it counts the channels itself.
+	section(d.Out, "Step 6 — every channel becomes recoverable")
 	armed, err := arm.Receipts(ctx, d.LND.Lightning, d.Journal, streams, verified)
 	if err != nil {
 		return nil, nil, err
 	}
-	fmt.Fprintf(d.Out, "\n%s", prose.Para(fmt.Sprintf("%d of %d channels reached "+
+	fmt.Fprint(d.Out, prose.Para(fmt.Sprintf("%d of %d channels reached "+
 		"chan_pending, with nothing signed. Every one of them is recoverable by "+
 		"force-close, the peers' ten minutes are no longer running, and nothing "+
 		"has been broadcast.", len(armed.Channels), len(streams.All))))
+	// This paragraph is about closing a channel, and it ends by naming the key
+	// that stops the run. It used to add "the teardown abandons", which is what
+	// stopping costs — and prose.StoppingHere says exactly that four lines
+	// below, under the act banner. Two statements of one fact, three lines
+	// apart, is the repeat the standing line exists to remove rather than
+	// create. The hazard here is its own: LND will not refuse a force-close on
+	// a pending channel, and that belongs to no other screen.
 	fmt.Fprint(d.Out, "\n", prose.Para("That recovery starts when the funding "+
 		"transaction confirms, so do not close anything to undo this. LND does "+
 		"not refuse a force-close on a pending channel: it would broadcast a "+
 		"commitment whose parent is nowhere, destroying the channel and "+
-		"recovering nothing. To stop here, Ctrl-C — the teardown abandons, and "+
-		"this program cannot close a channel at all."))
+		"recovering nothing. To stop here, Ctrl-C. This program cannot close a "+
+		"channel at all."))
+
+	act(d.Out, "Act III — past the gate, and every channel is already recoverable")
+	// len(armed.Channels), not len(streams.All). The count this line states is
+	// the one arm.Receipts established, and the two are the same number only
+	// because the step before it refused to return otherwise.
+	fmt.Fprint(d.Out, "\n", prose.StoppingHere(
+		prose.StageArmed, len(armed.Channels)))
 
 	// Written before the round rather than after it, so a crash mid-signing is
 	// legible as one. The journal refuses this unless the batch is armed.
@@ -717,7 +772,7 @@ func changeIn(o Options, unsigned []byte) (plan.Change, error) {
 func settlePhase(ctx context.Context, d Deps, o Options, armed *arm.Armed,
 	p *prepared) *settle.Result {
 
-	section(d.Out, "Phase 2 — settlement")
+	section(d.Out, "Step 9 — watch it confirm, and apply the policies")
 
 	window := o.SettleFor
 	if window <= 0 {
@@ -891,14 +946,32 @@ func unusable(f peers.Facts) string {
 		"for a channel", f.Connection, f.ConnectDetail)
 }
 
-func section(w io.Writer, title string) {
-	fmt.Fprintf(w, "\n%s\n%s\n\n", title, underline(len(title)))
+// act prints the banner for one of the three acts.
+//
+// The acts are the operator's cut of the sequence and they are not the phases
+// this package's functions are named for. Phase 1 is armWindow, which runs from
+// step 2 to step 7; the acts break between steps 6 and 7, because the gate is
+// what changes what it costs to stop. Both cuts are real and neither renames
+// the other, so the phase vocabulary stays in the comments and never prints.
+//
+// A banner is a position in the sequence, not a claim about the batch. What is
+// true of the channels is said by the step that established it.
+func act(w io.Writer, title string) {
+	fmt.Fprintf(w, "\n%s\n%s\n", title, rule(title, '='))
 }
 
-func underline(n int) string {
-	b := make([]byte, n)
+func section(w io.Writer, title string) {
+	fmt.Fprintf(w, "\n%s\n%s\n\n", title, rule(title, '-'))
+}
+
+// rule underlines a heading, counted in runes rather than bytes.
+//
+// Every heading in this file has an em dash in it, which is three bytes and one
+// column, so len() drew every underline two characters long.
+func rule(title string, c byte) string {
+	b := make([]byte, utf8.RuneCountInString(title))
 	for i := range b {
-		b[i] = '-'
+		b[i] = c
 	}
 	return string(b)
 }

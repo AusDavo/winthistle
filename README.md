@@ -253,16 +253,19 @@ counterparty who no longer knows about the channel. So the recovery screen names
 clock B in **blocks** — "peers give up at block 887,412, about 13 days" — rather
 than telling you there is time.
 
-## Step 4 in detail
+## Steps 3 and 4 in detail
 
 ```
-Step 4 — build the transaction in your wallet
+Step 3 — the plan
 
   channel 1  bitrefill         250,000 sat
       bcrt1q0y0m2xwq6xh3d3h6d6dqzmgyzc0gdz7zxr6c6c4h3fjqz9f4amqk8s2ea
 
   channel 2  acinq             250,000 sat
       bcrt1qhtl7hc8ckygznefeyjd37je92vspksmqg9dg7rrnsa0ls003c17bqhea9y
+
+Step 4 — build it in your wallet, and do not sign
+-------------------------------------------------
 
 Pay exactly these recipients, choose your coins and the fee,
 and save the PSBT. Do not sign it yet.
