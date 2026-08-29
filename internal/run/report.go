@@ -238,7 +238,12 @@ func reportArmed(w io.Writer, armed *arm.Armed, p *prepared) {
 			"only time it can be. The commitment signature these channels depend on "+
 			"lives in this node's channel database rather than in the protocol, so "+
 			"the backup plus the peer's data-loss protection is what recovers them "+
-			"if the database is lost. Store it off this box."))
+			"if the database is lost."))
+		fmt.Fprint(w, prose.Para("This export is not written anywhere. It is taken "+
+			"to prove the backup can be taken while every channel is pending, which "+
+			"is the only moment it can be, and the publish is refused without it. "+
+			"What to store off this box is the node's own channel.backup, the file "+
+			"LND maintains at backupfilepath."))
 	}
 }
 

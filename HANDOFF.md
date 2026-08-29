@@ -55,9 +55,24 @@ probing it and then opening a real channel with it are a fortnight apart.
   smallest existing channel was wrong about the minimum for three of five peers
   in the first live batch, because a node's smallest channel may be one *it*
   opened outbound, which its own inbound minimum never constrained. Only
-  `accept_channel` is authoritative, and it names the figure.
+  `accept_channel` is authoritative, and it names the figure. **A peer can also
+  refuse from above**: the second live batch met a `maxchansize` rejecting a size
+  that the same node's minimum had rejected for being too *small* an hour
+  earlier, so a peer that has just moved a limit for you has not necessarily
+  moved the one in the way.
+- **The median is the signal, not the smallest.** Step 1 prints both, and it is
+  the median against your ask that predicts a refusal: a node whose median
+  channel sits well above the size you are asking for is a node that mostly does
+  not take channels that size. In the second live batch the peer with a 5,000,000
+  sat median refused a 3,000,000 sat ask and the peer with a 2,500,000 sat median
+  accepted one, while both peers' smallest channels were far below the ask and
+  said nothing useful.
 - **`arm.Open` is sequential and fails fast**, so ordering the peers most likely
-  to refuse first makes a refusal free — nothing is opened behind it.
+  to refuse first makes a refusal free — nothing is opened behind it. **So order
+  the batch file by median descending.** The second live batch ordered by which
+  peer looked likeliest to be unreachable instead, which is the wrong axis, and
+  paid one shim for it; reordered, its next refusal cost nothing at all —
+  `0 already open, and cancellable`, no journal row, no files.
 - **`winthistle doctor` clean**, against the mainnet node, with the baked
   macaroon rather than `admin.macaroon`. It checks the credential by asking
   `CheckMacaroonPermissions` rather than by calling anything, so a clean doctor
@@ -99,9 +114,19 @@ probing it and then opening a real channel with it are a fortnight apart.
    confirmation takes neither the parent's deadline nor its cancellation.
 7. **Settlement carries on per member.** One channel that will not take its
    policy is retried for `settle.RetryWindow` and then named at the end with its
-   channel point; it never ends the loop for the rest. Check afterwards that
-   every policy actually landed — `getchaninfo --chan_point TXID:N`, reading the
-   side whose pubkey is ours.
+   channel point; it never ends the loop for the rest. **What proves a policy
+   landed is settle's own read of `failed_updates`**
+   (`internal/settle/settle.go`), which is where `UpdateChannelPolicy` hides a
+   refusal inside a successful response — `applied` in the report means LND
+   accepted the update, and the attempt count beside it is that loop working
+   through the transient `UNKNOWN`s. A graph read-back on top of that would be
+   `getchaninfo --chan_point TXID:N`, reading the side whose pubkey is ours, and
+   **the baked macaroon cannot run it**: `GetChanInfo` is not in
+   `internal/methods`, so the call comes back `permission denied`, and
+   `ListChannels`, which is registered, carries no routing policy. Use
+   `admin.macaroon` for that check or do not make it. **Do not register
+   `GetChanInfo` to make this line runnable** — the registry is the credential,
+   and widening it so a document's advice works is the wrong way round.
 
 ### Reading the journal afterwards
 
