@@ -549,8 +549,8 @@ matters, it is in the PR that made the decision.
 
 ## Repo hygiene
 
-This repo is **private and intended to go public**. Assume every commit will
-eventually be public.
+This repo is **public**. Every commit, and every line of every file in it, is
+public the moment it is pushed.
 
 - **Never commit a mainnet xpub.** A single one deanonymises the whole cold
   wallet's history, permanently, and git history cannot be un-published. Use
