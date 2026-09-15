@@ -8,7 +8,9 @@ reintroduced by somebody who only sees the gap.
 
 The plan that removed most of them was `docs/replan-2026-08.md`, finished on
 2026-08-26 and deleted once it was; git has it, and the account of each item as
-built is in the pull requests that did the work.
+built is in the pull requests that did the work — archived in
+[`pull-requests.md`](pull-requests.md), because the GitHub pages did not
+survive the history rewrite that preceded going public.
 
 ---
 

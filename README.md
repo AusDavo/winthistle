@@ -612,6 +612,10 @@ printed table, which is what the table is for.
   sequence, the two clocks, the hazard register, recovery. Read this first.
 - [`docs/superseded.md`](docs/superseded.md) — designs Winthistle used to have,
   and why each went. Written so that a gap is not mistaken for an oversight.
+- [`docs/pull-requests.md`](docs/pull-requests.md) — the twenty-nine merged pull
+  requests, bodies and all. Several are the only written account of why
+  something is the way it is; the repository's history was rewritten before it
+  went public and GitHub's own pages did not survive it.
 - `CLAUDE.md` — the invariants and the do-not-reintroduce list, with source
   citations.
 - `winthistle print-macaroon-command` — the `lncli bakemacaroon` line for the
