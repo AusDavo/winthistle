@@ -44,8 +44,7 @@ no signing.** That is the whole point of the inversion.
 **All six items of the 2026-08 replan are done.** The mainnet cold probe passed
 on 2026-08-26 (run `20260826-043441-9a8f28`, two channels, both to
 `chan_pending` with nothing signed), and the first live batch published the same
-evening: run `20260826-191016-d9407c`, five channels, 9,000,000 sat, txid
-`a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f60718293a4b5c6d7e8f90`, five of five
+evening: run `20260826-191016-d9407c`, five channels, 9,000,000 sat, five of five
 `chan_pending` with nothing signed, published once, confirmed — **signed from a
 2-of-3 cold-storage multisig**, which is the mainnet instance behind "which kind
 of wallet does not matter"; until then that claim rested on the harness's
