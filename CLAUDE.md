@@ -560,8 +560,7 @@ eventually be public.
   straight through it.
 - No macaroons, certs, cookies, `winthistle.toml`, or `*.db` — all gitignored;
   keep it that way.
-- Commit identity is `AusDavo <david@dpinkerton.com>`, not the client
-  address.
+- Commit identity is `AusDavo <david@dpinkerton.com>`, not the work address.
 - **Never `git checkout` an unstaged file.** This repository is worked on with
   everything unstaged. Copy it aside and copy it back.
 - **Never a bare `go test ./...`.** Parallel packages share one regtest node and
